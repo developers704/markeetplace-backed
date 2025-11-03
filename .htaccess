@@ -1,0 +1,4 @@
+RewriteEngine On
+RewriteCond %{HTTP:X-Forwarded-For} !^$
+RewriteRule .* - [E=HTTP_X_FORWARDED_FOR:%{HTTP:X-Forwarded-For}]
+RequestHeader set X-Real-IP %{REMOTE_ADDR}s

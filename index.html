@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live User Status Dashboard</title>
+    <style>
+        .user {
+            padding: 10px;
+            margin: 5px;
+            border: 1px solid #ddd;
+        }
+        .online { background-color: #90EE90; }
+        .offline { background-color: #FFB6C1; }
+    </style>
+</head>
+<body>
+    <h2>Live Users Status Dashboard</h2>
+    <div id="usersList"></div>
+
+    <script>
+        // WebSocket connection
+        const ws = new WebSocket('ws://localhost:9000/admin');
+
+        // Listen for WebSocket messages
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'statusUpdate') {
+                updateUserStatus(data.user);
+            }
+        };
+
+        // Initial data load - only once
+        fetch('http://localhost:9000/api/v1/sch/getAllUsers')
+            .then(res => res.json())
+            .then(displayUsers);
+
+        function displayUsers(data) {
+            const usersDiv = document.getElementById('usersList');
+            
+            // Display Members
+            data.members.forEach(member => {
+                usersDiv.innerHTML += `
+                    <div class="user ${member.isOnline ? 'online' : 'offline'}" id="user-${member._id}">
+                        <h3>${member.Name}</h3>
+                        <p>Email: ${member.email}</p>
+                        <p class="status">Status: ${member.isOnline ? 'Online' : 'Offline'}</p>
+                        <p class="lastActive">Last Active: ${new Date(member.lastActive).toLocaleString()}</p>
+                        <p>Type: Member</p>
+                    </div>
+                `;
+            });
+
+            // Display Students
+            data.students.forEach(student => {
+                usersDiv.innerHTML += `
+                    <div class="user ${student.isOnline ? 'online' : 'offline'}" id="user-${student._id}">
+                        <h3>${student.fullName}</h3>
+                        <p>Email: ${student.email}</p>
+                        <p class="status">Status: ${student.isOnline ? 'Online' : 'Offline'}</p>
+                        <p class="lastActive">Last Active: ${new Date(student.lastActive).toLocaleString()}</p>
+                        <p>Type: Student</p>
+                    </div>
+                `;
+            });
+        }
+
+        function updateUserStatus(user) {
+            const userDiv = document.getElementById(`user-${user.id}`);
+            if (userDiv) {
+                userDiv.className = `user ${user.isOnline ? 'online' : 'offline'}`;
+                userDiv.querySelector('.status').textContent = `Status: ${user.isOnline ? 'Online' : 'Offline'}`;
+                userDiv.querySelector('.lastActive').textContent = `Last Active: ${new Date(user.lastActive).toLocaleString()}`;
+            }
+        }
+    </script>
+</body>
+</html>

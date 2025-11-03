@@ -1,0 +1,124 @@
+const mongoose = require('mongoose');
+
+const orderSchema = new mongoose.Schema(
+  {
+    orderId: {
+      type: String,
+      unique: true,
+      required: true,
+    },
+    customer: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Customer',
+    },
+    guestInfo: {
+      name: String,
+      email: String,
+      phoneNumber: String,
+    },
+    sessionId: {
+      type: String, // For guest checkout sessions
+    },
+    items: [
+      // {
+      //   product: {
+      //     type: mongoose.Schema.Types.ObjectId,
+      //     ref: 'Product',
+      //     required: true,
+      //   },
+      //   quantity: {
+      //     type: Number,
+      //     required: true,
+      //   },
+      //   price: {
+      //     type: Number,
+      //     required: true,
+      //   },
+      // },
+
+      {
+        itemType: {
+          type: String,
+          enum: ['Product', 'SpecialProduct'],
+          required: true
+        },
+        product: {
+          type: mongoose.Schema.Types.ObjectId,
+          refPath: 'items.itemType',
+          required: true,
+        },
+        quantity: {
+          type: Number,
+          required: true,
+        },
+        price: {
+          type: Number,
+          required: true,
+        },
+        color: {
+          type: String,
+          default: null
+        }
+      },
+    ],
+    shippingAddress: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Address',
+    },
+    shippingStatus: {
+      type: String,
+      default: 'Pending',
+    },
+    guestAddress: {
+      street: String,
+      city: String,
+      postalCode: String,
+    },
+    shippingMethod: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'ShippingMethod',
+    },
+    subtotal: {
+      type: Number,
+      required: true,
+    },
+    shippingCost: {
+      type: Number,
+      // required: true,
+    },
+    grandTotal: {
+      type: Number,
+      required: true,
+    },
+    paymentMethod: {
+      type: String
+    },
+    paymentStatus: {
+      type: String,
+      default: 'Incomplete', // Options: Incomplete, Paid, Failed, Refunded, etc.
+    },
+    orderStatus: {
+      type: String,
+      default: 'Pending', // Options: Pending, Processing, Shipped, Delivered, Cancelled, etc.
+    },
+    specialInstructions: {
+      type: String,
+      trim: true,
+    },
+    couponUsed: {
+      type: String,
+    },
+    city: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'City',
+      required: true,
+  },
+  adminNotes: {
+    type: String,
+    trim: true
+  },  
+  },
+  { timestamps: true }
+);
+
+module.exports = mongoose.model('Order', orderSchema);

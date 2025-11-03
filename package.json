@@ -1,0 +1,38 @@
+{
+  "name": "ecommerce-70-percent",
+  "version": "1.0.0",
+  "description": "backend of ecommerce 70 percent of same work for every ecom website",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon api/server.js",
+    "start": "nodemon api/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@mailchimp/mailchimp_marketing": "^3.0.80",
+    "@sendgrid/mail": "^8.1.5",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "csv-parser": "^3.2.0",
+    "csv-stringify": "^6.6.0",
+    "dotenv": "^16.4.5",
+    "ecommerce-70-percent": "file:",
+    "express": "^4.19.2",
+    "express-session": "^1.18.1",
+    "json2csv": "^6.0.0-alpha.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.5.1",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^3.0.3",
+    "node-schedule": "^2.1.1",
+    "nodemailer": "^6.9.14",
+    "twilio": "^5.4.0",
+    "uuid": "^11.1.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
