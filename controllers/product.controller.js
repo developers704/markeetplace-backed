@@ -22,6 +22,7 @@ const Order = require('../models/order.model');
 const { Parser } = require('json2csv');
 const SpecialProduct = require('../models/specialProduct.model');
 const Customer = require('../models/customer.model');
+const Warehouse = require('../models/warehouse.model');
 
 
 
@@ -879,224 +880,391 @@ const createSampleCsvTemplate = (req, res) => {
 
 const getAllProducts = async (req, res) => {
   try {
-    const { city } = req.query;
-    let products = await Product.find()
+    const { city, warehouseFilter, warehouseId, page = 1, limit = 20 } = req.query;
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get main warehouse
+    const mainWarehouse = await Warehouse.findOne({ isMain: true }).lean().select('_id');
+
+    // Base query
+    let productQuery = Product.find();
+
+    // Apply warehouse filter
+    if (warehouseFilter || warehouseId) {
+      let inventoryMatchQuery = {};
+
+      if (warehouseFilter === 'main-warehouse' && mainWarehouse) {
+        inventoryMatchQuery = { warehouse: mainWarehouse._id, quantity: { $gt: 0 } };
+      } else if (warehouseFilter === 'out-to-store' && mainWarehouse) {
+        inventoryMatchQuery = { warehouse: { $ne: mainWarehouse._id }, quantity: { $gt: 0 } };
+      } else if (warehouseFilter === 'warehouse-plus-store' && mainWarehouse) {
+        inventoryMatchQuery = { quantity: { $gt: 0 } };
+      } else if (warehouseId) {
+        inventoryMatchQuery = { warehouse: warehouseId, quantity: { $gt: 0 } };
+      }
+
+      if (city) inventoryMatchQuery.city = city;
+
+      // Get matching products from inventory
+      const matchingInventories = await Inventory.find(inventoryMatchQuery)
+        .select('product')
+        .lean()
+        .distinct('product');
+
+      // Handle warehouse-plus-store (main OR store)
+      if (warehouseFilter === 'warehouse-plus-store' && mainWarehouse && matchingInventories.length > 0) {
+        const mainWarehouseProducts = await Inventory.find({
+          warehouse: mainWarehouse._id,
+          product: { $in: matchingInventories },
+          quantity: { $gt: 0 },
+          ...(city && { city })
+        }).distinct('product').lean();
+
+        const otherWarehouseProducts = await Inventory.find({
+          warehouse: { $ne: mainWarehouse._id },
+          product: { $in: matchingInventories },
+          quantity: { $gt: 0 },
+          ...(city && { city })
+        }).distinct('product').lean();
+
+        const allProducts = new Set([
+          ...mainWarehouseProducts.map(p => p.toString()),
+          ...otherWarehouseProducts.map(p => p.toString())
+        ]);
+
+        productQuery = Product.find({ _id: { $in: [...allProducts] } });
+      } else if (matchingInventories.length > 0) {
+        productQuery = Product.find({ _id: { $in: matchingInventories } });
+      } else {
+        return res.json({
+          products: [],
+          pagination: { page: pageNum, limit: limitNum, total: 0, totalPages: 0 }
+        });
+      }
+    }
+
+    // Total count
+    const total = await productQuery.clone().countDocuments();
+
+    // Fetch products
+    let products = await productQuery
+      .select('name sku image brand category subcategory subsubcategory prices variants inventory lifecycleStage isBestSeller isNewArrival isShopByPet discounts dealOfTheDay tags')
       .populate([
         { path: "category", select: "name" },
         { path: "subcategory", select: "name" },
-        { path: "subsubcategory", select: "name" }, // Add this line
+        { path: "subsubcategory", select: "name" },
         { path: "brand", select: "name" },
         { path: "tags", select: "name" },
+        { path: "prices.city", model: "City", select: "name" },
+        {
+          path: "variants",
+          select: "name value",
+          populate: { path: "variantName", select: "name" }
+        },
         {
           path: "discounts",
-          populate: {
-            path: "discountId", // Populate the discountId
-            select: "discountType value code", // Include the required fields
-          },
+          populate: { path: "discountId", select: "discountType value code cityIds" }
         },
-        { path: "dealOfTheDay", select: "startDateTime endDateTime discountType discountValue cities" },
-        { 
-          path: "variants",
-          populate: {
-            path: "variantName",
-            select: "name"
-          }
-        },
-        { path: "prices.city", model: "City" }, // Populate city in prices
-        {
-          path: "inventory",
-          populate: {
-            path: "warehouse",
-            select: "name location capacity isActive"
-          },
-          select: "city quantity vat warehouse locationWithinWarehouse lastRestocked batchId expiryDate barcode stockAlertThreshold expiryDateThreshold"
-        }
-
+        { path: "dealOfTheDay", select: "startDateTime endDateTime discountType discountValue cities" }
       ])
       .sort({ updatedAt: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
       .lean();
 
-    if (city) {
-      products = products
-        .map((product) => {
-          if (product.prices && Array.isArray(product.prices)) {
-            // Filter prices for the specified city
-            product.prices = product.prices.filter(
-              (price) => price.city && price.city._id.toString() === city
-            );
-            if (product.prices.length > 0) {
-              product.price = product.prices[0]; // Assign the first matching price
-            }
-          } else {
-            product.prices = [];
-          }
+    // Get inventory
+    const productIds = products.map(p => p._id);
+    let inventoryQuery = { product: { $in: productIds }, quantity: { $gt: 0 } };
 
-          // Handle city-specific inventory
-          // if (product.inventory && Array.isArray(product.inventory)) {
-          //   const cityInventory = product.inventory.find(
-          //     (inv) => inv.city && inv.city.toString() === city
-          //   );
-          //   product.isOutOfStock =
-          //     !cityInventory || cityInventory.quantity === 0;
-          // } else {
-          //   product.isOutOfStock = true;
-          // }
-
-          if (product.inventory && Array.isArray(product.inventory)) {
-            product.inventory = product.inventory.filter(
-              (inv) => inv.city && inv.city.toString() === city
-            );
-            product.isOutOfStock = product.inventory.length === 0 || 
-              product.inventory.every(inv => inv.quantity === 0);
-          } else {
-            product.inventory = [];
-            product.isOutOfStock = true;
-          }
-
-           // Filter discounts based on city
-           if (product.discounts && Array.isArray(product.discounts)) {
-            product.discounts = product.discounts.filter(
-              (discount) =>
-                discount.cityIds && discount.cityIds.some(
-                  (cityId) => cityId.toString() === city
-                )
-            );
-          } else {
-            product.discounts = [];
-          }
-
-         // Filter deal of the day based on city
-         if (product.dealOfTheDay && Array.isArray(product.dealOfTheDay)) {
-          product.dealOfTheDay = product.dealOfTheDay.filter((deal) =>
-            deal.cities.some((dealCityId) => dealCityId.toString() === city)
-          );
-        } else {
-          product.dealOfTheDay = [];
-        }
-
-          // Remove the `price` field
-          delete product.price;
-
-          return product;
-        })
-        .filter((product) => product.prices.length > 0); // Filter out products without prices
-    }else {
-      // If no city specified, calculate isOutOfStock based on all inventory
-      products = products.map((product) => {
-        if (product.inventory && Array.isArray(product.inventory)) {
-          product.isOutOfStock = product.inventory.length === 0 || 
-            product.inventory.every(inv => inv.quantity === 0);
-        } else {
-          product.inventory = [];
-          product.isOutOfStock = true;
-        }
-        return product;
-      });
+    if (warehouseFilter || warehouseId) {
+      if (warehouseFilter === 'main-warehouse' && mainWarehouse) {
+        inventoryQuery.warehouse = mainWarehouse._id;
+      } else if (warehouseFilter === 'out-to-store' && mainWarehouse) {
+        inventoryQuery.warehouse = { $ne: mainWarehouse._id };
+      } else if (warehouseId) {
+        inventoryQuery.warehouse = warehouseId;
+      }
     }
 
-    // Fetch inventory data for the filtered products
-    // const productsWithInventory = await Promise.all(
-    //   products.map(async (product) => {
-    //     const inventory = await Inventory.findOne(
-    //       { product: product._id, city } // Fetch inventory only for the specified city
-    //     ).select("city quantity vat"); // Return only required fields
+    if (city) inventoryQuery.city = city;
 
-    //     product.inventory = inventory || null; // Attach city-specific inventory
-    //     product.isOutOfStock = !inventory || inventory.quantity === 0; // Mark as out of stock if no inventory or zero quantity
-    //     return product;
-    //   })
-    // );
+    const inventories = await Inventory.find(inventoryQuery)
+      .select('product city quantity vat warehouse')
+      .populate('warehouse', 'name isMain')
+      .lean();
 
-    res.json(products);
+    // Group inventory by product
+    const inventoryMap = new Map();
+    inventories.forEach(inv => {
+      const pid = inv.product.toString();
+      if (!inventoryMap.has(pid)) inventoryMap.set(pid, []);
+      inventoryMap.get(pid).push({
+        city: inv.city,
+        quantity: inv.quantity,
+        vat: inv.vat,
+        warehouse: inv.warehouse
+      });
+    });
+
+    // Process products
+    products = products.map(product => {
+      // ✅ Filter prices by city
+      if (product.prices && Array.isArray(product.prices)) {
+        if (city) {
+          product.prices = product.prices.filter(
+            p => p.city && p.city._id.toString() === city
+          );
+        }
+        if (product.prices.length > 0) product.price = product.prices[0];
+      } else {
+        product.prices = [];
+      }
+
+      // ✅ Attach inventory
+      const productInventories = inventoryMap.get(product._id.toString()) || [];
+      product.inventory = productInventories;
+      product.isOutOfStock = productInventories.length === 0;
+
+      // ✅ Filter discounts by city
+      if (product.discounts && Array.isArray(product.discounts)) {
+        product.discounts = product.discounts.filter(d =>
+          d.discountId?.cityIds?.some(cityId => cityId.toString() === city)
+        );
+      } else {
+        product.discounts = [];
+      }
+
+      // ✅ Filter dealOfTheDay by city
+      if (product.dealOfTheDay && Array.isArray(product.dealOfTheDay)) {
+        product.dealOfTheDay = product.dealOfTheDay.filter(deal =>
+          deal.cities?.some(c => c.toString() === city)
+        );
+      } else {
+        product.dealOfTheDay = [];
+      }
+
+      return product;
+    });
+
+    // Remove products without prices when city is set
+    if (city) {
+      products = products.filter(p => p.prices && p.prices.length > 0);
+    }
+
+    // Remove out of stock when warehouse filter applied
+    if (warehouseFilter || warehouseId) {
+      products = products.filter(p => !p.isOutOfStock);
+    }
+
+    res.json({
+      products,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum)
+      }
+    });
+
   } catch (error) {
+    console.error(error);
     res.status(500).json({ message: error.message });
   }
 };
 
+
+
 const getPublicProducts = async (req, res) => {
   try {
-    const { city } = req.query;
-    let products = await Product.find({
+    const { city, warehouseFilter, warehouseId, page = 1, limit = 20 } = req.query;
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get main warehouse first (cached query)
+    const mainWarehouse = await Warehouse.findOne({ isMain: true }).lean().select('_id');
+
+    // Build base query
+    let productQuery = Product.find({
       lifecycleStage: { $in: ["active"] },
-    })
+    });
+
+    // Apply warehouse filter at query level for better performance
+    if (warehouseFilter || warehouseId) {
+      let inventoryMatchQuery = {};
+      
+      if (warehouseFilter === 'main-warehouse' && mainWarehouse) {
+        inventoryMatchQuery = { warehouse: mainWarehouse._id, quantity: { $gt: 0 } };
+      } else if (warehouseFilter === 'out-to-store' && mainWarehouse) {
+        inventoryMatchQuery = { warehouse: { $ne: mainWarehouse._id }, quantity: { $gt: 0 } };
+      } else if (warehouseFilter === 'warehouse-plus-store' && mainWarehouse) {
+        inventoryMatchQuery = { quantity: { $gt: 0 } };
+      } else if (warehouseId) {
+        inventoryMatchQuery = { warehouse: warehouseId, quantity: { $gt: 0 } };
+      }
+
+      if (city) {
+        inventoryMatchQuery.city = city;
+      }
+
+      // Get product IDs that match inventory criteria
+      const matchingInventories = await Inventory.find(inventoryMatchQuery)
+        .select('product')
+        .lean()
+        .distinct('product');
+
+      // Handle warehouse-plus-store separately
+      if (warehouseFilter === 'warehouse-plus-store' && mainWarehouse && matchingInventories.length > 0) {
+        const mainWarehouseProducts = await Inventory.find({
+          warehouse: mainWarehouse._id,
+          product: { $in: matchingInventories },
+          quantity: { $gt: 0 },
+          ...(city && { city })
+        }).distinct('product').lean();
+
+        const otherWarehouseProducts = await Inventory.find({
+          warehouse: { $ne: mainWarehouse._id },
+          product: { $in: matchingInventories },
+          quantity: { $gt: 0 },
+          ...(city && { city })
+        }).distinct('product').lean();
+
+        const mainSet = new Set(mainWarehouseProducts.map(p => p.toString()));
+        const otherSet = new Set(otherWarehouseProducts.map(p => p.toString()));
+        const bothProducts = [...mainSet].filter(p => otherSet.has(p));
+        
+        productQuery = Product.find({ 
+          _id: { $in: bothProducts },
+          lifecycleStage: { $in: ["active"] }
+        });
+      } else if (matchingInventories.length > 0) {
+        productQuery = Product.find({ 
+          _id: { $in: matchingInventories },
+          lifecycleStage: { $in: ["active"] }
+        });
+      } else {
+        return res.json({
+          products: [],
+          pagination: {
+            page: pageNum,
+            limit: limitNum,
+            total: 0,
+            totalPages: 0
+          }
+        });
+      }
+    }
+
+    // Get total count before pagination
+    const total = await productQuery.clone().countDocuments();
+
+    // Fetch products with minimal population
+    let products = await productQuery
+      .select('name sku image brand category subcategory subsubcategory prices variants lifecycleStage isBestSeller isNewArrival isShopByPet')
       .populate([
         { path: "category", select: "name" },
         { path: "subcategory", select: "name" },
-        { path: "subsubcategory", select: "name" }, // Add this line
+        { path: "subsubcategory", select: "name" },
         { path: "brand", select: "name" },
-        { path: "tags", select: "name" },
-        {
-          path: "discounts",
+        { path: "prices.city", model: "City", select: "name" },
+        { 
+          path: "variants",
+          select: "name value",
           populate: {
-            path: "discountId",
-            select: "discountType value code",
-          },
-        },
-        { path: "dealOfTheDay", select: "startDateTime endDateTime discountType discountValue cities" },
-        "variants",
-        { path: "prices.city", model: "City" }, // Populate city in prices
+            path: "variantName",
+            select: "name"
+          }
+        }
       ])
       .sort({ updatedAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
       .lean();
 
+    // Filter by city and get inventory in bulk
+    const productIds = products.map(p => p._id);
+    let inventoryQuery = { product: { $in: productIds }, quantity: { $gt: 0 } };
+    
+    if (warehouseFilter || warehouseId) {
+      if (warehouseFilter === 'main-warehouse' && mainWarehouse) {
+        inventoryQuery.warehouse = mainWarehouse._id;
+      } else if (warehouseFilter === 'out-to-store' && mainWarehouse) {
+        inventoryQuery.warehouse = { $ne: mainWarehouse._id };
+      } else if (warehouseId) {
+        inventoryQuery.warehouse = warehouseId;
+      }
+    }
+    
     if (city) {
-      products = products
-        .map((product) => {
-          if (product.prices && Array.isArray(product.prices)) {
-            // Filter prices by city
-            product.prices = product.prices.filter(
-              (price) => price.city && price.city._id.toString() === city
-            );
-            if (product.prices.length > 0) {
-              product.price = product.prices[0]; // Set the first matching price
-            }
-          } else {
-            product.prices = [];
-          }
-
-           // Filter discounts based on city
-           if (product.discounts && Array.isArray(product.discounts)) {
-            product.discounts = product.discounts.filter(
-              (discount) =>
-                discount.cityIds && discount.cityIds.some(
-                  (cityId) => cityId.toString() === city
-                )
-            );
-          } else {
-            product.discounts = [];
-          }
-
-          // Filter deal of the day based on city
-          if (product.dealOfTheDay && Array.isArray(product.dealOfTheDay)) {
-            product.dealOfTheDay = product.dealOfTheDay.filter((deal) =>
-              deal.cities.some((dealCityId) => dealCityId.toString() === city)
-            );
-          } else {
-            product.dealOfTheDay = [];
-          }
-
-          // Remove the `price` field
-          delete product.price;
-
-          return product;
-        })
-        .filter((product) => product.prices.length > 0); // Keep products with valid prices
+      inventoryQuery.city = city;
     }
 
-    // Fetch inventory data for the filtered products
-    const productsWithInventory = await Promise.all(
-      products.map(async (product) => {
-        const inventory = await Inventory.findOne(
-          { product: product._id, city } // Fetch inventory only for the specified city
-        ).select("city quantity vat"); // Return only required fields
+    // Fetch all inventories in one query
+    const inventories = await Inventory.find(inventoryQuery)
+      .select('product city quantity vat warehouse')
+      .populate('warehouse', 'name isMain')
+      .lean();
 
-        product.inventory = inventory || null; // Attach city-specific inventory
-        product.isOutOfStock = !inventory || inventory.quantity === 0; // Mark as out of stock if no inventory or zero quantity
-        return product;
-      })
-    );
+    // Group inventories by product
+    const inventoryMap = new Map();
+    inventories.forEach(inv => {
+      const productId = inv.product.toString();
+      if (!inventoryMap.has(productId)) {
+        inventoryMap.set(productId, []);
+      }
+      inventoryMap.get(productId).push({
+        city: inv.city,
+        quantity: inv.quantity,
+        vat: inv.vat,
+        warehouse: inv.warehouse
+      });
+    });
 
-    res.json(productsWithInventory);
+    // Process products and attach inventory
+    products = products.map((product) => {
+      // Filter prices by city
+      if (product.prices && Array.isArray(product.prices)) {
+        if (city) {
+          product.prices = product.prices.filter(
+            (price) => price.city && price.city._id.toString() === city
+          );
+        }
+        if (product.prices.length > 0) {
+          product.price = product.prices[0];
+        }
+      } else {
+        product.prices = [];
+      }
+
+      // Attach inventory
+      const productInventories = inventoryMap.get(product._id.toString()) || [];
+      product.inventory = productInventories;
+      product.isOutOfStock = productInventories.length === 0;
+      
+      return product;
+    });
+
+    // Filter out products without prices if city is specified
+    if (city) {
+      products = products.filter((product) => product.prices && product.prices.length > 0);
+    }
+
+    // Filter out out of stock products if warehouse filter is applied
+    if (warehouseFilter || warehouseId) {
+      products = products.filter((product) => !product.isOutOfStock);
+    }
+
+    res.json({
+      products,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum)
+      }
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

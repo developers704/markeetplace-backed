@@ -5,7 +5,8 @@ const warehouseSchema = new mongoose.Schema({
     location: { type: String },
     capacity: { type: Number },
     isActive: { type: Boolean, default: true },
-    description: { type: String }
+    description: { type: String },
+    isMain: { type: Boolean, default: false } // Main warehouse flag
 }, { timestamps: true });
 
 const Warehouse = mongoose.model('Warehouse', warehouseSchema);

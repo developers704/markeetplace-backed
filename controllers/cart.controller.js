@@ -414,6 +414,11 @@ const addToCart = async (req, res) => {
     }
 
     const cart = await getOrCreateCart(req);
+     
+    const validPrice = Number(price ?? item?.prices?.[0]?.amount ?? 0);
+    if (isNaN(validPrice) || validPrice <= 0) {
+      return res.status(400).json({ message: 'Invalid or missing price value' });
+    }
 
     let existingItem = cart.items.find(i => i.item?.toString() === itemId && i.itemType === itemType && i.color === (color || null));
 
@@ -427,7 +432,7 @@ const addToCart = async (req, res) => {
         itemType,
         item: itemObjectId, // ✅ Ensure correct format
         quantity,
-        price,
+        price: validPrice,
         color: color || null
       };
 

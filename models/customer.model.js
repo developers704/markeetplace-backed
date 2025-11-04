@@ -83,11 +83,17 @@ role: {
     ref: 'UserRole',
     required: true
 },
-warehouse: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Warehouse',
-        default: null
-},
+// warehouse: {
+//         type: mongoose.Schema.Types.ObjectId,
+//         ref: 'Warehouse',
+//         default: null
+// },
+   warehouse: [
+{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Warehouse'
+  }
+  ],
 lastLoginDate: {
     type: Date,
     default: Date.now

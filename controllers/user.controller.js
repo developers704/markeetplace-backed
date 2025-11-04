@@ -113,11 +113,19 @@ const createUser = async (req, res) => {
             return res.status(400).json({ message: 'Invalid department ID' });
         }
 
-        if (warehouseId) {
-            const warehouse = await Warehouse.findById(warehouseId);
-            if (!warehouse) {
-                return res.status(400).json({ message: 'Invalid warehouse ID' });
-            }
+        // if (warehouseId) {
+        //     const warehouse = await Warehouse.findById(warehouseId);
+        //     if (!warehouse) {
+        //         return res.status(400).json({ message: 'Invalid warehouse ID' });
+        //     }
+        // }
+
+        if (warehouseId && warehouseId.length > 0) {
+        const warehouses = await Warehouse.find({ _id: { $in: warehouseId } });
+  
+        if (warehouses.length !== warehouseId.length) {
+        return res.status(400).json({ message: 'One or more warehouse IDs are invalid' });
+        }
         }
 
         // Check if email already exists
