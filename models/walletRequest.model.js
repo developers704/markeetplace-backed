@@ -25,11 +25,13 @@ const walletRequestSchema = new mongoose.Schema({
     enum: ['pending', 'approved', 'rejected'],
     default: 'pending'
   },
+  selectedWarehouse: { type: mongoose.Schema.Types.ObjectId, ref: 'Warehouse' },
   adminResponse: {
     admin: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User'
     },
+
     responseDate: Date,
     comment: String
   }

@@ -17,7 +17,9 @@ const upload = require('../middlewares/uploadWarehouse.middleware');
 
 router.post('/', authMiddleware, adminLogger(), createWarehouse);
 router.post('/mass-import', upload.single('file'), WarehouseController.massImport);
-router.get('/', authMiddleware, getAllWarehouses);
+router.get('/', 
+    // authMiddleware, 
+    getAllWarehouses);
 // router.get('/export/excel', WarehouseController.exportToExcel);
 router.get('/export', WarehouseController.exportBalance);
 router.get('/template', WarehouseController.downloadTemplate);
