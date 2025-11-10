@@ -462,6 +462,110 @@ const getAllInventories = async (req, res) => {
 };
 
 
+// New endpoint: return only available inventories (quantity > 0) but with
+// full product details (image, prices, brand, categories) so frontend can
+// show product cards (price/image) without additional product lookups.
+const getAvailableInventoriesDetailed = async (req, res) => {
+    try {
+        const { city, warehouse } = req.query;
+
+        // Build base query - only available inventories
+        const query = { quantity: { $gt: 0 } };
+        if (city) query.city = city;
+        if (warehouse) query.warehouse = warehouse;
+
+        const inventories = await Inventory.find(query)
+            .populate('warehouse city')
+            .populate({
+                path: 'product',
+                // populate common product relations and include fields useful for frontend
+                populate: [
+                    { path: 'category', select: 'name' },
+                    { path: 'subcategory', select: 'name' },
+                    { path: 'subsubcategory', select: 'name' },
+                    { path: 'brand', select: 'name' },
+                    { path: 'prices.city', model: 'City' },
+                    // populate variants with variantName (and parentVariant) so frontend can build filters
+                    {
+                        path: 'variants',
+                        populate: {
+                            path: 'variantName',
+                            populate: { path: 'parentVariant', model: 'VariantName' }
+                        }
+                    },
+                    // include discounts and dealOfTheDay for offer/discount filters
+                    { path: 'discounts.discountId' },
+                    { path: 'dealOfTheDay' }
+                ],
+                select: 'name sku image gallery prices variationId tags brand type specialCategory specialSubcategory variants discounts dealOfTheDay'
+            });
+
+        // Transform shape if frontend needs simplified productInfo - keep both product and productInfo
+        const transformed = inventories.map(inv => {
+            const inventory = inv.toObject();
+
+            if (inventory.product) {
+                // Base productInfo used by frontend cards
+                const product = inventory.product;
+                const prices = Array.isArray(product.prices) ? product.prices : [];
+
+                // choose price for the requested city when possible, else pick first price
+                let chosenPrice = null;
+                if (city && prices.length) {
+                    chosenPrice = prices.find(p => p.city && String(p.city._id) === String(city)) || prices[0];
+                } else if (prices.length) {
+                    chosenPrice = prices[0];
+                }
+
+                inventory.productInfo = {
+                    _id: product._id,
+                    name: product.name,
+                    sku: product.sku,
+                    image: product.image || null,
+                    gallery: product.gallery || [],
+                    prices: prices,
+                    // convenience: a single representative price object
+                    price: chosenPrice,
+                    // expose variants and discounts for frontend filtering
+                    variants: product.variants || [],
+                    discounts: product.discounts || [],
+                    dealOfTheDay: product.dealOfTheDay || [],
+                    brand: product.brand || null,
+                    type: product.type || null
+                };
+            } else {
+                inventory.productInfo = { name: '', sku: '' };
+            }
+
+            // add an isOutOfStock flag (this endpoint already filters quantity>0, but keep flag for UI)
+            inventory.isOutOfStock = inventory.quantity <= 0;
+
+            // add a compact inventory summary on product for aggregated filters if needed
+            // (contains city id, quantity, vat and minimal warehouse info)
+            inventory.inventorySummary = {
+                city: inventory.city ? inventory.city._id || inventory.city : null,
+                quantity: inventory.quantity,
+                vat: inventory.vat,
+                warehouses: Array.isArray(inventory.warehouse)
+                    ? inventory.warehouse.map(w => ({ _id: w._id, name: w.name, isMain: !!w.isMain }))
+                    : []
+            };
+
+            return inventory;
+        });
+
+        // Optionally, sort low stock first (same as previous behavior)
+        const lowStock = transformed.filter(inv => inv.quantity <= inv.stockAlertThreshold);
+        const others = transformed.filter(inv => inv.quantity > inv.stockAlertThreshold);
+        const sorted = [...lowStock, ...others];
+
+        res.status(200).json(sorted);
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to fetch available inventories', error: error.message });
+    }
+};
+
+
 
 const deleteInventory = async (req, res) => {
     try {
@@ -1662,6 +1766,7 @@ module.exports = {
     updateInventory,
     deleteInventory,
     getAllInventories,
+    getAvailableInventoriesDetailed,
     createSampleInventoryCsvTemplate,
     bulkUploadInventory,
     deleteInventories,

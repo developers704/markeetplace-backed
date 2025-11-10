@@ -11,6 +11,10 @@ const orderSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Customer',
     },
+    warehouse: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Warehouse'
+    },  
     guestInfo: {
       name: String,
       email: String,

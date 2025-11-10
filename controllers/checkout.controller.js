@@ -1222,7 +1222,8 @@ const placeOrder = async (req, res) => {
   session.startTransaction();
 
   try {
-    const { cartId, shippingMethodId, paymentMethod, specialInstructions, couponCode, cityId } = req.body;
+    const { cartId, shippingMethodId, paymentMethod, specialInstructions, couponCode, cityId, warehouse  } = req.body;
+    const warehouseId = warehouse?._id || warehouse;
     const mainWarehouseId = '67b6c7b68958be48910ed415';
     const cart = await Cart.findById(cartId).populate('items.item');
     if (!cart) throw new Error('Cart not found');
@@ -1244,6 +1245,7 @@ const placeOrder = async (req, res) => {
     const order = new Order({
       orderId: generateOrderNumber(),
       customer: customer._id,
+      warehouse: warehouseId || (customer.warehouse ? customer.warehouse._id : null),
       items: cart.items.map(item => ({
         itemType: item.itemType,
         product: item.item._id,
@@ -1262,11 +1264,16 @@ const placeOrder = async (req, res) => {
       orderStatus: 'Pending',
       specialInstructions
     });
-
-    const customerWarehouse = await Warehouse.findById(customer.warehouse);
-    if (!customerWarehouse) {
-      throw new Error('Customer warehouse not found');
-    }
+const orders = await Order.find().populate('warehouse').populate('customer');
+    let customerWarehouse = null;
+    if (warehouseId) {
+      customerWarehouse = await Warehouse.findById(warehouseId);
+      if (!customerWarehouse) {
+        throw new Error('Customer warehouse not found');
+      }
+    } 
+    console.log(customerWarehouse);
+    
 
     // Get all special products with their details if there are any
     let productMap = {};
@@ -1487,15 +1494,21 @@ const placeOrder = async (req, res) => {
     });
     await customerNotification.save({ session });
 
-    await order.save({ session });
 
     // Clear cart
     cart.items = [];
     cart.total = 0;
     await cart.save({ session });
 
+    // ensure order has proper warehouse id saved (in case it was set after creation)
+    if (customerWarehouse && customerWarehouse._id) {
+      order.warehouse = customerWarehouse._id;
+      await order.save({ session });
+    }
+
     await session.commitTransaction();
-    res.status(201).json({ message: 'Order placed successfully', order });
+    // return order plus warehouse details for frontend
+    res.status(201).json({ message: 'Order placed successfully', order, warehouse: customerWarehouse });
   } catch (error) {
     await session.abortTransaction();
     res.status(400).json({ message: error.message });
@@ -1512,11 +1525,12 @@ const placeOrder = async (req, res) => {
 const getUserOrders = async (req, res) => {
   try {
       const userId = req.user._id;
-      const orders = await Order.find({ customer: userId })
+    const orders = await Order.find({ customer: userId })
           .populate({
               path: 'items.product',
               refPath: 'items.itemType'
           })
+      .populate('warehouse')
           .populate('shippingAddress')
           .populate('shippingMethod')
           .populate('city')
@@ -1657,6 +1671,7 @@ const getUserOrders = async (req, res) => {
 const getAllOrders = async (req, res) => {
   try {
     const orders = await Order.find()
+      .populate('warehouse')
       .populate({
         path: 'customer',
         populate: {
@@ -2199,6 +2214,7 @@ if (!customer || !customer.warehouse) {
   throw new Error('Customer or customer warehouse not found');
 }
 const customerWarehouse = customer.warehouse;
+console.log('Customer Warehouse:', customerWarehouse);
 
         // if (orderStatus === 'Disapproved') {
         //   const nonGwpSpecialItems = order.items.filter(item => 
