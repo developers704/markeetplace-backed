@@ -15,7 +15,7 @@ const adminNotificationSchema = new mongoose.Schema({
     },
     type: {
       type: String,
-      enum: ['INVENTORY_EXPIRY', 'NOTIFICATION','WALLET_REQUEST','LOW_STOCK', 'ORDER', 'REVIEW', 'PRODUCT', 'WAREHOUSE','ORDER', 'WALLET_REQUEST_UPDATE', 'CERTIFICATE'],
+      enum: ['INVENTORY_EXPIRY', 'NOTIFICATION','WALLET_REQUEST','LOW_STOCK', 'ORDER', 'REVIEW', 'PRODUCT', 'WAREHOUSE','ORDER', 'WALLET_REQUEST_UPDATE', 'CERTIFICATE','INFO'],
       required: true
     },
     content: { 

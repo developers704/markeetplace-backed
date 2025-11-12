@@ -8,9 +8,22 @@ const CSVProcessor  = require('../middlewares/fileProcessor');
 const fs = require('fs');
 const path = require('path');
 const xlsx = require('xlsx');
+const User = require('../models/user.model');
+const Customer = require('../models/customer.model');
+
+
 const createWarehouse = async (req, res) => {
     try {
-        const { name, initialBalance, initialSuppliesBalance, initialInventoryBalance} = req.body;
+        const { 
+            name, 
+            initialBalance, 
+            initialSuppliesBalance, 
+            initialInventoryBalance, 
+            corporateManager, 
+            districtManager
+        } = req.body;
+
+        // 1️⃣ Validation
         if (!name) {
             return res.status(400).json({ message: 'Warehouse name is required' });
         }
@@ -18,42 +31,113 @@ const createWarehouse = async (req, res) => {
         if (existingWarehouse) {
             return res.status(400).json({ message: 'Warehouse with this name already exists' });
         }
-        const warehouse = new Warehouse(req.body);
+
+        // 2️⃣ Create warehouse
+        const warehouse = new Warehouse({
+            name,
+            corporateManager,
+            districtManager,
+            ...req.body
+        });
         await warehouse.save();
+
+        // 3️⃣ Create wallets
         const warehouseWallet = new WarehouseWallet({
             warehouse: warehouse._id,
-            balance: initialBalance
+            balance: initialBalance || 0
         });
         await warehouseWallet.save();
 
-        // Create inventory wallet
         const inventoryWallet = new InventoryWallet({
             warehouse: warehouse._id,
             balance: initialInventoryBalance || 0
         });
         await inventoryWallet.save();
 
-         // Create supplies wallet
-         const suppliesWallet = new SuppliesWallet({
+        const suppliesWallet = new SuppliesWallet({
             warehouse: warehouse._id,
             balance: initialSuppliesBalance || 0
         });
         await suppliesWallet.save();
 
+        // 4️⃣ Add warehouse ID to managers’ profile
+        const updateOps = [];
+        if (districtManager) {
+            updateOps.push(
+                Customer.findByIdAndUpdate(
+                    districtManager,
+                    { $addToSet: { warehouse: warehouse._id } },
+                    { new: true }
+                )
+            );
+        }
+        if (corporateManager) {
+            updateOps.push(
+                Customer.findByIdAndUpdate(
+                    corporateManager,
+                    { $addToSet: { warehouse: warehouse._id } },
+                    { new: true }
+                )
+            );
+        }
+        await Promise.all(updateOps);
+
+        // 5️⃣ Create admin notification
         const adminNotification = new AdminNotification({
-            user: req.user.id, // Assuming the user creating the warehouse is an admin
+            user: req.user.id, // user creating the warehouse (admin)
             type: 'WAREHOUSE',
-            content: `New warehouse "${warehouse.name}" has been created`,
+            content: `New warehouse "${warehouse.name}" has been created.`,
             resourceId: warehouse._id,
             resourceModel: 'Warehouse',
             priority: 'medium'
         });
         await adminNotification.save();
-        res.status(201).json({ message: 'Warehouse created successfully', warehouse });
+
+        // 6️⃣ (Optional) Send notifications to managers
+        if (districtManager || corporateManager) {
+            const notifications = [];
+
+            if (districtManager) {
+                notifications.push(
+                    new AdminNotification({
+                        user: districtManager,
+                        type: 'INFO',
+                        content: `You have been assigned as District Manager for warehouse "${warehouse.name}".`,
+                        resourceId: warehouse._id,
+                        resourceModel: 'Warehouse',
+                        priority: 'medium'
+                    }).save()
+                );
+            }
+
+            if (corporateManager) {
+                notifications.push(
+                    new AdminNotification({
+                        user: corporateManager,
+                        type: 'INFO',
+                        content: `You have been assigned as Corporate Manager for warehouse "${warehouse.name}".`,
+                        resourceId: warehouse._id,
+                        resourceModel: 'Warehouse',
+                        priority: 'medium'
+                    }).save()
+                );
+            }
+
+            await Promise.all(notifications);
+        }
+
+        // ✅ Final response
+        res.status(201).json({
+            message: 'Warehouse created successfully',
+            warehouse
+        });
+
     } catch (error) {
-        res.status(400).json({ message: error.message });
+        console.error("Error creating warehouse:", error);
+        res.status(500).json({ message: error.message });
     }
 };
+
 
 // const getAllWarehouses = async (req, res) => {
 //     try {
@@ -144,46 +228,127 @@ const getWarehouseById = async (req, res) => {
 };
 
 const updateWarehouse = async (req, res) => {
-    try {
-        const { name , initialBalance, initialInventoryBalance,initialSuppliesBalance   } = req.body;
-        if (name) {
-            const existingWarehouse = await Warehouse.findOne({ name, _id: { $ne: req.params.id } });
-            if (existingWarehouse) {
-                return res.status(400).json({ message: 'Warehouse with this name already exists' });
-            }
-        }
-        const warehouse = await Warehouse.findByIdAndUpdate(req.params.id, req.body, { new: true });
-        if (!warehouse) return res.status(404).json({ message: 'Warehouse not found' });
+  try {
+    const {
+      name,
+      initialBalance,
+      initialInventoryBalance,
+      initialSuppliesBalance,
+      districtManager,
+      corporateManager,
+    } = req.body;
 
-        // if (initialBalance !== undefined) {
-        //     await WarehouseWallet.findOneAndUpdate(
-        //         { warehouse: warehouse._id },
-        //         { balance: initialBalance },
-        //         { new: true }
-        //     );
-        // }
-
-        if (initialInventoryBalance !== undefined) {
-            await InventoryWallet.findOneAndUpdate(
-                { warehouse: warehouse._id },
-                { balance: initialInventoryBalance },
-                { new: true, upsert: true }
-            );
-        }
-        
-        if (initialSuppliesBalance !== undefined) {
-            await SuppliesWallet.findOneAndUpdate(
-                { warehouse: warehouse._id },
-                { balance: initialSuppliesBalance },
-                { new: true, upsert: true }
-            );
-        }
-
-        res.status(200).json({ message: 'Warehouse updated successfully', warehouse });
-    } catch (error) {
-        res.status(400).json({ message: error.message });
+    // 🔹 Check for duplicate name
+    if (name) {
+      const existingWarehouse = await Warehouse.findOne({
+        name,
+        _id: { $ne: req.params.id },
+      });
+      if (existingWarehouse) {
+        return res
+          .status(400)
+          .json({ message: 'Warehouse with this name already exists' });
+      }
     }
+
+    // 🔹 Find current warehouse before updating
+    const oldWarehouse = await Warehouse.findById(req.params.id);
+    if (!oldWarehouse)
+      return res.status(404).json({ message: 'Warehouse not found' });
+
+    // 🔹 Update warehouse data
+    const warehouse = await Warehouse.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true }
+    );
+
+    // 🔹 Update wallets if balances provided
+    // if (initialBalance !== undefined) {
+    //   await WarehouseWallet.findOneAndUpdate(
+    //     { warehouse: warehouse._id },
+    //     { balance: initialBalance },
+    //     { new: true, upsert: true }
+    //   );
+    // }
+
+    if (initialInventoryBalance !== undefined) {
+      await InventoryWallet.findOneAndUpdate(
+        { warehouse: warehouse._id },
+        { balance: initialInventoryBalance },
+        { new: true, upsert: true }
+      );
+    }
+
+    if (initialSuppliesBalance !== undefined) {
+      await SuppliesWallet.findOneAndUpdate(
+        { warehouse: warehouse._id },
+        { balance: initialSuppliesBalance },
+        { new: true, upsert: true }
+      );
+    }
+
+    // 🔹 Handle manager reassignment
+    const updateOps = [];
+
+    // 🟢 Remove warehouse from old district manager if changed
+    if (
+      oldWarehouse.districtManager &&
+      oldWarehouse.districtManager.toString() !== districtManager
+    ) {
+      updateOps.push(
+        Customer.findByIdAndUpdate(oldWarehouse.districtManager, {
+          $pull: { warehouse: warehouse._id },
+        })
+      );
+    }
+
+    // 🟢 Remove warehouse from old corporate manager if changed
+    if (
+      oldWarehouse.corporateManager &&
+      oldWarehouse.corporateManager.toString() !== corporateManager
+    ) {
+      updateOps.push(
+        Customer.findByIdAndUpdate(oldWarehouse.corporateManager, {
+          $pull: { warehouse: warehouse._id },
+        })
+      );
+    }
+
+    // 🟢 Add warehouse to new district manager
+    if (districtManager) {
+      updateOps.push(
+        Customer.findByIdAndUpdate(
+          districtManager,
+          { $addToSet: { warehouse: warehouse._id } },
+          { new: true }
+        )
+      );
+    }
+
+    // 🟢 Add warehouse to new corporate manager
+    if (corporateManager) {
+      updateOps.push(
+        Customer.findByIdAndUpdate(
+          corporateManager,
+          { $addToSet: { warehouse: warehouse._id } },
+          { new: true }
+        )
+      );
+    }
+
+    await Promise.all(updateOps);
+
+    // ✅ Response
+    res
+      .status(200)
+      .json({ message: 'Warehouse updated successfully', warehouse });
+  } catch (error) {
+    console.error('Update Warehouse Error:', error);
+    res.status(400).json({ message: error.message });
+  }
 };
+
 
 const deleteWarehouse = async (req, res) => {
     try {

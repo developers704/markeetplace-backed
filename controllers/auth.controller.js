@@ -8,7 +8,8 @@ const crypto = require("crypto");
 const { sendEmail } = require('../config/sendMails');
 const Settings = require('../models/settings.model');
 const IPAccess = require("../models/IPAccess.model");
-const TermsAndConditions = require("../models/TermsAndConditions.model")
+const TermsAndConditions = require("../models/TermsAndConditions.model");
+const Warehouse = require("../models/warehouse.model");
 
 
 const generateSixDigitOTP = () => crypto.randomInt(100000, 1000000);
@@ -109,7 +110,11 @@ const userLogin = async (req, res) => {
 
 const customerLogin = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, warehouseId } = req.body;
+     if (!warehouseId) {
+      return res.status(400).json({ message: "Warehouse ID is required for login" });
+    }
+    console.log("Selected warehouseId:", warehouseId);
 
     // comment code 
     let clientIP = req.headers['x-real-ip'] 
@@ -163,10 +168,25 @@ const customerLogin = async (req, res) => {
     .populate({
         path: "role",
         select: "role_name permissions", // Ensure permissions are included
-      });
+      }).populate("warehouse");
     if (!customer) {
       return res.status(400).json({ message: "Invalid email or password" });
     }
+    // log('customer.warehouse:', customer);
+
+     // 3️⃣ Verify that the selected warehouse is assigned to this user
+    const hasAccess = customer.warehouse.some(
+      (w) => w._id.toString() === warehouseId
+    );
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        message: "You do not have access to this warehouse."
+      });
+    }
+ 
+
+
     const isMatch = await bcrypt.compare(password, customer.password);
     if (!isMatch) {
       return res.status(400).json({ message: "Invalid email or password" });
@@ -204,23 +224,20 @@ const customerLogin = async (req, res) => {
     const activeTerms = await TermsAndConditions.findOne({ isActive: true }).sort({ createdAt: -1 });
 
     console.log('customer.lastLoginDate', customer.lastLoginDate);
-    const token = jwt.sign(
-      {id: customer._id, 
-        isCustomer: true,
-        role: customer.role._id,        // Role ID add
-        warehouse: customer.warehouse._id, isCustomer: true
-       },
-      process.env.JWT_SECRET,
-      { expiresIn: "1y" }
-    );
-    const refreshToken = jwt.sign(
-      { id: customer._id, 
-        isCustomer: true,
-        role: customer.role._id,
-        warehouse: customer.warehouse._id},
-      process.env.JWT_REFRESH_SECRET,
-      { expiresIn: "7d" }
-    );
+
+       const tokenPayload = {
+      id: customer._id,
+      isCustomer: true,
+      role: customer.role?._id,
+      warehouse: warehouseId, 
+    };
+
+       const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, {
+      expiresIn: "1y",
+    });
+   const refreshToken = jwt.sign(tokenPayload, process.env.JWT_REFRESH_SECRET, {
+      expiresIn: "7d",
+    });
     const customerData = customer.toObject({ getters: true, versionKey: false });
     customerData.role.permissions = Object.fromEntries(customer.role.permissions); // Convert Map to object
 
@@ -248,16 +265,18 @@ const customerLogin = async (req, res) => {
         }
       };
     }
+       const warehouse = await Warehouse.findById(warehouseId);
 
     // customerData.oldLastLoginDate = oldLastLoginDate;
     res.status(200).json({
       token,
       refreshToken,
       customer: customerData,
+      selectedWarehouse: warehouse,
       securitySettings,
       lastProductCheckDate, // Send this to frontend
       currentLoginDate,
-     termsAndConditions: activeTerms ? {
+      termsAndConditions: activeTerms ? {
         // _id: latestTerms._id,
         // content: latestTerms.content
       } : null

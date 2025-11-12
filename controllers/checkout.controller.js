@@ -20,6 +20,8 @@ const Notification = require('../models/notification.model');
 const Warehouse = require('../models/warehouse.model');
 const SuppliesWallet = require('../models/suppliesWallet.model');
 const InventoryWallet = require('../models/inventoryWallet.model');
+const User = require('../models/user.model');
+const UserRole = require('../models/userRole.model');
 
 
 // Helper function to generate a random order number
@@ -1217,39 +1219,351 @@ const handleCODPayment = (order) => {
 // };
 
 
+// const placeOrder = async (req, res) => {
+//   const session = await mongoose.startSession();
+//   session.startTransaction();
+
+//   try {
+//     const { cartId, shippingMethodId, paymentMethod, specialInstructions, couponCode, cityId, warehouse  } = req.body;
+//     const warehouseId = warehouse?._id || warehouse;
+//     const mainWarehouseId = '67b6c7b68958be48910ed415';
+//     const cart = await Cart.findById(cartId).populate('items.item');
+//     if (!cart) throw new Error('Cart not found');
+
+//     const customer = await Customer.findById(req.user.id).populate('warehouse');
+//     if (!customer) throw new Error('Customer not found');
+
+//     // Separate items by type
+//     const normalProducts = cart.items.filter(item => item.itemType === 'Product');
+//     const specialProducts = cart.items.filter(item => item.itemType === 'SpecialProduct');
+
+//     // Remove this error check to allow both types in the same order
+//     // if (normalProducts.length > 0 && specialProducts.length > 0) {
+//     //   throw new Error('Normal and special products cannot be ordered together');
+//     // }
+
+//     const totals = await calculateOrderTotalsHelper(cartId, couponCode);
+
+//     const order = new Order({
+//       orderId: generateOrderNumber(),
+//       customer: customer._id,
+//       warehouse: warehouseId || (customer.warehouse ? customer.warehouse._id : null),
+//       items: cart.items.map(item => ({
+//         itemType: item.itemType,
+//         product: item.item._id,
+//         quantity: item.quantity,
+//         price: item.price,
+//         color: item.color || null
+//       })),
+//       shippingMethod: shippingMethodId || null,
+//       city: cityId || null,
+//       subtotal: totals.subtotal,
+//       shippingCost: totals.shippingCost || null,
+//       grandTotal: totals.grandTotal,
+//       couponUsed: couponCode || null,
+//       paymentMethod,
+//       paymentStatus: 'Pending',
+//       orderStatus: 'Pending',
+//       specialInstructions
+//     });
+//     const orders = await Order.find().populate('warehouse').populate('customer');
+//     let customerWarehouse = null;
+//     if (warehouseId) {
+//       customerWarehouse = await Warehouse.findById(warehouseId);
+//       if (!customerWarehouse) {
+//         throw new Error('Customer warehouse not found');
+//       }
+//     } 
+//     console.log(customerWarehouse);
+    
+
+//     // Get all special products with their details if there are any
+//     let productMap = {};
+//     if (specialProducts.length > 0) {
+//       const populatedSpecialProducts = await SpecialProduct.find({
+//         _id: { $in: specialProducts.map(item => item.item._id) }
+//       });
+      
+//       // Create a map for quick lookup
+//       productMap = populatedSpecialProducts.reduce((map, product) => {
+//         map[product._id.toString()] = product;
+//         return map;
+//       }, {});
+//     }
+
+//     // Separate GWP products from other special products
+//     const gwpProducts = specialProducts.filter(item => 
+//       productMap[item.item._id.toString()]?.type === 'GWP'
+//     );
+    
+//     const otherSpecialProducts = specialProducts.filter(item => 
+//       productMap[item.item._id.toString()]?.type !== 'GWP'
+//     );
+
+//     // Calculate totals for each type
+//     const normalProductTotal = normalProducts.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+//     const gwpTotal = gwpProducts.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+//     const otherSpecialTotal = otherSpecialProducts.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+
+//     // Check inventory wallet balance for normal products and GWP products
+//     const inventoryWalletTotal = normalProductTotal + gwpTotal;
+//     if (inventoryWalletTotal > 0) {
+//       const inventoryWallet = await InventoryWallet.findOne({ warehouse: customerWarehouse._id });
+//       if (!inventoryWallet || inventoryWallet.balance < inventoryWalletTotal) {
+//         throw new Error('Insufficient inventory wallet balance');
+//       }
+
+//       // Process normal products
+//       for (const item of normalProducts) {
+//         const inventory = await Inventory.findOne({ product: item.item._id, warehouse: mainWarehouseId });
+//         if (!inventory || inventory.quantity < item.quantity) {
+//           throw new Error(`Insufficient quantity for product ${item.item.name} in main warehouse`);
+//         }
+
+//         const updatedInventory = await Inventory.findOneAndUpdate(
+//           { product: item.item._id, warehouse: mainWarehouseId },
+//           { $inc: { quantity: -item.quantity } },
+//           { new: true, session }
+//         );
+      
+//         if (updatedInventory.quantity <= updatedInventory.stockAlertThreshold) {
+//           await AdminNotification.create([{
+//             user: '66c5bc4b3c1526016eeac109',
+//             type: 'LOW_STOCK',
+//             content: `Low stock alert for ${item.item.name} in main warehouse - Current quantity: ${updatedInventory.quantity}`,
+//             resourceId: updatedInventory._id,
+//             resourceModel: 'Inventory',
+//             priority: 'high'
+//           }], { session });
+//         }
+        
+//         // Add normal products to customer's warehouse inventory
+//         const updatedCustomerInventory = await Inventory.findOneAndUpdate(
+//           { product: item.item._id, warehouse: customerWarehouse._id },
+//           { 
+//             $inc: { quantity: item.quantity },
+//             $setOnInsert: {
+//               productType: 'Product',
+//               city: '67400e8a7b963a1282d218b5',
+//               stockAlertThreshold: 5,
+//               lastRestocked: new Date()
+//             }
+//           },
+//           { upsert: true, new: true, session }
+//         );
+
+//         await Product.findByIdAndUpdate(
+//           item.item._id,
+//           { $addToSet: { inventory: updatedCustomerInventory._id } },
+//           { session }
+//         );
+
+//         if (updatedCustomerInventory.quantity <= updatedCustomerInventory.stockAlertThreshold) {
+//           await AdminNotification.create([{
+//             user: '66c5bc4b3c1526016eeac109',
+//             type: 'LOW_STOCK',
+//             content: `Low stock alert for ${item.item.name} in ${customerWarehouse.name} warehouse - Current quantity: ${updatedCustomerInventory.quantity}`,
+//             resourceId: updatedCustomerInventory._id,
+//             resourceModel: 'Inventory',
+//             priority: 'high'
+//           }], { session });
+//         }
+//       }
+
+//       // Process GWP products
+//       for (const item of gwpProducts) {
+//         const mainInventory = await Inventory.findOne({ 
+//           product: item.item._id, 
+//           warehouse: mainWarehouseId 
+//         });
+        
+//         const productName = productMap[item.item._id.toString()].name;
+        
+//         if (!mainInventory || mainInventory.quantity < item.quantity) {
+//           throw new Error(`Insufficient quantity for GWP product: ${productName} in main warehouse`);
+//         }
+        
+//         // Immediately update inventory for GWP products
+//         const updatedMainInventory = await Inventory.findOneAndUpdate(
+//           { product: item.item._id, warehouse: mainWarehouseId },
+//           { $inc: { quantity: -item.quantity } },
+//           { new: true, session }
+//         );
+
+//         if (updatedMainInventory.quantity <= updatedMainInventory.stockAlertThreshold) {
+//           await AdminNotification.create([{
+//             user: '66c5bc4b3c1526016eeac109',
+//             type: 'LOW_STOCK',
+//             content: `Low stock alert for ${productName} in main warehouse - Current quantity: ${updatedMainInventory.quantity}`,
+//             resourceId: updatedMainInventory._id,
+//             resourceModel: 'Inventory',
+//             priority: 'high'
+//           }], { session });
+//         }
+        
+//         // Add to customer's warehouse inventory
+//         const updatedCustomerInventory = await Inventory.findOneAndUpdate(
+//           { product: item.item._id, warehouse: customerWarehouse._id },
+//           { 
+//             $inc: { quantity: item.quantity },
+//             $setOnInsert: {
+//               productType: 'SpecialProduct',
+//               city: '67400e8a7b963a1282d218b5',
+//               stockAlertThreshold: 5,
+//               lastRestocked: new Date()
+//             }
+//           },
+//           { upsert: true, new: true, session }
+//         );
+
+//         await SpecialProduct.findByIdAndUpdate(
+//           item.item._id,
+//           { $addToSet: { inventory: updatedCustomerInventory._id } },
+//           { session }
+//         );
+
+//         if (updatedCustomerInventory.quantity <= updatedCustomerInventory.stockAlertThreshold) {
+//           await AdminNotification.create([{
+//             user: '66c5bc4b3c1526016eeac109',
+//             type: 'LOW_STOCK',
+//             content: `Low stock alert for ${productName} in ${customerWarehouse.name} warehouse - Current quantity: ${updatedCustomerInventory.quantity}`,
+//             resourceId: updatedCustomerInventory._id,
+//             resourceModel: 'Inventory',
+//             priority: 'high'
+//           }], { session });
+//         }
+//       }
+      
+//       // Deduct from inventory wallet
+//       if (inventoryWalletTotal > 0) {
+//         const inventoryWallet = await InventoryWallet.findOne({ warehouse: customerWarehouse._id });
+//         inventoryWallet.balance -= inventoryWalletTotal;
+//         await inventoryWallet.save({ session });
+//       }
+//     }
+
+//     // Check supplies wallet balance for other special products
+//     if (otherSpecialTotal > 0) {
+//       const suppliesWallet = await SuppliesWallet.findOne({ warehouse: customerWarehouse._id });
+//       if (!suppliesWallet || suppliesWallet.balance < otherSpecialTotal) {
+//         throw new Error('Insufficient supplies wallet balance for special products');
+//       }
+
+//       // Check inventory for other special products (but don't update yet)
+//       for (const item of otherSpecialProducts) {
+//         const mainInventory = await Inventory.findOne({ 
+//           product: item.item._id, 
+//           warehouse: mainWarehouseId 
+//         });
+        
+//         const productName = productMap[item.item._id.toString()].name;
+        
+//         if (!mainInventory || mainInventory.quantity < item.quantity) {
+//           throw new Error(`Insufficient quantity for special product: ${productName} in main warehouse`);
+//         }
+//       }
+      
+//       // Deduct from supplies wallet for other special products
+//       suppliesWallet.balance -= otherSpecialTotal;
+//       await suppliesWallet.save({ session });
+//     }
+
+//     // Set order status based on what's in the cart
+//     if (otherSpecialProducts.length === 0) {
+//       // If no non-GWP special products, mark as confirmed
+//       order.orderStatus = 'Confirmed';
+//       order.paymentStatus = 'Paid';
+//     } else {
+//       // If there are non-GWP special products, set to pending approval
+//       order.orderStatus = 'Pending Approval';
+//     }
+    
+//     // Create notifications
+//     const adminNotification = new AdminNotification({
+//       user: '66c5bc4b3c1526016eeac109',
+//       type: 'ORDER',
+//       content: `New order #${order.orderId} ${order.orderStatus === 'Confirmed' ? 'has been placed' : 'requires approval'}.`,
+//       resourceId: order._id,
+//       resourceModel: 'Order',
+//       priority: order.orderStatus === 'Confirmed' ? 'medium' : 'high'
+//     });
+//     await adminNotification.save({ session });
+
+//     const customerNotification = new Notification({
+//       user: customer._id,
+//       content: `Your order #${order.orderId} has been placed ${order.orderStatus === 'Confirmed' ? 'successfully' : 'and is pending approval'}.`,
+//       url: `/orders/${order._id}`
+//     });
+//     await customerNotification.save({ session });
+
+
+//     // Clear cart
+//     cart.items = [];
+//     cart.total = 0;
+//     await cart.save({ session });
+
+//     // ensure order has proper warehouse id saved (in case it was set after creation)
+//     if (customerWarehouse && customerWarehouse._id) {
+//       order.warehouse = customerWarehouse._id;
+//       await order.save({ session });
+//     }
+
+//     await session.commitTransaction();
+//     // return order plus warehouse details for frontend
+//     res.status(201).json({ message: 'Order placed successfully', order, warehouse: customerWarehouse });
+//   } catch (error) {
+//     await session.abortTransaction();
+//     res.status(400).json({ message: error.message });
+//   } finally {
+//     session.endSession();
+//   }
+// };
+
 const placeOrder = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    const { cartId, shippingMethodId, paymentMethod, specialInstructions, couponCode, cityId } = req.body;
-    const mainWarehouseId = '67b6c7b68958be48910ed415';
-    const cart = await Cart.findById(cartId).populate('items.item');
-    if (!cart) throw new Error('Cart not found');
+    const {
+      cartId,
+      shippingMethodId,
+      paymentMethod,
+      specialInstructions,
+      couponCode,
+      cityId,
+      warehouse,
+    } = req.body;
 
-    const customer = await Customer.findById(req.user.id).populate('warehouse');
-    if (!customer) throw new Error('Customer not found');
+    const warehouseId = warehouse?._id || warehouse;
+    const mainWarehouseId = "67b6c7b68958be48910ed415"; // main stock warehouse ID
 
-    // Separate items by type
-    const normalProducts = cart.items.filter(item => item.itemType === 'Product');
-    const specialProducts = cart.items.filter(item => item.itemType === 'SpecialProduct');
+    const cart = await Cart.findById(cartId).populate("items.item");
+    if (!cart) throw new Error("Cart not found");
 
-    // Remove this error check to allow both types in the same order
-    // if (normalProducts.length > 0 && specialProducts.length > 0) {
-    //   throw new Error('Normal and special products cannot be ordered together');
-    // }
+    const customer = await Customer.findById(req.user.id).populate("warehouse");
+    if (!customer) throw new Error("Customer not found");
 
+    // find warehouse selected by customer
+    // NOTE: districtManager and corporateManager are already IDs, don't populate
+    const customerWarehouse = await Warehouse.findById(warehouseId);
+    if (!customerWarehouse) throw new Error("Warehouse not found");
+
+    // calculate totals
     const totals = await calculateOrderTotalsHelper(cartId, couponCode);
 
+    // 🟩 Create base order
     const order = new Order({
       orderId: generateOrderNumber(),
       customer: customer._id,
-      items: cart.items.map(item => ({
+      warehouse: warehouseId,
+      createdBy: req.user.id,
+      approvalStatus: "PENDING",
+      items: cart.items.map((item) => ({
         itemType: item.itemType,
         product: item.item._id,
         quantity: item.quantity,
         price: item.price,
-        color: item.color || null
+        color: item.color || null,
       })),
       shippingMethod: shippingMethodId || null,
       city: cityId || null,
@@ -1258,244 +1572,172 @@ const placeOrder = async (req, res) => {
       grandTotal: totals.grandTotal,
       couponUsed: couponCode || null,
       paymentMethod,
-      paymentStatus: 'Pending',
-      orderStatus: 'Pending',
-      specialInstructions
+      paymentStatus: "Pending",
+      orderStatus: "Pending",
+      specialInstructions,
     });
 
-    const customerWarehouse = await Warehouse.findById(customer.warehouse);
-    if (!customerWarehouse) {
-      throw new Error('Customer warehouse not found');
-    }
+    // 🟦 Process inventory and wallet deduction from MAIN warehouse
+    const normalProducts = cart.items.filter((i) => i.itemType === "Product");
+    const specialProducts = cart.items.filter(
+      (i) => i.itemType === "SpecialProduct"
+    );
 
-    // Get all special products with their details if there are any
     let productMap = {};
     if (specialProducts.length > 0) {
       const populatedSpecialProducts = await SpecialProduct.find({
-        _id: { $in: specialProducts.map(item => item.item._id) }
+        _id: { $in: specialProducts.map((i) => i.item._id) },
       });
-      
-      // Create a map for quick lookup
-      productMap = populatedSpecialProducts.reduce((map, product) => {
-        map[product._id.toString()] = product;
+      productMap = populatedSpecialProducts.reduce((map, p) => {
+        map[p._id.toString()] = p;
         return map;
       }, {});
     }
 
-    // Separate GWP products from other special products
-    const gwpProducts = specialProducts.filter(item => 
-      productMap[item.item._id.toString()]?.type === 'GWP'
+    const gwpProducts = specialProducts.filter(
+      (i) => productMap[i.item._id.toString()]?.type === "GWP"
     );
-    
-    const otherSpecialProducts = specialProducts.filter(item => 
-      productMap[item.item._id.toString()]?.type !== 'GWP'
+    const otherSpecialProducts = specialProducts.filter(
+      (i) => productMap[i.item._id.toString()]?.type !== "GWP"
     );
 
-    // Calculate totals for each type
-    const normalProductTotal = normalProducts.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-    const gwpTotal = gwpProducts.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-    const otherSpecialTotal = otherSpecialProducts.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+    const normalProductTotal = normalProducts.reduce(
+      (s, i) => s + i.price * i.quantity,
+      0
+    );
+    const gwpTotal = gwpProducts.reduce((s, i) => s + i.price * i.quantity, 0);
+    const otherSpecialTotal = otherSpecialProducts.reduce(
+      (s, i) => s + i.price * i.quantity,
+      0
+    );
 
-    // Check inventory wallet balance for normal products and GWP products
-    const inventoryWalletTotal = normalProductTotal + gwpTotal;
-    if (inventoryWalletTotal > 0) {
-      const inventoryWallet = await InventoryWallet.findOne({ warehouse: customerWarehouse._id });
-      if (!inventoryWallet || inventoryWallet.balance < inventoryWalletTotal) {
-        throw new Error('Insufficient inventory wallet balance');
+    // main warehouse stock deduction (for all product types)
+    for (const item of [...normalProducts, ...gwpProducts, ...otherSpecialProducts]) {
+      const mainInventory = await Inventory.findOne({
+        product: item.item._id,
+        warehouse: mainWarehouseId,
+      });
+
+      if (!mainInventory || mainInventory.quantity < item.quantity) {
+        throw new Error(`Insufficient quantity for product ${item.item.name} in main warehouse`);
       }
 
-      // Process normal products
-      for (const item of normalProducts) {
-        const inventory = await Inventory.findOne({ product: item.item._id, warehouse: mainWarehouseId });
-        if (!inventory || inventory.quantity < item.quantity) {
-          throw new Error(`Insufficient quantity for product ${item.item.name} in main warehouse`);
-        }
+      const updatedInventory = await Inventory.findOneAndUpdate(
+        { product: item.item._id, warehouse: mainWarehouseId },
+        { $inc: { quantity: -item.quantity } },
+        { new: true, session }
+      );
 
-        const updatedInventory = await Inventory.findOneAndUpdate(
-          { product: item.item._id, warehouse: mainWarehouseId },
-          { $inc: { quantity: -item.quantity } },
-          { new: true, session }
-        );
-      
-        if (updatedInventory.quantity <= updatedInventory.stockAlertThreshold) {
-          await AdminNotification.create([{
-            user: '66c5bc4b3c1526016eeac109',
-            type: 'LOW_STOCK',
-            content: `Low stock alert for ${item.item.name} in main warehouse - Current quantity: ${updatedInventory.quantity}`,
-            resourceId: updatedInventory._id,
-            resourceModel: 'Inventory',
-            priority: 'high'
-          }], { session });
-        }
-        
-        // Add normal products to customer's warehouse inventory
-        const updatedCustomerInventory = await Inventory.findOneAndUpdate(
-          { product: item.item._id, warehouse: customerWarehouse._id },
-          { 
-            $inc: { quantity: item.quantity },
-            $setOnInsert: {
-              productType: 'Product',
-              city: '67400e8a7b963a1282d218b5',
-              stockAlertThreshold: 5,
-              lastRestocked: new Date()
-            }
-          },
-          { upsert: true, new: true, session }
-        );
-
-        await Product.findByIdAndUpdate(
-          item.item._id,
-          { $addToSet: { inventory: updatedCustomerInventory._id } },
+      if (updatedInventory.quantity <= updatedInventory.stockAlertThreshold) {
+        await AdminNotification.create(
+          [
+            {
+              user: "66c5bc4b3c1526016eeac109",
+              type: "LOW_STOCK",
+              content: `Low stock alert for ${item.item.name} in main warehouse - Current quantity: ${updatedInventory.quantity}`,
+              resourceId: updatedInventory._id,
+              resourceModel: "Inventory",
+              priority: "high",
+            },
+          ],
           { session }
         );
-
-        if (updatedCustomerInventory.quantity <= updatedCustomerInventory.stockAlertThreshold) {
-          await AdminNotification.create([{
-            user: '66c5bc4b3c1526016eeac109',
-            type: 'LOW_STOCK',
-            content: `Low stock alert for ${item.item.name} in ${customerWarehouse.name} warehouse - Current quantity: ${updatedCustomerInventory.quantity}`,
-            resourceId: updatedCustomerInventory._id,
-            resourceModel: 'Inventory',
-            priority: 'high'
-          }], { session });
-        }
-      }
-
-      // Process GWP products
-      for (const item of gwpProducts) {
-        const mainInventory = await Inventory.findOne({ 
-          product: item.item._id, 
-          warehouse: mainWarehouseId 
-        });
-        
-        const productName = productMap[item.item._id.toString()].name;
-        
-        if (!mainInventory || mainInventory.quantity < item.quantity) {
-          throw new Error(`Insufficient quantity for GWP product: ${productName} in main warehouse`);
-        }
-        
-        // Immediately update inventory for GWP products
-        const updatedMainInventory = await Inventory.findOneAndUpdate(
-          { product: item.item._id, warehouse: mainWarehouseId },
-          { $inc: { quantity: -item.quantity } },
-          { new: true, session }
-        );
-
-        if (updatedMainInventory.quantity <= updatedMainInventory.stockAlertThreshold) {
-          await AdminNotification.create([{
-            user: '66c5bc4b3c1526016eeac109',
-            type: 'LOW_STOCK',
-            content: `Low stock alert for ${productName} in main warehouse - Current quantity: ${updatedMainInventory.quantity}`,
-            resourceId: updatedMainInventory._id,
-            resourceModel: 'Inventory',
-            priority: 'high'
-          }], { session });
-        }
-        
-        // Add to customer's warehouse inventory
-        const updatedCustomerInventory = await Inventory.findOneAndUpdate(
-          { product: item.item._id, warehouse: customerWarehouse._id },
-          { 
-            $inc: { quantity: item.quantity },
-            $setOnInsert: {
-              productType: 'SpecialProduct',
-              city: '67400e8a7b963a1282d218b5',
-              stockAlertThreshold: 5,
-              lastRestocked: new Date()
-            }
-          },
-          { upsert: true, new: true, session }
-        );
-
-        await SpecialProduct.findByIdAndUpdate(
-          item.item._id,
-          { $addToSet: { inventory: updatedCustomerInventory._id } },
-          { session }
-        );
-
-        if (updatedCustomerInventory.quantity <= updatedCustomerInventory.stockAlertThreshold) {
-          await AdminNotification.create([{
-            user: '66c5bc4b3c1526016eeac109',
-            type: 'LOW_STOCK',
-            content: `Low stock alert for ${productName} in ${customerWarehouse.name} warehouse - Current quantity: ${updatedCustomerInventory.quantity}`,
-            resourceId: updatedCustomerInventory._id,
-            resourceModel: 'Inventory',
-            priority: 'high'
-          }], { session });
-        }
-      }
-      
-      // Deduct from inventory wallet
-      if (inventoryWalletTotal > 0) {
-        const inventoryWallet = await InventoryWallet.findOne({ warehouse: customerWarehouse._id });
-        inventoryWallet.balance -= inventoryWalletTotal;
-        await inventoryWallet.save({ session });
       }
     }
 
-    // Check supplies wallet balance for other special products
-    if (otherSpecialTotal > 0) {
-      const suppliesWallet = await SuppliesWallet.findOne({ warehouse: customerWarehouse._id });
-      if (!suppliesWallet || suppliesWallet.balance < otherSpecialTotal) {
-        throw new Error('Insufficient supplies wallet balance for special products');
+    // 🟧 Wallet deductions
+    const inventoryWalletTotal = normalProductTotal + gwpTotal;
+    if (inventoryWalletTotal > 0) {
+      const inventoryWallet = await InventoryWallet.findOne({ warehouse: warehouseId });
+      if (!inventoryWallet || inventoryWallet.balance < inventoryWalletTotal) {
+        throw new Error("Insufficient inventory wallet balance");
       }
+      inventoryWallet.balance -= inventoryWalletTotal;
+      await inventoryWallet.save({ session });
+    }
 
-      // Check inventory for other special products (but don't update yet)
-      for (const item of otherSpecialProducts) {
-        const mainInventory = await Inventory.findOne({ 
-          product: item.item._id, 
-          warehouse: mainWarehouseId 
-        });
-        
-        const productName = productMap[item.item._id.toString()].name;
-        
-        if (!mainInventory || mainInventory.quantity < item.quantity) {
-          throw new Error(`Insufficient quantity for special product: ${productName} in main warehouse`);
-        }
+    if (otherSpecialTotal > 0) {
+      const suppliesWallet = await SuppliesWallet.findOne({ warehouse: warehouseId });
+      if (!suppliesWallet || suppliesWallet.balance < otherSpecialTotal) {
+        throw new Error("Insufficient supplies wallet balance");
       }
-      
-      // Deduct from supplies wallet for other special products
       suppliesWallet.balance -= otherSpecialTotal;
       await suppliesWallet.save({ session });
     }
 
-    // Set order status based on what's in the cart
-    if (otherSpecialProducts.length === 0) {
-      // If no non-GWP special products, mark as confirmed
-      order.orderStatus = 'Confirmed';
-      order.paymentStatus = 'Paid';
-    } else {
-      // If there are non-GWP special products, set to pending approval
-      order.orderStatus = 'Pending Approval';
-    }
-    
-    // Create notifications
-    const adminNotification = new AdminNotification({
-      user: '66c5bc4b3c1526016eeac109',
-      type: 'ORDER',
-      content: `New order #${order.orderId} ${order.orderStatus === 'Confirmed' ? 'has been placed' : 'requires approval'}.`,
-      resourceId: order._id,
-      resourceModel: 'Order',
-      priority: order.orderStatus === 'Confirmed' ? 'medium' : 'high'
-    });
-    await adminNotification.save({ session });
-
-    const customerNotification = new Notification({
-      user: customer._id,
-      content: `Your order #${order.orderId} has been placed ${order.orderStatus === 'Confirmed' ? 'successfully' : 'and is pending approval'}.`,
-      url: `/orders/${order._id}`
-    });
-    await customerNotification.save({ session });
-
+    // 🟨 Set order status
+    order.orderStatus = "Pending";
+    order.paymentStatus = "Pending";
     await order.save({ session });
 
-    // Clear cart
+    // 🟦 Notification chain (DM -> CM -> Admin)
+    const notifications = [];
+    let nextApprover = null;
+
+    if (customerWarehouse.districtManager) {
+      nextApprover = customerWarehouse.districtManager;
+      order.approvalStatus = "PENDING";
+      notifications.push(
+        new Notification({
+          user: nextApprover,
+          type: "ORDER",
+          content: `Order #${order.orderId} awaiting your approval as District Manager for warehouse ${customerWarehouse.name}.`,
+          resourceId: order._id,
+          resourceModel: "Order",
+          priority: "high",
+        })
+      );
+    } else if (customerWarehouse.corporateManager) {
+      nextApprover = customerWarehouse.corporateManager;
+      order.approvalStatus = "PENDING";
+      notifications.push(
+        new Notification({
+          user: nextApprover,
+          type: "ORDER",
+          content: `Order #${order.orderId} awaiting your approval as Corporate Manager for warehouse ${customerWarehouse.name}.`,
+          resourceId: order._id,
+          resourceModel: "Order",
+          priority: "high",
+        })
+      );
+    } else {
+      nextApprover = "66c5bc4b3c1526016eeac109"; // Admin fallback
+      order.approvalStatus = "PENDING";
+      notifications.push(
+        new AdminNotification({
+          user: nextApprover,
+          type: "ORDER",
+          content: `New order #${order.orderId} placed directly for admin approval (no manager linked).`,
+          resourceId: order._id,
+          resourceModel: "Order",
+          priority: "high",
+        })
+      );
+    }
+
+    // 🟪 Save all notifications
+    await Promise.all(notifications.map((n) => n.save({ session })));
+
+    // 🟩 Customer notification
+    await new Notification({
+      user: customer._id,
+      content: `Your order #${order.orderId} has been submitted for approval.`,
+      url: `/orders/${order._id}`,
+    }).save({ session });
+
+    // 🟫 Clear cart
     cart.items = [];
     cart.total = 0;
     await cart.save({ session });
 
+    await order.save({ session });
     await session.commitTransaction();
-    res.status(201).json({ message: 'Order placed successfully', order });
+
+    res.status(201).json({
+      message: "Order placed successfully and awaiting approval",
+      order,
+      nextApprover,
+    });
   } catch (error) {
     await session.abortTransaction();
     res.status(400).json({ message: error.message });
@@ -1505,6 +1747,188 @@ const placeOrder = async (req, res) => {
 };
 
 
+const approveOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { action, remarks } = req.body; // "APPROVE" or "DISAPPROVE"
+    
+    // ✅ FIX: Use fallback for userId
+    const userId = req.user?._id || req.user?.id;
+    
+    if (!userId) {
+      return res.status(401).json({ 
+        success: false,
+        message: "User ID not found in request" 
+      });
+    }
+
+    // 1️⃣ Fetch order with all related data (warehouse IDs only, don't populate DM/CM)
+    const order = await Order.findById(id)
+      .populate("warehouse customer createdBy");
+    
+    if (!order) throw new Error("Order not found");
+    if (!order.warehouse) throw new Error("Warehouse not found");
+
+    // 2️⃣ Get user role
+    let user = await Customer.findById(userId).populate("role");
+    
+    if (!user) {
+        user = await User.findById(userId).populate("role");
+        }
+    const roleName = user.role?.role_name || "user";
+
+    // 3️⃣ Add approval history entry
+    order.approvalHistory.push({
+      role: roleName,
+      approvedBy: userId,
+      status: action === "APPROVE" ? "APPROVED" : "DISAPPROVED",
+      remarks: remarks || "",
+      date: new Date()
+    });
+
+    // 4️⃣ DISAPPROVAL FLOW (any role can reject at any stage)
+    if (action === "DISAPPROVE") {
+      order.approvalStatus = "DISAPPROVED";
+      order.orderStatus = "Cancelled";
+      order.approvedBy = userId;
+
+      // 📧 Notify customer of rejection
+      if (order.customer) {
+        await new Notification({
+          user: order.customer._id,
+          type: "ORDER",
+          content: `Your order #${order.orderId} was rejected by ${roleName}.`,
+          resourceId: order._id,
+          resourceModel: "Order"
+        }).save();
+      }
+
+      await order.save();
+      return res.status(200).json({ 
+        message: `Order disapproved by ${roleName}`, 
+        order 
+      });
+    }
+
+    // 5️⃣ APPROVAL FLOW (role-based transitions)
+    
+    // ✅ DISTRICT MANAGER APPROVAL
+    if (roleName === "district manager") {
+      // Keep approval pending, next level is Corporate Manager
+      order.approvalStatus = "PENDING"; // Still awaiting next approval
+      order.approvedBy = userId;
+
+      // 📧 Notify Corporate Manager (if assigned)
+      // ✅ FIX: corporateManager is already an ID, not an object
+      if (order.warehouse.corporateManager) {
+        await new Notification({
+          user: order.warehouse.corporateManager,
+          type: "ORDER",
+          content: `Order #${order.orderId} approved by District Manager. Awaiting your approval.`,
+          resourceId: order._id,
+          resourceModel: "Order",
+          priority: "high"
+        }).save();
+      } else {
+        // ⚠️ No CM assigned, escalate to Admin
+        const admin = await User.findOne({ "role.role_name": "Super User" }).select("_id");
+        if (admin) {
+          await new AdminNotification({
+            user: admin._id,
+            type: "ORDER",
+            content: `Order #${order.orderId} approved by District Manager (no CM assigned). Awaiting your approval.`,
+            resourceId: order._id,
+            resourceModel: "Order",
+            priority: "high"
+          }).save();
+        }
+      }
+    }
+
+    // ✅ CORPORATE MANAGER APPROVAL
+    else if (roleName === "corporate manager") {
+      // Check if DM has already approved
+      const dmApproved = order.approvalHistory.some(
+        h => h.role === "district manager" && h.status === "APPROVED"
+      );
+
+      if (!dmApproved) {
+        throw new Error("District Manager must approve before Corporate Manager");
+      }
+
+      order.approvalStatus = "PENDING"; // Still awaiting Admin
+      order.approvedBy = userId;
+
+      // 📧 Notify Admin
+      const admin = await User.findOne({ "role.role_name": "Super User" }).select("_id");
+      if (admin) {
+        await new AdminNotification({
+          user: admin._id,
+          type: "ORDER",
+          content: `Order #${order.orderId} approved by Corporate Manager. Awaiting your approval.`,
+          resourceId: order._id,
+          resourceModel: "Order",
+          priority: "high"
+        }).save();
+      }
+    }
+
+    // ✅ ADMIN FINAL APPROVAL
+    else if (roleName === "Super User") {
+      // Verify all prior approvals exist
+      const dmApproved = order.approvalHistory.some(
+        h => h.role === "district manager" && h.status === "APPROVED"
+      );
+      const cmApproved = order.approvalHistory.some(
+        h => h.role === "corporate manager" && h.status === "APPROVED"
+      );
+
+      // ✅ FIX: Compare IDs directly (both are strings)
+      // If DM exists but didn't approve, reject
+      if (order.warehouse.districtManager && !dmApproved) {
+        throw new Error("District Manager must approve before Admin approval");
+      }
+
+      // If both DM and CM exist but CM didn't approve, reject
+      if (order.warehouse.corporateManager && !cmApproved) {
+        throw new Error("Corporate Manager must approve before Admin approval");
+      }
+
+      // ✅ FINAL APPROVAL: Set to APPROVED and update order status
+      order.approvalStatus = "APPROVED";
+      order.orderStatus = "Processing";
+      order.approvedBy = userId;
+
+      // 📧 Notify customer of final approval
+      if (order.customer) {
+        await new Notification({
+          user: order.customer._id,
+          type: "ORDER",
+          content: `Your order #${order.orderId} has been approved and is now processing.`,
+          resourceId: order._id,
+          resourceModel: "Order"
+        }).save();
+      }
+    }
+
+    else {
+      throw new Error(`Approval by role '${roleName}' is not authorized`);
+    }
+
+    // 6️⃣ Save order with all updates
+    await order.save();
+
+    res.status(200).json({ 
+      message: `Order ${action === "APPROVE" ? "approved" : "disapproved"} by ${roleName}`, 
+      order 
+    });
+
+  } catch (error) {
+    console.error("Approval error:", error);
+    res.status(400).json({ message: error.message });
+  }
+};
+
 
 
 
@@ -1512,11 +1936,12 @@ const placeOrder = async (req, res) => {
 const getUserOrders = async (req, res) => {
   try {
       const userId = req.user._id;
-      const orders = await Order.find({ customer: userId })
+    const orders = await Order.find({ customer: userId })
           .populate({
               path: 'items.product',
               refPath: 'items.itemType'
           })
+      .populate('warehouse')
           .populate('shippingAddress')
           .populate('shippingMethod')
           .populate('city')
@@ -1657,6 +2082,7 @@ const getUserOrders = async (req, res) => {
 const getAllOrders = async (req, res) => {
   try {
     const orders = await Order.find()
+      .populate('warehouse')
       .populate({
         path: 'customer',
         populate: {
@@ -2199,6 +2625,7 @@ if (!customer || !customer.warehouse) {
   throw new Error('Customer or customer warehouse not found');
 }
 const customerWarehouse = customer.warehouse;
+console.log('Customer Warehouse:', customerWarehouse);
 
         // if (orderStatus === 'Disapproved') {
         //   const nonGwpSpecialItems = order.items.filter(item => 
@@ -3178,7 +3605,172 @@ const downloadOrdersData = async (req, res) => {
 
 
 
-  
+
+ const getPendingApprovals = async (req, res) => {
+  try {
+    console.log("🧩 req.user full object:", req.user);
+
+    // ✅ Get userId safely
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "User ID not found in request",
+      });
+    }
+    console.log("🧩 User ID:", userId.toString());
+
+    // ✅ Step 1: Get Role ID from user object
+    const roleId = req.user.role;
+    console.log("🧩 Role ID:", roleId?.toString());
+
+    // ✅ Step 2: Fetch role name manually (since populate not working)
+    const roleData = await UserRole.findById(roleId);
+    if (!roleData) {
+      return res.status(404).json({ message: "Role not found" });
+    }
+
+    const roleName = roleData.role_name;
+    console.log("✅ Role Name:", roleName);
+
+    // ✅ Step 3: (Optional) Load user fully populated, only if needed
+    let user = await Customer.findById(userId)
+      .populate("role")
+      .lean();
+      
+        if (!user) {
+        user = await User.findById(userId).populate("role");
+        }
+      
+
+    console.log("✅ Populated User:", user?.role?.role_name || "Not populated");
+
+    // ✅ Step 4: Proceed with role logic
+    let query = { approvalStatus: "PENDING" };
+
+    // 🧩 DISTRICT MANAGER LOGIC
+    if (roleName === "district manager") {
+      const warehouses = await Warehouse.find({ districtManager: userId }).select("_id");
+      const warehouseIds = warehouses.map((w) => w._id);
+
+      console.log("Found warehouses for DM:", warehouseIds.length);
+
+      if (warehouseIds.length === 0) {
+        return res.status(200).json({
+          success: true,
+          count: 0,
+          data: [],
+          message: "No warehouses assigned to this District Manager",
+        });
+      }
+
+      query.warehouse = { $in: warehouseIds };
+      query.approvalHistory = {
+        $not: {
+          $elemMatch: {
+            role: "district manager",
+            approvedBy: userId,
+          },
+        },
+      };
+    }
+
+    // 🧩 CORPORATE MANAGER LOGIC
+    else if (roleName === "corporate manager") {
+      const warehouses = await Warehouse.find({ corporateManager: userId }).select("_id");
+      const warehouseIds = warehouses.map((w) => w._id);
+
+      console.log("Found warehouses for CM:", warehouseIds.length);
+
+      if (warehouseIds.length === 0) {
+        return res.status(200).json({
+          success: true,
+          count: 0,
+          data: [],
+          message: "No warehouses assigned to this Corporate Manager",
+        });
+      }
+
+      query.warehouse = { $in: warehouseIds };
+      query.approvalHistory = {
+        $elemMatch: {
+          role: "district manager",
+          status: "APPROVED",
+        },
+        $not: {
+          $elemMatch: {
+            role: "corporate manager",
+            approvedBy: userId,
+          },
+        },
+      };
+    }
+// 🧩 ADMIN (SUPER USER) LOGIC
+    else if (roleName === "Super User") {
+  query = {
+    approvalStatus: "PENDING",
+    $and: [
+      { "approvalHistory": { $elemMatch: { role: "district manager", status: "APPROVED" } } },
+      { "approvalHistory": { $elemMatch: { role: "corporate manager", status: "APPROVED" } } },
+      { "approvalHistory": { $not: { $elemMatch: { role: "Super User", approvedBy: userId } } } }
+    ]
+  };
+}
+    // ❌ Unauthorized Role
+    else {
+      return res.status(403).json({
+        success: false,
+        message: `User role '${roleName}' is not authorized to view pending approvals`,
+      });
+    }
+
+    console.log("✅ Final Query:", JSON.stringify(query, null, 2));
+
+    // 🧾 FETCH ORDERS
+    const orders = await Order.find(query)
+      .populate({
+        path: "warehouse",
+        select: "name districtManager corporateManager location",
+      })
+      .populate({
+        path: "customer",
+        select: "username email phone_number warehouse",
+        populate: {
+          path: "warehouse",
+          select: "name",
+        },
+      })
+      .populate({
+        path: "items.product",
+        select: "name price",
+        refPath: "items.itemType",
+      })
+      .populate({
+        path: "approvalHistory.approvedBy",
+        select: "username email role",
+        populate: {
+          path: "role",
+          select: "role_name",
+        },
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // 🟢 SUCCESS RESPONSE
+    res.status(200).json({
+      success: true,
+      count: orders.length,
+      data: orders,
+    });
+  } catch (error) {
+    console.error("❌ Error fetching pending approvals:", error);
+    res.status(400).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+ 
 
   
 
@@ -3186,6 +3778,8 @@ const downloadOrdersData = async (req, res) => {
 module.exports = {
     calculateOrderTotals,
     placeOrder,
+    approveOrder,
+    getPendingApprovals,
     getUserOrders,
     getAllOrders,
     updateOrderStatus,
