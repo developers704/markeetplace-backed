@@ -468,6 +468,24 @@ const getAllCustomers = async (req, res) => {
     }
 };
 
+const getAllCustomersForStore = async (req, res) => {
+  try {
+    const customers = await Customer.find()
+      .select('_id username') // sirf _id aur username
+      .populate({
+        path: 'role',
+        select: 'role_name' // role ka sirf name
+      })
+      .sort({ updatedAt: -1, createdAt: -1 });
+
+    res.status(200).json(customers);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
+
+
 
 const deactivateAccount = async (req, res) => {
     try {
@@ -624,4 +642,4 @@ const exportCustomersToCSV = async (req, res) => {
 
 
 
-module.exports = { registerCustomer, getCustomerProfile, deleteCustomer, getAllCustomers, updateCustomerProfile, changeCustomerPassword, verifyEmail, deleteOwnAccount, deactivateAccount, reactivateAccount, deleteCustomers, updateCustomerByAdmin, exportCustomersToCSV };
+module.exports = { registerCustomer, getCustomerProfile, deleteCustomer, getAllCustomers, updateCustomerProfile, changeCustomerPassword, verifyEmail, deleteOwnAccount, deactivateAccount, reactivateAccount, deleteCustomers, updateCustomerByAdmin, exportCustomersToCSV, getAllCustomersForStore };

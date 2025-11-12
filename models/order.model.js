@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const orderSchema = new mongoose.Schema(
   {
@@ -9,12 +9,12 @@ const orderSchema = new mongoose.Schema(
     },
     customer: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Customer',
+      ref: "Customer",
     },
     warehouse: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Warehouse'
-    },  
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Warehouse",
+    },
     guestInfo: {
       name: String,
       email: String,
@@ -43,12 +43,12 @@ const orderSchema = new mongoose.Schema(
       {
         itemType: {
           type: String,
-          enum: ['Product', 'SpecialProduct'],
-          required: true
+          enum: ["Product", "SpecialProduct"],
+          required: true,
         },
         product: {
           type: mongoose.Schema.Types.ObjectId,
-          refPath: 'items.itemType',
+          refPath: "items.itemType",
           required: true,
         },
         quantity: {
@@ -61,17 +61,17 @@ const orderSchema = new mongoose.Schema(
         },
         color: {
           type: String,
-          default: null
-        }
+          default: null,
+        },
       },
     ],
     shippingAddress: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Address',
+      ref: "Address",
     },
     shippingStatus: {
       type: String,
-      default: 'Pending',
+      default: "Pending",
     },
     guestAddress: {
       street: String,
@@ -80,7 +80,7 @@ const orderSchema = new mongoose.Schema(
     },
     shippingMethod: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'ShippingMethod',
+      ref: "ShippingMethod",
     },
     subtotal: {
       type: Number,
@@ -95,15 +95,47 @@ const orderSchema = new mongoose.Schema(
       required: true,
     },
     paymentMethod: {
-      type: String
+      type: String,
     },
     paymentStatus: {
       type: String,
-      default: 'Incomplete', // Options: Incomplete, Paid, Failed, Refunded, etc.
+      default: "Incomplete", // Options: Incomplete, Paid, Failed, Refunded, etc.
     },
+    approvalStatus: {
+      type: String,
+      enum: [
+        "PENDING",
+        "APPROVED_BY_DISTRICT",
+        "APPROVED_BY_CORPORATE",
+        "APPROVED_BY_ADMIN",
+        "DISAPPROVED",
+        "APPROVED"
+
+      ],
+      default: "PENDING",
+    },
+    approvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    approvalHistory: [
+      {
+        role: String, // e.g. "District Manager", "Corporate Manager", "Admin"
+        approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        status: { type: String, enum: ["APPROVED", "DISAPPROVED"] },
+        date: { type: Date, default: Date.now },
+        remarks: String,
+      },
+    ],
+
     orderStatus: {
       type: String,
-      default: 'Pending', // Options: Pending, Processing, Shipped, Delivered, Cancelled, etc.
+      default: "Pending", // Options: Pending, Processing, Shipped, Delivered, Cancelled, etc.
     },
     specialInstructions: {
       type: String,
@@ -114,15 +146,15 @@ const orderSchema = new mongoose.Schema(
     },
     city: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'City',
+      ref: "City",
       required: true,
-  },
-  adminNotes: {
-    type: String,
-    trim: true
-  },  
+    },
+    adminNotes: {
+      type: String,
+      trim: true,
+    },
   },
   { timestamps: true }
 );
 
-module.exports = mongoose.model('Order', orderSchema);
+module.exports = mongoose.model("Order", orderSchema);

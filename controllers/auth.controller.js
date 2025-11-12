@@ -114,6 +114,7 @@ const customerLogin = async (req, res) => {
      if (!warehouseId) {
       return res.status(400).json({ message: "Warehouse ID is required for login" });
     }
+    console.log("Selected warehouseId:", warehouseId);
 
     // comment code 
     let clientIP = req.headers['x-real-ip'] 
@@ -171,6 +172,7 @@ const customerLogin = async (req, res) => {
     if (!customer) {
       return res.status(400).json({ message: "Invalid email or password" });
     }
+    // log('customer.warehouse:', customer);
 
      // 3️⃣ Verify that the selected warehouse is assigned to this user
     const hasAccess = customer.warehouse.some(

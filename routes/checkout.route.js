@@ -14,7 +14,9 @@ const {
     getOwnWallet,
     processRefund,
     updateOrderByAdmin,
-    downloadOrdersData
+    downloadOrdersData,
+    approveOrder,
+    getPendingApprovals
 } = require('../controllers/checkout.controller');
 const guestOrAuthMiddleware = require('../middlewares/guestOrAuthMiddleware');
 const checkAccountStatus = require('../middlewares/checkAccountStatus');
@@ -33,7 +35,9 @@ router.post(
     updateWalletBalance
   );
 router.get('/history', authMiddleware, getUserOrders);
-router.get('/order', authMiddleware, checkSuperuserOrPermission('Orders', 'View'), getAllOrders);
+router.get('/order',  getAllOrders);
+router.get('/order/pending-approvals', authMiddleware, getPendingApprovals);
+router.patch("/:id/approve",authMiddleware, approveOrder);
 router.get('/wallet', authMiddleware, getOwnWallet);
 router.get('/orders/download-data', downloadOrdersData);
 router.get('/admin/wallets', authMiddleware, checkSuperuserOrPermission('Orders', 'View'), getAllWallets);

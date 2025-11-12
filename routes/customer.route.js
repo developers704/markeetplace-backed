@@ -1,5 +1,5 @@
 const express = require('express');
-const { registerCustomer, getCustomerProfile, deleteCustomer, getAllCustomers, updateCustomerProfile, changeCustomerPassword, verifyEmail, deleteOwnAccount, deactivateAccount, reactivateAccount, deleteCustomers, updateCustomerByAdmin, exportCustomersToCSV } = require('../controllers/customer.controller');
+const { registerCustomer, getCustomerProfile, deleteCustomer, getAllCustomers, updateCustomerProfile, changeCustomerPassword, verifyEmail, deleteOwnAccount, deactivateAccount, reactivateAccount, deleteCustomers, updateCustomerByAdmin, exportCustomersToCSV, getAllCustomersForStore } = require('../controllers/customer.controller');
 const authMiddleware = require('../middlewares/authMiddleware');
 const checkSuperuserOrPermission = require('../middlewares/checkSuperuserOrPermission.js');
 const checkBlacklistedToken = require('../middlewares/checkBlacklistedToken');
@@ -48,6 +48,7 @@ router.delete('/:id', authMiddleware, checkBlacklistedToken, checkSuperuserOrPer
 
 // Route to get all customers
 router.get('/', authMiddleware, checkBlacklistedToken, checkSuperuserOrPermission('Customers', 'View'), getAllCustomers);
+router.get('/getcustomer-forstore',  getAllCustomersForStore);
 
 // Route to deactivate a customer account
 router.post('/deactivate', authMiddleware, checkBlacklistedToken, deactivateAccount);
