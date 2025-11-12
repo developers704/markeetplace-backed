@@ -91,19 +91,12 @@ const addInventory = async (req, res) => {
             return res.status(404).json({ message: 'Product not found' });
         }
 
-        // if (warehouse) {
-        //     const warehouseExists = await Warehouse.findById(warehouse);
-        //     if (!warehouseExists) {
-        //         return res.status(404).json({ message: 'Warehouse not found' });
-        //     }
-        // }
-          if (warehouse && warehouse.length > 0) {
-                const warehouses = await Warehouse.find({ _id: { $in: warehouse } });
-          
-                if (warehouses.length !== warehouse.length) {
-                return res.status(400).json({ message: 'One or more warehouse IDs are invalid' });
-                }
-                }
+        if (warehouse) {
+            const warehouseExists = await Warehouse.findById(warehouse);
+            if (!warehouseExists) {
+                return res.status(404).json({ message: 'Warehouse not found' });
+            }
+        }
 
         const cityExists = await City.findById(city);
         if (!cityExists) {
@@ -167,6 +160,7 @@ const addInventory = async (req, res) => {
         res.status(400).json({ message: error.message });
     }
 };
+
 
 
 // const updateInventory = async (req, res) => {
@@ -307,6 +301,8 @@ const updateInventory = async (req, res) => {
         res.status(400).json({ message: error.message });
     }
 };
+
+
 
 
 
