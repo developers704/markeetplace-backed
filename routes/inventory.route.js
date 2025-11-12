@@ -17,10 +17,12 @@ const upload = multer({ dest: 'uploads/temp/' });
 const adminLogger = require('../middlewares/adminLogger');
 
 
-router.post('/', checkSuperuserOrPermission('Inventory', 'Create'), adminLogger(), addInventory);
+// router.post('/', checkSuperuserOrPermission('Inventory', 'Create'), adminLogger(), addInventory);
+router.post('/', addInventory);
 router.post('/bulk-upload', checkSuperuserOrPermission('Inventory', 'Create'), upload.single('csv'), bulkUploadInventory);
 router.put('/bulk-update', checkSuperuserOrPermission('Inventory', 'Update'), bulkUpdateInventories);
-router.put('/:id', checkSuperuserOrPermission('Inventory', 'Update'), adminLogger(), updateInventory);
+// router.put('/:id', checkSuperuserOrPermission('Inventory', 'Update'), adminLogger(), updateInventory);
+router.put('/:id',  updateInventory);
 // router.get('/', checkSuperuserOrPermission('Inventory', 'View'), getAllInventories);
 router.get('/',  getAllInventories);
 // Public route to fetch available inventories with full product details (image, prices, gallery)
