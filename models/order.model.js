@@ -99,7 +99,7 @@ const orderSchema = new mongoose.Schema(
     },
     paymentStatus: {
       type: String,
-      default: "Incomplete", // Options: Incomplete, Paid, Failed, Refunded, etc.
+      default: "Incomplete", 
     },
     approvalStatus: {
       type: String,
@@ -114,6 +114,7 @@ const orderSchema = new mongoose.Schema(
       ],
       default: "PENDING",
     },
+    
     approvedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -132,6 +133,10 @@ const orderSchema = new mongoose.Schema(
         remarks: String,
       },
     ],
+    isFinalized:{
+      type: Boolean,
+      default: false
+    },
 
     orderStatus: {
       type: String,
