@@ -1,5 +1,6 @@
 const Policy = require('../models/policy.model');
 const PolicyAcceptance = require('../models/policyAcceptance.model');
+const Customer = require('../models/customer.model');
 const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
@@ -30,7 +31,7 @@ const createPolicy = async (req, res) => {
         const policy = new Policy({
             title,
             content,
-            version,
+            version: version ? Number(version) : 1,
             picture: picturePath,
             isActive: isActive !== undefined ? isActive : true,
             showFirst: showFirst || false,
@@ -275,13 +276,20 @@ const updatePolicy = async (req, res) => {
             policy.picture = req.file.path;
         }
 
-        // Store old image path for deletion if new image is uploaded
+        // Store old image path and old content/version for comparison
         const oldImagePath = policy.picture;
+        const oldContent = policy.content;
+        const oldVersion = policy.version;
         
         // Update fields if provided
         if (title !== undefined) policy.title = title;
         if (content !== undefined) policy.content = content;
-        if (version !== undefined) policy.version = version;
+        // If admin provided explicit version, use it, else if content changed bump version
+        if (version !== undefined) {
+            policy.version = Number(version);
+        } else if (content !== undefined && content !== oldContent) {
+            policy.version = (policy.version || 1) + 1;
+        }
         if (isActive !== undefined) policy.isActive = isActive;
         if (showFirst !== undefined) policy.showFirst = showFirst;
         if (sequence !== undefined) policy.sequence = sequence;
@@ -462,6 +470,182 @@ const getFirstPriorityPolicy = async (req, res) => {
     }
 };
 
+
+
+const getPendingPolicies = async (req, res) => {
+  try {
+    const warehouseId = req.user.selectedWarehouse || null;
+    const userId = req.user?._id || req.user?.id;
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+    const user = await Customer.findById(userId).lean();
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    const roleId = user.role?._id || null;
+
+    // Fetch active policies
+    const policies = await Policy.find({ isActive: true }).sort({ showFirst: -1, sequence: 1, createdAt: -1 }).lean();
+
+    // Fetch all acceptances for this user
+    const acceptances = await PolicyAcceptance.find({ customer: userId }).lean();
+    const acceptedMap = new Map();
+    acceptances.forEach(a => {
+      if (a.policy && mongoose.Types.ObjectId.isValid(a.policy)) {
+        acceptedMap.set(a.policy.toString(), a);
+      }
+    });
+
+    const pending = [];
+
+    for (const p of policies) {
+      if (!mongoose.Types.ObjectId.isValid(p._id)) continue;
+
+      // Role filter
+      if (p.applicableRoles?.length && roleId && !p.applicableRoles.map(String).includes(String(roleId))) continue;
+
+      // Warehouse filter
+      if (p.applicableWarehouses?.length && warehouseId && !p.applicableWarehouses.map(String).includes(String(warehouseId))) continue;
+
+      // Forced check
+      const forced = Array.isArray(p.forceForUsers) && p.forceForUsers.some(f => mongoose.Types.ObjectId.isValid(f.user) && String(f.user) === String(userId));
+
+      const acc = acceptedMap.get(String(p._id));
+
+      if (!acc) {
+        pending.push({ ...p, reason: forced ? 'forced' : 'not_signed' });
+        continue;
+      }
+
+      // Check version
+      if ((acc.policyVersion || '0') < (p.version || '0')) {
+        pending.push({ ...p, reason: 'new_version' });
+        continue;
+      }
+
+      if (forced) {
+        pending.push({ ...p, reason: 'forced' });
+      }
+    }
+    return res.json({ pending });
+
+  } catch (error) {
+    console.error('getPendingPolicies error:', error);
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+
+
+// POST /api/policies/force/:userId
+const forcePolicyForUser = async (req, res) => {
+    try {
+        const policyId = req.body.policyId;
+        const { userId } = req.params;
+        if (!policyId || !userId) return res.status(400).json({ message: 'policyId and userId required' });
+
+        // add to policy.forceForUsers
+
+        const policy = await Policy.findById(policyId);
+        if (!policy) {
+            return res.status(404).json({ message: 'Policy not found' });
+        }
+
+        const alreadyForced = policy.forceForUsers.some(f => String(f.user) === String(userId));
+        if (alreadyForced) {
+            return res.status(400).json({ message: 'Policy already forced for this user' });
+        }
+           policy.forceForUsers.push({
+           user: userId,
+           forcedAt: new Date()
+          });
+
+        await policy.save();
+        
+        // const updated = await Policy.findByIdAndUpdate(policyId, { $addToSet: { forceForUsers: { user: userId, forcedAt: new Date() } } }, { new: true });
+
+        // mark customer's policyAccepted entry as forced = true (so UI can show forced reason)
+        const customer = await Customer.findById(userId);
+        if (customer) {
+            const idx = (customer.policyAccepted || []).findIndex(pa => String(pa.policy) === String(policyId));
+            if (idx >= 0) {
+                customer.policyAccepted[idx].forced = true;
+                await customer.save();
+            }
+        }
+
+        res.json({ success: true, message: 'Policy forced for user', policy });
+    } catch (error) {
+        console.error('forcePolicyForUser error:', error);
+        res.status(500).json({ message: error.message });
+    }
+}
+
+// Admin: Assign a policy to specific user(s)
+// POST /api/policies/:id/assign
+const assignPolicyToUser = async (req, res) => {
+    try {
+        const { id: policyId } = req.params;
+        const { userIds } = req.body; // array of user IDs
+        if (!policyId || !userIds || !Array.isArray(userIds)) {
+            return res.status(400).json({ message: 'policyId and userIds array required' });
+        }
+
+        const policy = await Policy.findById(policyId);
+        if (!policy) {
+            return res.status(404).json({ message: 'Policy not found' });
+        }
+
+        // Assign to each user
+        for (const userId of userIds) {
+            const customer = await Customer.findById(userId);
+            if (!customer) continue;
+
+            // Add to policyAccepted if not already assigned
+            const idx = (customer.policyAccepted || []).findIndex(pa => String(pa.policy) === String(policyId));
+            if (idx < 0) {
+                // New assignment
+                customer.policyAccepted = customer.policyAccepted || [];
+                customer.policyAccepted.push({
+                    policy: policyId,
+                    agreedVersion: -1, // Mark as not accepted yet
+                    agreedAt: null,
+                    forced: false,
+                    assigned: true
+                });
+                await customer.save();
+            }
+        }
+
+        res.json({ success: true, message: `Policy assigned to ${userIds.length} users` });
+    } catch (error) {
+        console.error('assignPolicyToUser error:', error);
+        res.status(500).json({ message: error.message });
+    }
+}
+
+// GET /api/policies/assignments/:userId
+const getPolicyAssignments = async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const customer = await Customer.findById(userId).lean();
+        if (!customer) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Get all policies assigned to this user (those with assigned = true)
+        const assignmentIds = (customer.policyAccepted || [])
+            .filter(pa => pa.assigned === true)
+            .map(pa => pa.policy);
+
+        const assignedPolicies = await Policy.find({ _id: { $in: assignmentIds }, isActive: true })
+            .sort({ showFirst: -1, sequence: 1 })
+            .lean();
+
+        res.json({ assigned: assignedPolicies });
+    } catch (error) {
+        console.error('getPolicyAssignments error:', error);
+        res.status(500).json({ message: error.message });
+    }
+}
+
 module.exports = {
     createPolicy,
     getPolicies,
@@ -470,5 +654,9 @@ module.exports = {
     bulkDeletePolicies,
     getApplicablePolicies,
     getFirstPriorityPolicy,
-    getUserPolicies
+    getUserPolicies,
+    getPendingPolicies,
+    forcePolicyForUser,
+    assignPolicyToUser,
+    getPolicyAssignments
 };

@@ -286,12 +286,6 @@ const customerLogin = async (req, res) => {
   }
 };
 
-
-
-
-
-
-
 const resendCustomerOTP = async (req, res) => {
   try {
     const { email } = req.body;
@@ -322,8 +316,7 @@ const resendCustomerOTP = async (req, res) => {
 
 const acceptTermsAndConditions = async (req, res) => {
   try {
-    const customerId = req.user.id; // Assuming you have authentication middleware that sets req.user
-    
+    const customerId = req.user._id ;
     // Find the customer
     const customer = await Customer.findById(customerId);
     if (!customer) {

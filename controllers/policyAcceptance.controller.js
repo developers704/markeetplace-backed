@@ -78,35 +78,74 @@ const acceptPolicy = async (req, res) => {
                 message: 'This policy is not applicable to your role or warehouse' 
             });
         }
+        const signedDocumentPath = await saveFileToDisk(req.file, customerId, policyId);
+
+        const forced = Array.isArray(policy.forceForUsers) && policy.forceForUsers.some(f => String(f.user) === String(customerId));
         
         // Check if already accepted
         const existingAcceptance = await PolicyAcceptance.findOne({
             customer: customerId,
             policy: policyId
         });
-        
-        if (existingAcceptance) {
-            return res.status(400).json({ 
-                message: 'You have already accepted this policy' 
-            });
-        }
-        
-        // All validation passed, now save the file to disk
-        const signedDocumentPath = await saveFileToDisk(req.file, customerId, policyId);
-        
-        // Create new policy acceptance record
-        const policyAcceptance = new PolicyAcceptance({
-            customer: customerId,
-            policy: policyId,
-            signatureData,
-            signedDocumentPath,
-            ipAddress,
-            userAgent,
-            policyVersion: policy.version,
-            policySnapshot: policy.content
+
+        let policyAcceptance;
+
+        const existingVersion = parseFloat(existingAcceptance.policyVersion || 0);
+        const newVersion = parseFloat(policy.version || 0);
+
+
+       if (existingAcceptance) {
+
+       if (!forced && existingVersion >= newVersion) {
+        // Normal policy, already latest signed
+        return res.status(400).json({
+        message: 'You already signed the latest version of this policy'
         });
-        
+        }
+
+         // Forced policy OR version upgrade
+        existingAcceptance.signatureData = signatureData;
+        existingAcceptance.signedDocumentPath = signedDocumentPath;
+        existingAcceptance.policyVersion = newVersion;
+        existingAcceptance.policySnapshot = policy.content;
+        existingAcceptance.acceptedAt = new Date();
+        existingAcceptance.ipAddress = ipAddress;
+        existingAcceptance.userAgent = userAgent;
+
+        await existingAcceptance.save();
+        policyAcceptance = existingAcceptance;
+        } else {
+        policyAcceptance = new PolicyAcceptance({
+        customer: customerId,
+        policy: policyId,
+        signatureData,
+        signedDocumentPath,
+        ipAddress,
+        userAgent,
+        policyVersion: parseFloat(policy.version),
+        policySnapshot: policy.content
+        });
         await policyAcceptance.save();
+        }
+
+        const idx = (customer.policyAccepted || []).findIndex(pa => String(pa.policy) === String(policyId));
+        if (idx >= 0) {
+        customer.policyAccepted[idx].agreedVersion = policy.version;
+        customer.policyAccepted[idx].agreedAt = new Date();
+        customer.policyAccepted[idx].forced = false;
+        } else {
+        customer.policyAccepted.push({
+        policy: policyId,
+        agreedVersion: policy.version,
+        agreedAt: new Date(),
+        forced: false
+        });
+        }
+         
+        await Policy.updateOne(
+        { _id: policyId },
+        { $pull: { forceForUsers: { user: customer._id } } }
+        );
         
         // Update customer's policy acceptance status
         const applicablePolicies = await Policy.find({
@@ -122,11 +161,15 @@ const acceptPolicy = async (req, res) => {
             policy: { $in: applicablePolicies.map(p => p._id) }
         });
         
-        if (acceptedPolicies.length >= applicablePolicies.length) {
-            customer.policiesAccepted = true;
+            customer.policiesAccepted = acceptedPolicies.length >= applicablePolicies.length;
+
+        if (customer.policiesAccepted) { 
             customer.policiesAcceptedDate = new Date();
-            await customer.save();
         }
+
+        // Save customer ONCE
+        await customer.save();
+     
         
         res.status(201).json({
             message: 'Policy accepted successfully',
@@ -136,7 +179,7 @@ const acceptPolicy = async (req, res) => {
                 acceptedAt: policyAcceptance.acceptedAt,
                 documentUrl: `/uploads/${policyAcceptance.signedDocumentPath}`
             },
-            allPoliciesAccepted: acceptedPolicies.length >= applicablePolicies.length
+           allPoliciesAccepted: customer.policiesAccepted
         });
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -312,7 +355,7 @@ const getAllPolicyAcceptances = async (req, res) => {
                 populate: [
                     {
                         path: 'role',
-                        model: 'UserRole', // 🆕 Explicitly specify model
+                        model: 'UserRole', 
                         select: 'role_name permissions'
                     },
                     {
@@ -348,58 +391,58 @@ const getAllPolicyAcceptances = async (req, res) => {
         const formattedAcceptances = acceptances.map(acceptance => {
             const data = acceptance.toObject();
             return {
-                id: data._id,
-                customer: {
-                    id: data.customer._id,
-                    username: data.customer.username,
-                    email: data.customer.email,
-                    phone_number: data.customer.phone_number,
-                    role: data.customer.role ? {
-                        id: data.customer.role._id,
-                        name: data.customer.role.role_name, // 🆕 Use role_name field
-                        permissions: data.customer.role.permissions
-                    } : null,
-                    warehouse: data.customer.warehouse ? {
-                        id: data.customer.warehouse._id,
-                        name: data.customer.warehouse.name,
-                        location: data.customer.warehouse.location,
-                        address: data.customer.warehouse.address
-                    } : null,
-                    department: data.customer.department ? {
-                        id: data.customer.department._id,
-                        name: data.customer.department.name,
-                        description: data.customer.department.description
-                    } : null
-                },
-                policy: {
-                    id: data.policy._id,
-                    title: data.policy.title,
-                    version: data.policy.version,
-                    content: data.policy.content,
-                    isActive: data.policy.isActive,
-                    showFirst: data.policy.showFirst,
-                    sequence: data.policy.sequence,
-                    picture: data.policy.picture,
-                    applicableRoles: data.policy.applicableRoles ? data.policy.applicableRoles.map(role => ({
-                        id: role._id,
-                        name: role.role_name, // 🆕 Use role_name field
-                        permissions: role.permissions
-                    })) : [],
-                    applicableWarehouses: data.policy.applicableWarehouses ? data.policy.applicableWarehouses.map(warehouse => ({
-                        id: warehouse._id,
-                        name: warehouse.name,
-                        location: warehouse.location,
-                        address: warehouse.address
-                    })) : []
-                },
-                acceptedAt: data.acceptedAt,
-                policyVersion: data.policyVersion,
-                policySnapshot: data.policySnapshot,
-                ipAddress: data.ipAddress,
-                userAgent: data.userAgent,
-                documentUrl: data.signedDocumentPath ? `/uploads/${data.signedDocumentPath}` : null,
-                signatureData: data.signatureData ? 'Available' : 'Not Available'
-            };
+        id: data._id,
+        customer: data.customer ? {
+            id: data.customer._id,
+            username: data.customer.username,
+            email: data.customer.email,
+            phone_number: data.customer.phone_number,
+            role: data.customer.role ? {
+                id: data.customer.role._id,
+                name: data.customer.role.role_name,
+                permissions: data.customer.role.permissions
+            } : null,
+            warehouse: data.customer.warehouse ? {
+                id: data.customer.warehouse._id,
+                name: data.customer.warehouse.name,
+                location: data.customer.warehouse.location,
+                address: data.customer.warehouse.address
+            } : null,
+            department: data.customer.department ? {
+                id: data.customer.department._id,
+                name: data.customer.department.name,
+                description: data.customer.department.description
+            } : null
+        } : null,
+        policy: data.policy ? {
+            id: data.policy._id,
+            title: data.policy.title,
+            version: data.policy.version,
+            content: data.policy.content,
+            isActive: data.policy.isActive,
+            showFirst: data.policy.showFirst,
+            sequence: data.policy.sequence,
+            picture: data.policy.picture,
+            applicableRoles: data.policy.applicableRoles ? data.policy.applicableRoles.map(role => ({
+                id: role._id,
+                name: role.role_name,
+                permissions: role.permissions
+            })) : [],
+            applicableWarehouses: data.policy.applicableWarehouses ? data.policy.applicableWarehouses.map(warehouse => ({
+                id: warehouse._id,
+                name: warehouse.name,
+                location: warehouse.location,
+                address: warehouse.address
+            })) : []
+        } : null,
+        acceptedAt: data.acceptedAt,
+        policyVersion: data.policyVersion,
+        policySnapshot: data.policySnapshot,
+        ipAddress: data.ipAddress,
+        userAgent: data.userAgent,
+        documentUrl: data.signedDocumentPath ? `/uploads/${data.signedDocumentPath}` : null,
+        signatureData: data.signatureData ? 'Available' : 'Not Available'
+    };
         });
         
         res.status(200).json({

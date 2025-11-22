@@ -6,13 +6,22 @@ const policySchema = new mongoose.Schema({
         required: true,
         trim: true
     },
+    // policy type: terms, privacy, refund, nda, etc.
+    policyType: {
+        type: String,
+        enum: ['terms', 'privacy', 'refund', 'nda'],
+        default: 'terms',
+        required: true
+    },
     content: {
         type: String,
         required: true
     },
+    // numeric versioning for easy comparison and auto-incrementing
     version: {
-        type: String,
-        required: true
+        type: Number,
+        required: true,
+        default: 1
     },
     picture: {
         type: String, // Store image path
@@ -38,6 +47,13 @@ const policySchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Warehouse'
     }],
+    // Admin can force specific users to re-accept a policy
+    forceForUsers: [
+        {
+            user: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer' },
+            forcedAt: { type: Date, default: Date.now }
+        }
+    ],
     createdAt: {
         type: Date,
         default: Date.now

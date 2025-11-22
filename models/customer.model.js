@@ -114,6 +114,15 @@ termsAcceptedDate: {
     type: Date,
     default: null
 },
+    // Track policy acceptances per user: policy id, version agreed and timestamp
+    policyAccepted: [
+        {
+            policy: { type: mongoose.Schema.Types.ObjectId, ref: 'Policy' },
+            agreedVersion: { type: Number },
+            agreedAt: { type: Date, default: Date.now },
+            forced: { type: Boolean, default: false }
+        }
+    ],
 
 
 
