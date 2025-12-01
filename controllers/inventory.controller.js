@@ -91,19 +91,19 @@ const addInventory = async (req, res) => {
             return res.status(404).json({ message: 'Product not found' });
         }
 
-        // if (warehouse) {
-        //     const warehouseExists = await Warehouse.findById(warehouse);
-        //     if (!warehouseExists) {
-        //         return res.status(404).json({ message: 'Warehouse not found' });
-        //     }
-        // }
-          if (warehouse && warehouse.length > 0) {
-                const warehouses = await Warehouse.find({ _id: { $in: warehouse } });
+        if (warehouse) {
+            const warehouseExists = await Warehouse.findById(warehouse);
+            if (!warehouseExists) {
+                return res.status(404).json({ message: 'Warehouse not found' });
+            }
+        }
+        //   if (warehouse && warehouse.length > 0) {
+        //         const warehouses = await Warehouse.find({ _id: { $in: warehouse } });
           
-                if (warehouses.length !== warehouse.length) {
-                return res.status(400).json({ message: 'One or more warehouse IDs are invalid' });
-                }
-                }
+        //         if (warehouses.length !== warehouse.length) {
+        //         return res.status(400).json({ message: 'One or more warehouse IDs are invalid' });
+        //         }
+        //         }
 
         const cityExists = await City.findById(city);
         if (!cityExists) {
@@ -469,7 +469,7 @@ const getAvailableInventoriesDetailed = async (req, res) => {
     try {
         const { city, warehouse } = req.query;
 
-        // Build base query - only available inventories
+        // Base query: only available inventories
         const query = { quantity: { $gt: 0 } };
         if (city) query.city = city;
         if (warehouse) query.warehouse = warehouse;
@@ -478,38 +478,39 @@ const getAvailableInventoriesDetailed = async (req, res) => {
             .populate('warehouse city')
             .populate({
                 path: 'product',
-                // populate common product relations and include fields useful for frontend
+                strictPopulate: false, // ignore missing paths for populate
                 populate: [
-                    { path: 'category', select: 'name' },
-                    { path: 'subcategory', select: 'name' },
-                    { path: 'subsubcategory', select: 'name' },
-                    { path: 'brand', select: 'name' },
-                    { path: 'prices.city', model: 'City' },
-                    // populate variants with variantName (and parentVariant) so frontend can build filters
+                    // Only populate fields if exist in schema
+                    { path: 'category', select: 'name', strictPopulate: false },
+                    { path: 'subcategory', select: 'name', strictPopulate: false },
+                    { path: 'subsubcategory', select: 'name', strictPopulate: false },
+                    { path: 'brand', select: 'name', strictPopulate: false },
+                    { path: 'prices.city', model: 'City', strictPopulate: false },
                     {
                         path: 'variants',
                         populate: {
                             path: 'variantName',
-                            populate: { path: 'parentVariant', model: 'VariantName' }
-                        }
+                            populate: { path: 'parentVariant', model: 'VariantName', strictPopulate: false },
+                            strictPopulate: false
+                        },
+                        strictPopulate: false
                     },
-                    // include discounts and dealOfTheDay for offer/discount filters
-                    { path: 'discounts.discountId' },
-                    { path: 'dealOfTheDay' }
+                    { path: 'discounts.discountId', strictPopulate: false },
+                    { path: 'dealOfTheDay', strictPopulate: false },
+                    { path: 'specialCategory', select: 'name', strictPopulate: false },
+                    { path: 'specialSubcategory', select: 'name', strictPopulate: false }
                 ],
                 select: 'name sku image gallery prices variationId tags brand type specialCategory specialSubcategory variants discounts dealOfTheDay'
             });
 
-        // Transform shape if frontend needs simplified productInfo - keep both product and productInfo
+        // Transform inventories for frontend
         const transformed = inventories.map(inv => {
             const inventory = inv.toObject();
 
             if (inventory.product) {
-                // Base productInfo used by frontend cards
                 const product = inventory.product;
                 const prices = Array.isArray(product.prices) ? product.prices : [];
 
-                // choose price for the requested city when possible, else pick first price
                 let chosenPrice = null;
                 if (city && prices.length) {
                     chosenPrice = prices.find(p => p.city && String(p.city._id) === String(city)) || prices[0];
@@ -524,28 +525,26 @@ const getAvailableInventoriesDetailed = async (req, res) => {
                     image: product.image || null,
                     gallery: product.gallery || [],
                     prices: prices,
-                    // convenience: a single representative price object
                     price: chosenPrice,
-                    // expose variants and discounts for frontend filtering
                     variants: product.variants || [],
                     discounts: product.discounts || [],
                     dealOfTheDay: product.dealOfTheDay || [],
                     brand: product.brand || null,
-                    type: product.type || null
+                    type: product.type || null,
+                    specialCategory: product.specialCategory || null,
+                    specialSubcategory: product.specialSubcategory || null
                 };
             } else {
                 inventory.productInfo = { name: '', sku: '' };
             }
 
-            // add an isOutOfStock flag (this endpoint already filters quantity>0, but keep flag for UI)
             inventory.isOutOfStock = inventory.quantity <= 0;
 
-            // add a compact inventory summary on product for aggregated filters if needed
-            // (contains city id, quantity, vat and minimal warehouse info)
             inventory.inventorySummary = {
                 city: inventory.city ? inventory.city._id || inventory.city : null,
                 quantity: inventory.quantity,
                 vat: inventory.vat,
+                expiryDate: inventory.expiryDate,
                 warehouses: Array.isArray(inventory.warehouse)
                     ? inventory.warehouse.map(w => ({ _id: w._id, name: w.name, isMain: !!w.isMain }))
                     : []
@@ -554,7 +553,7 @@ const getAvailableInventoriesDetailed = async (req, res) => {
             return inventory;
         });
 
-        // Optionally, sort low stock first (same as previous behavior)
+        // Low-stock sorting
         const lowStock = transformed.filter(inv => inv.quantity <= inv.stockAlertThreshold);
         const others = transformed.filter(inv => inv.quantity > inv.stockAlertThreshold);
         const sorted = [...lowStock, ...others];
@@ -1295,7 +1294,7 @@ const bulkUploadInventory = async (req, res) => {
         try {
             const warehouse = await Warehouse.findOne({ name: { $regex: new RegExp(`^${warehouseName.trim()}`, 'i') } });
             if (!warehouse) {
-                console.log(`Warehouse not found: ${warehouseName}`);
+                // console.log(`Warehouse not found: ${warehouseName}`);
                 skippedCount++;
                 return;
             }
@@ -1306,8 +1305,8 @@ const bulkUploadInventory = async (req, res) => {
             const normalizedSku = sku.toString().includes('E+') ? 
             sku.toString().replace('.', '').replace('E+', '').padEnd(13, '0') : 
             sku.toString().trim();
-            console.log('Original SKU:', sku);
-            console.log('Normalized SKU:', normalizedSku);
+            // console.log('Original SKU:', sku);
+            // console.log('Normalized SKU:', normalizedSku);
             if (productType === 'SpecialProduct') {
                 product = await SpecialProduct.findOne({ sku: normalizedSku });
             } else {
@@ -1315,7 +1314,7 @@ const bulkUploadInventory = async (req, res) => {
             }
 
             if (!product) {
-                console.log(`Product not found: ${normalizedSku}`);
+                // console.log(`Product not found: ${normalizedSku}`);
                 skippedCount++;
                 return;
             }
@@ -1368,7 +1367,7 @@ const bulkUploadInventory = async (req, res) => {
     inventoryMap.set(key, inventoryData);
 }
         } catch (error) {
-            console.log('Row processing error:', error);
+            // console.log('Row processing error:', error);
             skippedCount++;
         }
     };
@@ -1394,8 +1393,8 @@ const bulkUploadInventory = async (req, res) => {
                 // await existingInventory.save();
                 // updatedCount++;
 
-                console.log('Before Update:', existingInventory.quantity);
-                console.log('New Quantity:', inventoryData.quantity);
+                // console.log('Before Update:', existingInventory.quantity);
+                // console.log('New Quantity:', inventoryData.quantity);
                 
                 const updated = await Inventory.findOneAndUpdate(
                     {
@@ -1420,7 +1419,7 @@ const bulkUploadInventory = async (req, res) => {
                     { new: true, runValidators: true }
                 );
                 
-                console.log('After Update:', updated.quantity);
+                // console.log('After Update:', updated.quantity);
                 updatedCount++;
             } else {
                 const newInventory = new Inventory(inventoryData);

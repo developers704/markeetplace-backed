@@ -16,7 +16,13 @@ const wishlistSchema = new mongoose.Schema({
       type: mongoose.Schema.Types.ObjectId,
       refPath: 'products.productType',
       required: true
-    }
+    },
+    sellerWarehouseId: {
+      type: String,
+    },
+    isMain:{
+      type: String 
+    },
   }]
 }, { timestamps: true });
 

@@ -26,40 +26,88 @@ const Warehouse = require('../models/warehouse.model');
 
 
 
+// const searchProducts = async (req, res) => {
+//   try {
+//     let { query } = req.query;
+//     if (!query || query.trim() === "") {
+//       return res.json([]);
+//     }
+
+//     query = query.trim();
+
+//     // 1️⃣ Regular products search
+//     const regularProducts = await Product.find(
+//       { $text: { $search: query } },
+//       { score: { $meta: "textScore" } }
+//     )
+//       .sort({ score: { $meta: "textScore" } })
+//       .limit(50)
+//       .populate("category subcategory subsubcategory brand");
+
+//     // 2️⃣ Special products search
+//     const specialProducts = await SpecialProduct.find(
+//       { $text: { $search: query } },
+//       { score: { $meta: "textScore" } }
+//     )
+//       .sort({ score: { $meta: "textScore" } })
+//       .limit(50)
+//       .populate("specialCategory specialSubcategory");
+
+//     // 3️⃣ Merge results + type tagging
+//     const results = [
+//       ...regularProducts.map((p) => ({
+//         ...p.toObject(),
+//         productType: "Regular",
+//       })),
+//       ...specialProducts.map((p) => ({
+//         ...p.toObject(),
+//         productType: "Special",
+//       })),
+//     ];
+
+//     res.json(results);
+//   } catch (error) {
+//     console.error("Search Error:", error);
+//     res.status(500).json({
+//       message: "Error searching products",
+//       error: error.message,
+//     });
+//   }
+// };
+
 const searchProducts = async (req, res) => {
   try {
-    const { query } = req.query;
-    const regex = new RegExp(query, 'i');
+    let { search } = req.query;
+    if (!search || search.trim() === "") return res.json([]);
 
-    const regularProducts = await Product.find({
-      $or: [
-        { name: regex },
-        { sku: regex },
-        { 'category.name': regex },
-        { 'subcategory.name': regex },
-        { 'subsubcategory.name': regex }
-      ]
-    }).populate('category subcategory subsubcategory brand');
+    search = search.trim();
 
-    const specialProducts = await SpecialProduct.find({
-      $or: [
-        { name: regex },
-        { sku: regex },
-        { 'specialCategory.name': regex },
-        { 'specialSubcategory.name': regex }
-      ]
-    }).populate('specialCategory specialSubcategory');
+    // 1) Fast prefix search (autocomplete feel)
+    const prefixResults = await Product.find({
+      name: { $regex: `^${search}`, $options: "i" }
+    })
+      .select('_id name sku image')
+      .limit(20)
+      // .populate("category subcategory subsubcategory brand");
 
-    const results = [
-      ...regularProducts.map(p => ({ ...p.toObject(), productType: 'Regular' })),
-      ...specialProducts.map(p => ({ ...p.toObject(), productType: 'Special' }))
-    ];
+    // 2) Fallback full text search
+    const textResults = await Product.find(
+      { $text: { $search: search } },
+      { score: { $meta: "textScore" } }
+    )
+      .select('_id name sku image')
+      .sort({ score: { $meta: "textScore" } })
+      .limit(30);
+
+    const results = [...prefixResults, ...textResults];
 
     res.json(results);
   } catch (error) {
-    res.status(500).json({ message: 'Error searching products', error: error.message });
+    res.status(500).json({ message: error.message });
   }
 };
+
+
 
 const getAllProductsForSearch = async (req, res) => {
   try {

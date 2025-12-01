@@ -28,7 +28,7 @@ router.get('/',  getAllInventories);
 // Public route to fetch available inventories with full product details (image, prices, gallery)
 router.get('/available-detailed', getAvailableInventoriesDetailed);
 router.get('/sample-csv', createSampleInventoryCsvTemplate);
-router.delete('/bulk-delete', checkSuperuserOrPermission('Inventory', 'Delete'), adminLogger(), deleteInventories);
+router.delete('/bulk-delete', deleteInventories);
 router.delete('/:id', checkSuperuserOrPermission('Inventory', 'Delete'), adminLogger(), deleteInventory);
 
 

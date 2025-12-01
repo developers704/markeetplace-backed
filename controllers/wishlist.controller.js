@@ -6,7 +6,7 @@ const SpecialProduct = require('../models/specialProduct.model.js');
 
 const addToWishlist = async (req, res) => {
     try {
-      const { productId, productType } = req.body;
+      const { productId, productType , isMain , sellerWarehouseId} = req.body;
       const customerId = req.user._id;
   
       // Check if the product exists
@@ -24,7 +24,7 @@ const addToWishlist = async (req, res) => {
       // Use $addToSet to avoid duplicate product entries
       let wishlist = await Wishlist.findOneAndUpdate(
         { customer: customerId },
-        { $addToSet: { products: { productType, product: productId } } }, // $addToSet prevents duplicates
+        { $addToSet: { products: { productType, product: productId, isMain : isMain , sellerWarehouseId : sellerWarehouseId } } }, 
         { new: true, upsert: true } // new returns the updated document, upsert creates a new wishlist if it doesn't exist
       );
   

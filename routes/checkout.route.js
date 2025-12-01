@@ -16,7 +16,9 @@ const {
     updateOrderByAdmin,
     downloadOrdersData,
     approveOrder,
-    getPendingApprovals
+    getPendingApprovals,
+    warehouseToWarehouseTransfer,
+    approveNormalWarehouseOrder
 } = require('../controllers/checkout.controller');
 const guestOrAuthMiddleware = require('../middlewares/guestOrAuthMiddleware');
 const checkAccountStatus = require('../middlewares/checkAccountStatus');
@@ -27,6 +29,8 @@ const adminLogger = require('../middlewares/adminLogger');
 
 router.post('/calculate-total', guestOrAuthMiddleware, checkAccountStatus, calculateOrderTotals);
 router.post('/process', guestOrAuthMiddleware, checkAccountStatus, placeOrder);
+// warehouse to warehouse request order 
+router.post('/store-request-order', guestOrAuthMiddleware, checkAccountStatus, warehouseToWarehouseTransfer);
 router.post(
     '/wallet/update',
     authMiddleware,
@@ -38,6 +42,7 @@ router.get('/history', authMiddleware, getUserOrders);
 router.get('/order',  getAllOrders);
 router.get('/order/pending-approvals', authMiddleware, getPendingApprovals);
 router.patch("/:id/approve",authMiddleware, approveOrder);
+router.patch("/:id/approve/request",authMiddleware, approveNormalWarehouseOrder);
 router.get('/wallet', authMiddleware, getOwnWallet);
 router.get('/orders/download-data', downloadOrdersData);
 router.get('/admin/wallets', authMiddleware, checkSuperuserOrPermission('Orders', 'View'), getAllWallets);

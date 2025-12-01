@@ -11,10 +11,10 @@ const inventorySchema = new mongoose.Schema(
       enum: ['Product', 'SpecialProduct'],
       required: true
     },
-   warehouse: [{
+   warehouse: {
   type: mongoose.Schema.Types.ObjectId,
   ref: 'Warehouse',
-  }],
+  },
     city: { type: mongoose.Schema.Types.ObjectId, ref: 'City', required: true }, // City-specific inventory
     quantity: {
       type: Number,

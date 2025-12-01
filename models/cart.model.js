@@ -81,6 +81,13 @@ const cartItemSchema = new mongoose.Schema({
   color: {
     type: String,
     default: null
+  },
+  isMain: {
+    type: Boolean,
+    default: false
+  },
+  sellerWarehouseId :{
+    type: String
   }
 });
 

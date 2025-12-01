@@ -23,6 +23,7 @@ const InventoryWallet = require('../models/inventoryWallet.model');
 const User = require('../models/user.model');
 const UserRole = require('../models/userRole.model');
 const ActivityLogModel = require('../models/ActivityLog.model');
+const { sendEmail } = require('../config/sendMails');
 
 
 // Helper function to generate a random order number
@@ -32,19 +33,14 @@ const generateOrderNumber = () => {
     return `ORD-${date}-${randomStr}`;  // Example: ORD-20240930-abc123
 };
 
+const calculateOrderTotalsHelper = async (items, couponCode) => {
+  if (!items || items.length === 0) throw new Error('Cart is empty');
 
-
-const calculateOrderTotalsHelper = async (cartId, couponCode) => {
-  const cart = await Cart.findById(cartId);
-
-  if (!cart) throw new Error('Cart not found');
-  if (cart.items.length === 0) throw new Error('Cart is empty');
-
-  const productTotal = cart.items
+  const productTotal = items
     .filter(item => item.itemType === 'Product')
     .reduce((sum, item) => sum + (item.price * item.quantity), 0);
 
-  const specialProductTotal = cart.items
+  const specialProductTotal = items
     .filter(item => item.itemType === 'SpecialProduct')
     .reduce((sum, item) => sum + (item.price * item.quantity), 0);
 
@@ -83,8 +79,6 @@ const calculateOrderTotalsHelper = async (cartId, couponCode) => {
   };
 };
 
-
-
 const calculateOrderTotals = async (req, res) => {
     try {
         const { cartId, shippingMethodId, couponCode } = req.body;
@@ -101,7 +95,6 @@ const calculateOrderTotals = async (req, res) => {
         res.status(400).json({ message: error.message });
     }
 };
-
 
 const handleCODPayment = (order) => {
     // If payment method is COD, update payment status and order status
@@ -149,11 +142,12 @@ const placeOrder = async (req, res) => {
       specialInstructions,
       couponCode,
       cityId,
+    
       warehouse,
     } = req.body;
-
+      const items = Array.isArray(req.body) ? req.body : req.body.items || [];
     const warehouseId = warehouse?._id || warehouse;
-    const mainWarehouseId = "67b6c7b68958be48910ed415"; // main stock warehouse ID
+    const mainWarehouseId = "67b6c7b68958be48910ed415"; 
 
     const cart = await Cart.findById(cartId).populate("items.item");
     if (!cart) throw new Error("Cart not found");
@@ -167,7 +161,7 @@ const placeOrder = async (req, res) => {
     if (!customerWarehouse) throw new Error("Warehouse not found");
 
     // calculate totals
-    const totals = await calculateOrderTotalsHelper(cartId, couponCode);
+    const totals = await calculateOrderTotalsHelper(items, couponCode);
 
     // 🟩 Create base order
     const order = new Order({
@@ -176,12 +170,14 @@ const placeOrder = async (req, res) => {
       warehouse: warehouseId,
       createdBy: req.user.id,
       approvalStatus: "PENDING",
-      items: cart.items.map((item) => ({
+      items: items.map((item) => ({
         itemType: item.itemType,
         product: item.item._id,
         quantity: item.quantity,
         price: item.price,
         color: item.color || null,
+        sellerWarehouseId: item?.sellerWarehouseId,
+        isMain: item?.isMain
       })),
       shippingMethod: shippingMethodId || null,
       city: cityId || null,
@@ -196,8 +192,8 @@ const placeOrder = async (req, res) => {
     });
 
     // 🟦 Process inventory and wallet deduction from MAIN warehouse
-    const normalProducts = cart.items.filter((i) => i.itemType === "Product");
-    const specialProducts = cart.items.filter(
+    const normalProducts = items.filter((i) => i.itemType === "Product");
+    const specialProducts = items.filter(
       (i) => i.itemType === "SpecialProduct"
     );
 
@@ -365,6 +361,61 @@ const placeOrder = async (req, res) => {
 };
 const mainWarehouseId = '67b6c7b68958be48910ed415'; 
 
+async function allocateProducts(order, session) {
+  const customerWarehouse = order.warehouse;
+  if (!customerWarehouse || !customerWarehouse._id) throw new Error("Customer warehouse missing");
+
+  const productItems = order.items.filter(i => i.itemType === 'Product');
+  if (productItems.length === 0) return;
+
+  for (const item of productItems) {
+    // Ensure main warehouse inventory
+    const mainInventory = await Inventory.findOne({ product: item.product._id || item.product, warehouse: mainWarehouseId }).session(session);
+    if (!mainInventory || mainInventory.quantity < item.quantity) {
+      throw new Error(`Insufficient quantity for product ${item.product.name || item.product} in main warehouse`);
+    }
+
+    // Deduct from main warehouse
+    // await Inventory.findOneAndUpdate(
+    //   { product: item.product._id || item.product, warehouse: mainWarehouseId },
+    //   { $inc: { quantity: -item.quantity } },
+    //   { new: true, session }
+    // );
+
+    // Add to customer warehouse (upsert)
+    const updatedCustomerInventory = await Inventory.findOneAndUpdate(
+      { product: item.product._id || item.product, warehouse: customerWarehouse._id },
+      {
+        $inc: { quantity: item.quantity },
+        $setOnInsert: {
+          productType: 'Product',
+          city: order.city?._id || order.city || '67400e8a7b963a1282d218b5',
+          stockAlertThreshold: 5,
+          lastRestocked: new Date()
+        }
+      },
+      { upsert: true, new: true, session }
+    );
+
+    // Add inventory reference to Product
+    await Product.findByIdAndUpdate(
+      item.product._id || item.product,
+      { $addToSet: { inventory: updatedCustomerInventory._id } },
+      { new: true, session }
+    );
+  }
+
+   const inventoryWallet = await InventoryWallet.findOne({ warehouse: mainWarehouseId }).session(session);
+        if (!inventoryWallet) throw new Error("Main warehouse inventory wallet missing");
+
+        const totalAmount = productItems.reduce((sum, i) => sum + (i.price * i.quantity), 0);
+        inventoryWallet.balance += totalAmount;
+        await inventoryWallet.save({ session });
+
+  // Update main warehouse InventoryWallet
+
+}
+
 async function allocateSpecialProducts(order, session) {
   // allocate special (non-GWP) from main to customer warehouse (used on final approval)
   const customerWarehouse = order.warehouse;
@@ -392,11 +443,11 @@ async function allocateSpecialProducts(order, session) {
       throw new Error(`Insufficient quantity for special product ${item.product.name || item.product} in main warehouse`);
     }
 
-    const updatedMainInventory = await Inventory.findOneAndUpdate(
-      { product: item.product._id || item.product, warehouse: mainWarehouseId },
-      { $inc: { quantity: -item.quantity } },
-      { new: true, session }
-    );
+    // const updatedMainInventory = await Inventory.findOneAndUpdate(
+    //   { product: item.product._id || item.product, warehouse: mainWarehouseId },
+    //   { $inc: { quantity: -item.quantity } },
+    //   { new: true, session }
+    // );
 
     if (updatedMainInventory && updatedMainInventory.quantity <= updatedMainInventory.stockAlertThreshold) {
       await AdminNotification.create([{
@@ -423,6 +474,7 @@ async function allocateSpecialProducts(order, session) {
       },
       { upsert: true, new: true, session }
     );
+      // console.log('Updated Customer Inventory:', updatedCustomerInventory);
 
     // add inventory ref to special product
     await SpecialProduct.findByIdAndUpdate(
@@ -545,10 +597,8 @@ const approveOrder = async (req, res) => {
         path: 'items.product',
         refPath: 'items.itemType'
       }).session(session);
-      // if (order.isFinalized) {
-      //  throw new Error("This order has already been finalized. No further actions allowed.");
-      // }
-      if (order.isFinalized && !(shippingStatus || paymentStatus)) {
+  
+    if (order.isFinalized && !(shippingStatus || paymentStatus)) {
        throw new Error("Order finalized, approval not allowed");
       }
     if (!order) throw new Error("Order not found");
@@ -736,7 +786,27 @@ const approveOrder = async (req, res) => {
       order.orderStatus = 'Processing';
       order.approvedBy = userId;
 
+      
+      await allocateProducts(order, session);
+      
       await allocateSpecialProducts(order, session);
+
+       
+      
+      
+      // const mainWallet = await SuppliesWallet.findOne({ warehouse: mainWarehouseId }).session(session);
+      // if (!mainWallet) {
+      // throw new Error("Main warehouse wallet not found");
+      // }
+      // const specialAmount = order.items
+      // .filter(i => i.itemType === 'SpecialProduct')
+      // .reduce((sum, item) => sum + (item.price * item.quantity), 0);
+
+      // mainWallet.balance += specialAmount;
+      // await mainWallet.save({ session });
+
+
+
 
       // notify customer of final approval
       if (order.customer) {
@@ -761,12 +831,888 @@ const approveOrder = async (req, res) => {
       order
     });
   } catch (error) {
-    console.error("Approval error:", error);
+    // console.error("Approval error:", error);
     try { await session.abortTransaction(); } catch (e) {}
     session.endSession();
     return res.status(400).json({ message: error.message });
   }
 };
+
+// wahrehouses to warehouse transfer on order placed request 
+
+const warehouseToWarehouseTransfer = async (req, res) => {
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const {
+      cartId,
+      shippingMethodId,
+      paymentMethod,
+      specialInstructions,
+      couponCode,
+      cityId,
+      warehouse,
+      sellerWarehouseId  
+    } = req.body;
+      const items = Array.isArray(req.body) ? req.body : req.body.items || [];
+     if (!items || items.length === 0) throw new Error("No items to process");
+    
+    // --- 🟢 DYNAMIC WAREHOUSE SETUP ---
+    const buyerWarehouseId  = warehouse?._id || warehouse;
+ 
+  for (const item of items) {
+  const sellerId = item.sellerWarehouseId?.toString();
+  const buyerId = buyerWarehouseId?.toString();
+
+  if (sellerId && buyerId && sellerId === buyerId) {
+    throw new Error(
+      `You cannot order product "${item?.item?.name}" from the same warehouse you belong to.`
+    );
+  }
+  }
+  
+
+    // if (!sellerWarehouseId)
+    //   throw new Error("Seller warehouse is missing");
+    
+
+    // buyer info
+    const customer = await Customer.findById(req.user.id).populate("warehouse");
+    if (!customer) throw new Error("Customer not found");
+
+    // cart
+    const cart = await Cart.findById(cartId).populate("items.item");
+    if (!cart) throw new Error("Cart not found");
+
+    // validate buyer warehouse
+    const buyerWarehouse = await Warehouse.findById(buyerWarehouseId);
+    if (!buyerWarehouse) throw new Error("Buyer warehouse not found");
+
+    // --- Totals
+    const totals = await calculateOrderTotalsHelper(items, couponCode);
+
+    // --- Create Base Order ---
+    const order = new Order({
+      orderId: generateOrderNumber(),
+      customer: customer._id,
+      warehouse: buyerWarehouseId,      
+      // sellerWarehouseId,
+      createdBy: req.user.id,
+      approvalStatus: "PENDING",
+
+      items: items.map((item) => ({
+        itemType: item.itemType,
+        product: item.item._id,
+        quantity: item.quantity,
+        price: item.price,
+        color: item.color ?? null,
+        sellerWarehouseId: item?.sellerWarehouseId,
+        isMain: item.isMain
+      })),
+
+      shippingMethod: shippingMethodId || null,
+      city: cityId || null,
+      subtotal: totals.subtotal,
+      shippingCost: totals.shippingCost || null,
+      grandTotal: totals.grandTotal,
+      couponUsed: couponCode || null,
+      paymentMethod,
+      paymentStatus: "Pending",
+      orderStatus: "Pending",
+      specialInstructions,
+    });
+
+    // PRODUCT GROUPING
+    const normalProducts = items.filter(i => i.itemType === "Product");
+    const specialProducts = items.filter(i => i.itemType === "SpecialProduct");
+
+    let productMap = {};
+    if (specialProducts.length > 0) {
+      const populatedSpecial = await SpecialProduct.find({
+        _id: { $in: specialProducts.map(i => i.item._id) }
+      });
+
+      productMap = populatedSpecial.reduce((map, p) => {
+        map[p._id.toString()] = p;
+        return map;
+      }, {});
+    }
+
+    const gwpProducts = specialProducts.filter(
+      i => productMap[i.item._id.toString()]?.type === "GWP"
+    );
+    const otherSpecialProducts = specialProducts.filter(
+      i => productMap[i.item._id.toString()]?.type !== "GWP"
+    );
+
+    const normalTotal = normalProducts.reduce((s, i) => s + i.price * i.quantity, 0);
+    const gwpTotal = gwpProducts.reduce((s, i) => s + i.price * i.quantity, 0);
+    const otherSpecialTotal = otherSpecialProducts.reduce((s, i) => s + i.price * i.quantity, 0);
+
+    // --------------------------------------
+    // 🟥 STOCK DEDUCT → from sellerWarehouse
+    // --------------------------------------
+    for (const item of [...normalProducts, ...gwpProducts, ...otherSpecialProducts]) {
+      const sellerWarehouseId = item.sellerWarehouseId;
+      if (!sellerWarehouseId) {
+      throw new Error("Missing sellerWarehouseId for item");
+      }
+      const inv = await Inventory.findOne({
+        product: item.item._id,
+        warehouse: sellerWarehouseId
+      });
+
+      if (!inv || inv.quantity < item.quantity) {
+        throw new Error(
+          `Insufficient stock for product ${item.item.name} in warehouse ${sellerWarehouseId}`
+        );
+      }
+
+      // deduct stock
+      const updatedInv = await Inventory.findOneAndUpdate(
+        { product: item.item._id, warehouse: sellerWarehouseId},
+        { $inc: { quantity: -item.quantity } },
+        { new: true, session }
+      );
+
+      if (updatedInv.quantity <= updatedInv.stockAlertThreshold) {
+        await AdminNotification.create(
+          [{
+            user: "66c5bc4b3c1526016eeac109",
+            type: "LOW_STOCK",
+            content: `Low stock alert for ${item.item.name} in warehouse ${sellerWarehouseId}`,
+            resourceId: updatedInv._id,
+            resourceModel: "Inventory",
+            priority: "high",
+          }],
+          { session }
+        );
+      }
+    }
+
+    // --------------------------------------
+    // 🟧 WALLET DEDUCTION → buyer warehouse
+    // --------------------------------------
+    const inventoryWalletTotal = normalTotal + gwpTotal;
+
+    if (inventoryWalletTotal > 0) {
+      const inventoryWallet = await InventoryWallet.findOne({ warehouse: buyerWarehouseId });
+
+      if (!inventoryWallet || inventoryWallet.balance < inventoryWalletTotal) {
+        throw new Error("Insufficient inventory wallet balance");
+      }
+
+      inventoryWallet.balance -= inventoryWalletTotal;
+      await inventoryWallet.save({ session });
+    }
+
+    if (otherSpecialTotal > 0) {
+      const suppliesWallet = await SuppliesWallet.findOne({ warehouse: buyerWarehouseId });
+
+      if (!suppliesWallet || suppliesWallet.balance < otherSpecialTotal) {
+        throw new Error("Insufficient supplies wallet balance");
+      }
+
+      suppliesWallet.balance -= otherSpecialTotal;
+      await suppliesWallet.save({ session });
+    }
+
+    // ORDER STATUS
+    order.orderStatus = "Pending";
+    order.paymentStatus = "Pending";
+    await order.save({ session });
+
+    // NEXT APPROVER LOGIC (same as your logic)
+    let nextApprover = null;
+    const notifications = [];
+
+    if (buyerWarehouse.districtManager) {
+      nextApprover = buyerWarehouse.districtManager;
+      notifications.push(
+        new Notification({
+          user: nextApprover,
+          type: "ORDER",
+          content: `Order #${order.orderId} awaiting District Manager approval.`,
+          resourceId: order._id,
+          resourceModel: "Order",
+          priority: "high",
+        })
+      );
+    } else if (buyerWarehouse.corporateManager) {
+      nextApprover = buyerWarehouse.corporateManager;
+      notifications.push(
+        new Notification({
+          user: nextApprover,
+          type: "ORDER",
+          content: `Order #${order.orderId} awaiting Corporate Manager approval.`,
+          resourceId: order._id,
+          resourceModel: "Order",
+          priority: "high",
+        })
+      );
+    } else {
+      nextApprover = "66c5bc4b3c1526016eeac109";
+      notifications.push(
+        new AdminNotification({
+          user: nextApprover,
+          type: "ORDER",
+          content: `Order #${order.orderId} requires Admin approval.`,
+          resourceId: order._id,
+          resourceModel: "Order",
+          priority: "high",
+        })
+      );
+    }
+
+    await Promise.all(notifications.map(n => n.save({ session })));
+
+    // CUSTOMER NOTIFICATION
+    await new Notification({
+      user: customer._id,
+      content: `Your order #${order.orderId} is submitted for approval.`,
+      url: `/orders/${order._id}`
+    }).save({ session });
+
+    const customerOrderEmail = (order) => `
+    <table width="100%" cellpadding="0" cellspacing="0" style="font-family:Arial, sans-serif; background:#f7f7f7; padding:20px;">
+    <tr>
+    <td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:white; border-radius:8px; padding:20px;">
+        <tr>
+          <td style="text-align:center; padding-bottom:20px;">
+            <h2 style="color:#333; margin:0;">Order Submitted Successfully</h2>
+            <p style="color:#666; margin:0;">Thank you for your purchase!</p>
+          </td>
+        </tr>
+        
+        <tr>
+          <td>
+            <p style="color:#333; font-size:15px;">
+              Hello <strong>${order?.customerName}</strong>,
+            </p>
+            <p style="color:#555;">
+              Your order <strong>#${order?.orderId}</strong> has been submitted and is now 
+              <strong>pending approval</strong>.
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:15px; background:#fafafa; border-radius:6px;">
+            <h3 style="margin:0 0 10px 0; color:#333;">Order Summary</h3>
+            <p style="margin:0; color:#555;">
+              <strong>Total Items:</strong> ${order?.items?.length} <br>
+              <strong>Amount:</strong> PKR ${order?.totalAmount} <br>
+              <strong>Warehouse:</strong> ${order?.warehouseName}
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center" style="padding:25px 0;">
+            <a href="https://vallianimarketplace.com/en/profile-details?option=My%20Order" 
+               style="padding:12px 22px; background:#4f46e5; color:white; 
+               text-decoration:none; border-radius:6px;">
+               View Order
+            </a>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="color:#999; font-size:12px; text-align:center;">
+            This is an automated message — please do not reply.
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+    </table>
+    `;
+
+
+  const adminOrderEmail = (order, nextApproverName) => `
+    <table width="100%" cellpadding="0" cellspacing="0" style="font-family:Arial, sans-serif; background:#f7f7f7; padding:20px;">
+    <tr>
+    <td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:white; border-radius:8px; padding:20px;">
+        <tr>
+          <td style="text-align:center; padding-bottom:20px;">
+            <h2 style="color:#333; margin:0;">New Order Requires Approval</h2>
+            <p style="color:#666; margin:0;">Order #${order?.orderId}</p>
+          </td>
+        </tr>
+        
+        <tr>
+          <td>
+            <p style="color:#333; font-size:15px;">
+              Hello <strong>Sir</strong>,
+            </p>
+            <p style="color:#555;">
+              A new order has been submitted and is waiting for your approval.
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:15px; background:#fafafa; border-radius:6px;">
+            <h3 style="margin:0 0 10px 0; color:#333;">Order Details</h3>
+            <p style="margin:0; color:#555;">
+              <strong>Order ID:</strong> ${order?.orderId} <br>
+              <strong>Customer:</strong> ${order?.customerName} <br>
+              <strong>Total Items:</strong> ${order?.items.length} <br>
+              <strong>Amount:</strong> PKR ${order?.totalAmount} <br>
+              <strong>Warehouse:</strong> ${order?.warehouseName}<br>
+              <strong>next Approver:</strong> ${nextApproverName}
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center" style="padding:25px 0;">
+            <a href="https://portal.vallianimarketplace.com/#/orders/requested-orders" 
+               style="padding:12px 22px; background:#16a34a; color:white; 
+               text-decoration:none; border-radius:6px;">
+               Review & Approve Order
+            </a>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="color:#999; font-size:12px; text-align:center;">
+            This is an automated message — please do not reply.
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  </table>
+  `;
+
+
+   if (customer) {
+  const mailOptions = {
+    to: customer?.email,
+    subject: `Order #${order?.orderId} Submitted`,
+    html: customerOrderEmail({
+      customerName: customer?.username,
+      orderId: order?.orderId,
+      items: order?.items,
+      totalAmount: order?.grandTotal,
+      warehouseName: buyerWarehouse?.name,
+      warehouse: buyerWarehouse,
+      _id: order?._id
+    })
+  };
+  await sendEmail(mailOptions);
+}
+const mailOptionsAdmin = {
+  to: nextApprover?.email || "developer@arrakconsulting.com",
+  subject: `Order #${order?.orderId} Requires Approval`,
+  html: adminOrderEmail({
+      customerName: customer?.username,
+      orderId: order?.orderId,
+      items: order?.items,
+      totalAmount: order?.grandTotal,
+      warehouseName: buyerWarehouse?.name,
+      _id: order?._id
+    },
+    nextApprover?.username || "Admin"
+  )
+};
+
+await sendEmail(mailOptionsAdmin);
+
+
+    // CLEAR CART
+    cart.items = [];
+    cart.total = 0;
+    await cart.save({ session });
+
+    await session.commitTransaction();
+
+    res.status(201).json({
+      message: "Requested Order placed successfully and awaiting approval",
+      order,
+      nextApprover,
+    });
+
+  } catch (error) {
+    await session.abortTransaction();
+    res.status(400).json({ message: error.message });
+  } finally {
+    session.endSession();
+  }
+};
+
+async function handleOrderRejectionNormal(order, session) {
+  const customerWarehouse = order.warehouse;
+  if (!customerWarehouse || !customerWarehouse._id) {
+    throw new Error("Customer warehouse not found");
+  }
+
+  // Build productMap for specials
+  const specialProductIds = order.items
+    .filter(i => i.itemType === 'SpecialProduct')
+    .map(i => i.product._id ? i.product._id : i.product);
+
+  const specialProducts = await SpecialProduct.find({ _id: { $in: specialProductIds } }).session(session);
+  const productMap = specialProducts.reduce((m, p) => { m[p._id.toString()] = p; return m; }, {});
+
+  // --- 1) Non-GWP Special Products => SuppliesWallet refund + inventory restore ---
+  const nonGwpSpecialItems = order.items.filter(item =>
+    item.itemType === 'SpecialProduct' &&
+    productMap[item.product._id?.toString() || item.product.toString()]?.type !== 'GWP'
+  );
+
+  if (nonGwpSpecialItems.length > 0) {
+    const refundAmount = nonGwpSpecialItems.reduce((t, i) => t + (i.price * i.quantity), 0);
+    const suppliesWallet = await SuppliesWallet.findOne({ warehouse: customerWarehouse._id }).session(session);
+    if (!suppliesWallet) throw new Error('Supplies wallet not found for customer warehouse');
+    suppliesWallet.balance += refundAmount;
+    await suppliesWallet.save({ session });
+
+    for (const item of nonGwpSpecialItems) {
+      const sellerWarehouse = item.sellerWarehouseId;
+      if (!sellerWarehouse) throw new Error(`Seller warehouse missing for special product ${item.product._id || item.product}`);
+
+      // Restore inventory to sellerWarehouse
+      await Inventory.findOneAndUpdate(
+        { product: item.product._id || item.product, warehouse: sellerWarehouse },
+        { $inc: { quantity: item.quantity } },
+        { session }
+      );
+
+      // Deduct inventory from customerWarehouse
+      await Inventory.findOneAndUpdate(
+        { product: item.product._id || item.product, warehouse: customerWarehouse._id },
+        { $inc: { quantity: -item.quantity } },
+        { session }
+      );
+    }
+  }
+
+  // --- 2) GWP + Normal products => InventoryWallet refund + inventory restore ---
+  const gwpItems = order.items.filter(item =>
+    item.itemType === 'SpecialProduct' &&
+    productMap[item.product._id?.toString() || item.product.toString()]?.type === 'GWP'
+  );
+
+  const normalItems = order.items.filter(i => i.itemType === 'Product');
+  const inventoryWalletRefundItems = [...gwpItems, ...normalItems];
+
+  if (inventoryWalletRefundItems.length > 0) {
+    const refundAmount = inventoryWalletRefundItems.reduce((t, i) => t + (i.price * i.quantity), 0);
+    const inventoryWallet = await InventoryWallet.findOne({ warehouse: customerWarehouse._id }).session(session);
+    if (!inventoryWallet) throw new Error('Inventory wallet not found for customer warehouse');
+    inventoryWallet.balance += refundAmount;
+    await inventoryWallet.save({ session });
+
+    for (const item of inventoryWalletRefundItems) {
+      const sellerWarehouse = item.itemType === 'Product' ? item.sellerWarehouseId : item.sellerWarehouseId;
+      if (!sellerWarehouse) throw new Error(`Seller warehouse missing for product ${item.product._id || item.product}`);
+
+      // Restore inventory to sellerWarehouse
+      await Inventory.findOneAndUpdate(
+        { product: item.product._id || item.product, warehouse: sellerWarehouse },
+        { $inc: { quantity: item.quantity } },
+        { session }
+      );
+
+      // Deduct inventory from customerWarehouse
+      await Inventory.findOneAndUpdate(
+        { product: item.product._id || item.product, warehouse: customerWarehouse._id },
+        { $inc: { quantity: -item.quantity } },
+        { session }
+      );
+    }
+  }
+}
+
+async function allocateProductsNormal(order, mainWarehouseId, session) {
+  const customerWarehouse = order.warehouse;
+  if (!customerWarehouse || !customerWarehouse._id) 
+    throw new Error("Customer warehouse missing");
+
+  const productItems = order.items.filter(i => i.itemType === 'Product');
+  if (productItems.length === 0) return;
+
+  for (const item of productItems) {
+    const sellerWarehouse = item.sellerWarehouseId; // <-- use item level sellerWarehouse
+    if (!sellerWarehouse) throw new Error(`Seller warehouse missing for product ${item.product.name || item.product._id}`);
+
+    // Check main sellerwarehouse inventory
+    const mainInventory = await Inventory.findOne({ product: item.product._id || item.product, warehouse: sellerWarehouse }).session(session);
+    if (!mainInventory || mainInventory.quantity < item.quantity) {
+      throw new Error(`Insufficient quantity for product ${item.product.name || item.product} in this warehouse`);
+    }
+
+    // Deduct from seller warehouse warehouse
+    // await Inventory.findOneAndUpdate(
+    //   { product: item.product._id || item.product, warehouse: sellerWarehouse },
+    //   { $inc: { quantity: -item.quantity } },
+    //   { new: true, session }
+    // );
+
+    // Add to customer warehouse (upsert)
+    const updatedCustomerInventory = await Inventory.findOneAndUpdate(
+      { product: item.product._id || item.product, warehouse: customerWarehouse._id },
+      {
+        $inc: { quantity: item.quantity },
+        $setOnInsert: {
+          productType: 'Product',
+          city: order.city?._id || order.city || null,
+          stockAlertThreshold: 1,
+          lastRestocked: new Date()
+
+        }
+      },
+      { upsert: true, new: true, session }
+    );
+
+    // Add inventory reference to Product
+    await Product.findByIdAndUpdate(
+      item.product._id || item.product,
+      { $addToSet: { inventory: updatedCustomerInventory._id } },
+      { new: true, session }
+    );
+
+    
+    const totalAmount = item.price * item.quantity;
+    if (totalAmount > 0) {
+      const inventoryWallet = await InventoryWallet.findOne({ warehouse: sellerWarehouse }).session(session);
+      if (!inventoryWallet) throw new Error("inventory wallet not found for this warehouse");
+      inventoryWallet.balance += totalAmount;
+      await inventoryWallet.save({ session });
+    }
+  }
+}
+
+async function allocateSpecialProductsNormal(order, mainWarehouseId, session) {
+  const customerWarehouse = order.warehouse;
+  if (!customerWarehouse || !customerWarehouse._id) 
+    throw new Error("Customer warehouse missing");
+
+  const specialProductIds = order.items
+    .filter(i => i.itemType === 'SpecialProduct')
+    .map(i => i.product._id ? i.product._id : i.product);
+
+  if (specialProductIds.length === 0) return;
+
+  const specialProducts = await SpecialProduct.find({ _id: { $in: specialProductIds } }).session(session);
+  const productMap = specialProducts.reduce((m, p) => { m[p._id.toString()] = p; return m; }, {});
+
+  const nonGwpSpecialItems = order.items.filter(item =>
+    item.itemType === 'SpecialProduct' &&
+    productMap[item.product._id?.toString() || item.product.toString()]?.type !== 'GWP'
+  );
+
+  for (const item of nonGwpSpecialItems) {
+    const sellerWarehouse = item.sellerWarehouseId; 
+    if (!sellerWarehouse) throw new Error(`Seller warehouse missing for special product ${item.product._id || item.product}`);
+
+    // Check main warehouse inventory
+    const mainInventory = await Inventory.findOne({ product: item.product._id || item.product, warehouse: sellerWarehouse }).session(session);
+    if (!mainInventory || mainInventory.quantity < item.quantity) {
+      throw new Error(`Insufficient quantity for special product ${item.product.name || item.product} in this warehouse`);
+    }
+
+    // Deduct from main sellerwarehouse
+    //   await Inventory.findOneAndUpdate(
+    //   { product: item.product._id || item.product, warehouse: sellerWarehouse },
+    //   { $inc: { quantity: -item.quantity } },
+    //   { new: true, session }
+    // );
+
+    // Add to customer's warehouse inventory (upsert)
+    const updatedCustomerInventory = await Inventory.findOneAndUpdate(
+      { product: item.product._id || item.product, warehouse: customerWarehouse._id },
+      {
+        $inc: { quantity: item.quantity },
+        $setOnInsert: {
+          productType: 'SpecialProduct',
+          city: order.city?._id || order.city || null,
+          stockAlertThreshold: 5,
+          lastRestocked: new Date()
+        }
+      },
+      { upsert: true, new: true, session }
+    );
+
+    // Add inventory reference to SpecialProduct
+    await SpecialProduct.findByIdAndUpdate(
+      item.product._id || item.product,
+      { $addToSet: { inventory: updatedCustomerInventory._id } },
+      { new: true, session }
+    );
+
+    // Low stock notification
+    if (updatedCustomerInventory.quantity <= updatedCustomerInventory.stockAlertThreshold) {
+      await AdminNotification.create([{
+        user: '66c5bc4b3c1526016eeac109', 
+        type: 'LOW_STOCK',
+        content: `Low stock alert for ${item.product.name || item.product} in ${customerWarehouse.name} warehouse - Current quantity: ${updatedCustomerInventory.quantity}`,
+        resourceId: updatedCustomerInventory._id,
+        resourceModel: 'Inventory',
+        priority: 'high'
+      }], { session });
+    }
+
+    // Update inventory wallet for this sellerWarehouse
+    const totalAmount = item.price * item.quantity;
+    if (totalAmount > 0) {
+      const inventoryWallet = await InventoryWallet.findOne({ warehouse: sellerWarehouse }).session(session);
+      if (!inventoryWallet) throw new Error(`Inventory wallet not found for warehouse ${sellerWarehouse}`);
+      inventoryWallet.balance += totalAmount;
+      await inventoryWallet.save({ session });
+    }
+  }
+}
+
+const approveNormalWarehouseOrder = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { action, remarks, shippingStatus, paymentStatus , sellerWarehouse } = req.body;
+    const { id } = req.params;
+    const userId = req.user?._id || req.user?.id;
+    if (!userId) throw new Error("User ID not found");
+
+    // check if user is admin (super user)
+    const user = await User.findById(userId).populate('role').session(session);
+    if (!user || user.role.role_name.toLowerCase() !== 'super user') {
+      throw new Error("Only admin can approve normal warehouse orders");
+    }
+
+    // fetch order
+    const order = await Order.findById(id)
+      .populate('warehouse customer')
+      .populate({ path: 'items.product', refPath: 'items.itemType' })
+      .session(session);
+
+    if (!order) throw new Error("Order not found");
+    if (!order.warehouse || order.warehouse.isMain) throw new Error("Invalid warehouse for this controller");
+
+    
+      
+    // dynamic main warehouse
+    const mainWarehouse = await Warehouse.findOne({ isMain: true }).session(session);
+    if (!mainWarehouse) throw new Error("Main warehouse not found");
+
+    // DISAPPROVE
+    if (action === 'DISAPPROVE') {
+      order.approvalStatus = 'DISAPPROVED';
+      order.orderStatus = 'Cancelled';
+      order.approvedBy = userId;
+      order.isFinalized = true;
+
+      await handleOrderRejectionNormal(order, session, mainWarehouse._id);
+
+      if (order.customer) {
+        await new Notification({
+          user: order.customer._id,
+          type: 'ORDER',
+          content: `Your order #${order.orderId} was rejected by Admin.`,
+          resourceId: order._id,
+          resourceModel: 'Order'
+        }).save({ session });
+      }
+
+      
+    const customerOrderEmail = (order) => `
+    <table width="100%" cellpadding="0" cellspacing="0" style="font-family:Arial, sans-serif; background:#f7f7f7; padding:20px;">
+    <tr>
+    <td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:white; border-radius:8px; padding:20px;">
+        <tr>
+          <td style="text-align:center; padding-bottom:20px;">
+            <h2 style="color:#333; margin:0;">Order rejected </h2>
+            
+          </td>
+        </tr>
+        
+        <tr>
+          <td>
+            <p style="color:#333; font-size:15px;">
+              Hello <strong>${order?.customerName}</strong>,
+            </p>
+            <p style="color:#555;">
+              Your order <strong>#${order?.orderId}</strong> has been
+              <strong>rejected</strong>.
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:15px; background:#fafafa; border-radius:6px;">
+            <h3 style="margin:0 0 10px 0; color:#333;">Order Summary</h3>
+            <p style="margin:0; color:#555;">
+              <strong>Total Items:</strong> ${order?.items?.length} <br>
+              <strong>Amount:</strong> PKR ${order?.totalAmount} <br>
+              <strong>Warehouse:</strong> ${order?.warehouseName}
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center" style="padding:25px 0;">
+            <a href="https://vallianimarketplace.com/en/profile-details?option=My%20Order" 
+               style="padding:12px 22px; background:#4f46e5; color:white; 
+               text-decoration:none; border-radius:6px;">
+               View Order
+            </a>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="color:#999; font-size:12px; text-align:center;">
+            This is an automated message — please do not reply.
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+    </table>
+    `;
+
+
+ 
+
+      if (order.customer) {
+      const mailOptions = {
+      to: order?.customer?.email,
+      subject: `Order #${order?.orderId} rejected`,
+      html: customerOrderEmail({
+      customerName: order?.customer?.username,
+      orderId: order?.orderId,
+      items: order?.items,
+      totalAmount: order?.grandTotal,
+      warehouseName: order?.warehouse?.name,
+      _id: order?._id
+      })
+      };
+      await sendEmail(mailOptions);
+      }
+
+      await order.save({ session });
+      await session.commitTransaction();
+      session.endSession();
+      return res.status(200).json({ message: "Order disapproved by Admin", order });
+    }
+
+    // APPROVE
+    if (action === 'APPROVE') {
+      order.approvalStatus = 'APPROVED';
+      order.orderStatus = 'Processing';
+      order.isFinalized = true;
+      order.approvedBy = userId;
+
+      await allocateProductsNormal(order, mainWarehouse._id, session);
+      await allocateSpecialProductsNormal(order, mainWarehouse._id, session);
+
+      if (order.customer) {
+        await new Notification({
+          user: order.customer._id,
+          type: 'ORDER',
+          content: `Your order #${order.orderId} has been approved by Admin.`,
+          resourceId: order._id,
+          resourceModel: 'Order'
+        }).save({ session });
+      }
+
+         const customerOrderEmail = (order) => `
+    <table width="100%" cellpadding="0" cellspacing="0" style="font-family:Arial, sans-serif; background:#f7f7f7; padding:20px;">
+    <tr>
+    <td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:white; border-radius:8px; padding:20px;">
+        <tr>
+          <td style="text-align:center; padding-bottom:20px;">
+            <h2 style="color:#333; margin:0;">Order approved Successfully</h2>
+            <p style="color:#666; margin:0;">Thank you for your purchase!</p>
+          </td>
+        </tr>
+        
+        <tr>
+          <td>
+            <p style="color:#333; font-size:15px;">
+              Hello <strong>${order?.customerName}</strong>,
+            </p>
+            <p style="color:#555;">
+              Your order <strong>#${order?.orderId}</strong> has been  
+              <strong>approved</strong>.
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:15px; background:#fafafa; border-radius:6px;">
+            <h3 style="margin:0 0 10px 0; color:#333;">Order Summary</h3>
+            <p style="margin:0; color:#555;">
+              <strong>Total Items:</strong> ${order?.items?.length} <br>
+              <strong>Amount:</strong> PKR ${order?.totalAmount} <br>
+              <strong>Warehouse:</strong> ${order?.warehouseName}
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center" style="padding:25px 0;">
+            <a href="https://vallianimarketplace.com/en/profile-details?option=My%20Order" 
+               style="padding:12px 22px; background:#4f46e5; color:white; 
+               text-decoration:none; border-radius:6px;">
+               View Order
+            </a>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="color:#999; font-size:12px; text-align:center;">
+            This is an automated message — please do not reply.
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+    </table>
+    `;
+
+
+ 
+
+      if (order.customer) {
+      const mailOptions = {
+      to: order?.customer?.email,
+      subject: `Order #${order?.orderId} rejected`,
+      html: customerOrderEmail({
+      customerName: order?.customer?.username,
+      orderId: order?.orderId,
+      items: order?.items,
+      totalAmount: order?.grandTotal,
+      warehouseName: order?.warehouse?.name,
+      _id: order?._id
+      })
+      };
+      await sendEmail(mailOptions);
+      }
+
+      await order.save({ session });
+      await session.commitTransaction();
+      session.endSession();
+      return res.status(200).json({ message: "Order approved by Admin", order });
+    }
+
+    throw new Error("Invalid action");
+
+  } catch (error) {
+    // console.error("Approval error:", error);
+    try { await session.abortTransaction(); } catch (e) {}
+    session.endSession();
+    return res.status(400).json({ message: error.message });
+  }
+};
+
 const updateOrderStatus = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -889,7 +1835,7 @@ const updateOrderStatus = async (req, res) => {
                   {new:true,  session }
                 );
 
-                console.log('Updated Special Product:', updatedSpecialProduct);
+                // console.log('Updated Special Product:', updatedSpecialProduct);
   
                 if (updatedCustomerInventory.quantity <= updatedCustomerInventory.stockAlertThreshold) {
                   await AdminNotification.create([{
@@ -1003,10 +1949,6 @@ const updateOrderStatus = async (req, res) => {
     }
   };
 
-
-
-
-
 const getUserOrders = async (req, res) => {
   try {
       const userId = req.user._id;
@@ -1060,63 +2002,134 @@ const getUserOrders = async (req, res) => {
   }
 };
 
-
 const getAllOrders = async (req, res) => {
   try {
-    const orders = await Order.find()
-      .populate('warehouse')
-      .populate({
-        path: 'customer',
-        populate: {
-          path: 'warehouse',
-          model: 'Warehouse'
-        }
-      })
-      .populate('shippingAddress')
-      .populate('shippingMethod')
-      .populate('city')
-      .populate({
-        path: 'items.product',
-        refPath: 'items.itemType'
-      }).sort({ createdAt: -1 , updatedAt: -1})
-      .lean()
-      .exec();
+    const { isMain } = req.query;
+    const isMainBool = isMain === "true";
 
-    // Now let's populate variants after getting the base data
-    const populatedOrders = await Promise.all(orders.map(async (order) => {
-      const populatedItems = await Promise.all(order.items.map(async (item) => {
-        if (item.product) {
-          if (item.itemType === 'Product') {
-            const populatedProduct = await Product.findById(item.product._id)
-              .populate({
-                path: 'variants',
-                populate: 'variantName'
+    // Step 1: Get orders with basic populate
+    const orders = await Order.find()
+      .populate({
+       path: "warehouse", // populate order.warehouse field
+       model: "Warehouse"
+      })
+      .populate({
+        path: "customer",
+        populate: { path: "warehouse" }
+      })
+      .populate("shippingAddress")
+      .populate("shippingMethod")
+      .populate("city")
+      .populate({
+        path: "items.product",
+        refPath: "items.itemType"
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Step 2: Filter orders based on actual order.warehouse
+    let filteredOrders = orders;
+    if (isMain !== undefined) {
+      filteredOrders = orders.filter(order =>
+      order.items.some(item => item.isMain === isMainBool)
+  );
+}
+
+    // Step 3: Populate product variants
+    const populatedOrders = await Promise.all(
+      filteredOrders.map(async order => {
+        const populatedItems = await Promise.all(
+          order.items.map(async item => {
+            if (!item.product) return item;
+
+            if (item.itemType === "Product") {
+              const product = await Product.findById(item.product._id).populate({
+                path: "variants",
+                populate: "variantName"
               });
-            item.product = populatedProduct;
-          } else if (item.itemType === 'SpecialProduct') {
-            const populatedProduct = await SpecialProduct.findById(item.product._id)
-              .populate({
-                path: 'productVariants',
-                populate: 'variantName'
+              item.product = product;
+            } else if (item.itemType === "SpecialProduct") {
+              const product = await SpecialProduct.findById(item.product._id).populate({
+                path: "productVariants",
+                populate: "variantName"
               });
-            item.product = populatedProduct;
-          }
-        }
-        return item;
-      }));
-      order.items = populatedItems;
-      return order;
-    }));
+              item.product = product;
+            }
+
+            return item;
+          })
+        );
+
+        order.items = populatedItems;
+        return order;
+      })
+    );
 
     return res.status(200).json(populatedOrders);
+
   } catch (error) {
-    return res.status(500).json({ message: 'Error fetching orders', error: error.message });
+    return res.status(500).json({
+      message: "Error fetching orders",
+      error: error.message
+    });
   }
 };
 
+// const getAllOrders = async (req, res) => {
+//   try {
+//     const orders = await Order.find()
+//       .populate({
+//         path:'warehouse',
+//        match: { isMain: true },
+//       })
+//       .populate({
+//         path: 'customer',
+//         populate: {
+//           path: 'warehouse',
+//           model: 'Warehouse'
+//         }
+//       })
+//       .populate('shippingAddress')
+//       .populate('shippingMethod')
+//       .populate('city')
+//       .populate({
+//         path: 'items.product',
+//         refPath: 'items.itemType'
+//       }).sort({ createdAt: -1 , updatedAt: -1})
+//       .lean()
+//       .exec();
 
+//     // Now let's populate variants after getting the base data
+//     const populatedOrders = await Promise.all(orders.map(async (order) => {
+//       const populatedItems = await Promise.all(order.items.map(async (item) => {
+//         if (item.product) {
+//           if (item.itemType === 'Product') {
+//             const populatedProduct = await Product.findById(item.product._id)
+//               .populate({
+//                 path: 'variants',
+//                 populate: 'variantName'
+//               });
+//             item.product = populatedProduct;
+//           } else if (item.itemType === 'SpecialProduct') {
+//             const populatedProduct = await SpecialProduct.findById(item.product._id)
+//               .populate({
+//                 path: 'productVariants',
+//                 populate: 'variantName'
+//               });
+//             item.product = populatedProduct;
+//           }
+//         }
+//         return item;
+//       }));
+//       order.items = populatedItems;
+//       return order;
+//     }));
 
-
+//     return res.status(200).json(populatedOrders);
+//   } catch (error) {
+//     return res.status(500).json({ message: 'Error fetching orders', error: error.message });
+//   }
+// };
 
 const cancelOrderForCustomer = async (req, res) => {
   const session = await mongoose.startSession();
@@ -1200,9 +2213,6 @@ const cancelOrderForCustomer = async (req, res) => {
   }
 };
 
-
-
-
 const cancelOrder = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -1255,7 +2265,6 @@ const cancelOrder = async (req, res) => {
   }
 };
 
-
 const processRefund = async (req, res) => {
   try {
       const { orderId, amount } = req.body;
@@ -1302,9 +2311,6 @@ const processRefund = async (req, res) => {
   }
 };
 
-
-
-
 const updateWalletBalance = async (req, res) => {
     try {
       const { customerId, amount, type } = req.body;
@@ -1343,12 +2349,11 @@ const updateWalletBalance = async (req, res) => {
   
       res.status(200).json({ message: 'Wallet updated successfully.', wallet });
     } catch (error) {
-      console.error('Error updating wallet:', error);
+      // console.error('Error updating wallet:', error);
       res.status(500).json({ message: 'Error updating wallet.', error: error.message });
     }
   };
   
-
   const getAllWallets = async (req, res) => {
     try {
       // Fetch all wallets with the associated customer details
@@ -1361,12 +2366,10 @@ const updateWalletBalance = async (req, res) => {
       // Return all wallet data to the admin
       res.status(200).json({ message: 'All wallet data retrieved successfully', wallets });
     } catch (error) {
-      console.error('Error retrieving wallet data:', error);
+      // console.error('Error retrieving wallet data:', error);
       res.status(500).json({ message: 'Error retrieving wallet data', error: error.message });
     }
   };
-
-
 
 const getOwnWallet = async (req, res) => {
     try {
@@ -1382,11 +2385,10 @@ const getOwnWallet = async (req, res) => {
       // Return the user's wallet data
       res.status(200).json({ message: 'Wallet data retrieved successfully', wallet });
     } catch (error) {
-      console.error('Error retrieving wallet:', error);
+      // console.error('Error retrieving wallet:', error);
       res.status(500).json({ message: 'Error retrieving wallet data', error: error.message });
     }
   };
-  
   
 // can be use if order and payment if separte
 const updatePaymentMethod = async (req, res) => {
@@ -1449,11 +2451,10 @@ const updatePaymentMethod = async (req, res) => {
     } catch (error) {
       await session.abortTransaction();
       session.endSession();
-      console.error('Error updating payment method:', error);
+      // console.error('Error updating payment method:', error);
       res.status(500).json({ message: 'Error updating payment method.', error: error.message });
     }
   };
-
 
 const updateOrderByAdmin = async (req, res) => {
   try {
@@ -1519,11 +2520,18 @@ const updateOrderByAdmin = async (req, res) => {
   }
 };
 
-
-
 const downloadOrdersData = async (req, res) => {
   try {
-      const orders = await Order.find()
+    const {isMain} = req.query;
+      const warehouses = await Warehouse.find({ isMain: isMain === 'true' }).select('_id');
+      const warehouseIds = warehouses.map(w => w._id);
+      const orders = await Order.find({
+      warehouse: { $in: warehouseIds }
+      })
+      //  .populate({
+      //   path: 'warehouse',
+      //   match: {isMain: isMain === 'true' } 
+      // })
           .populate('customer', 'username email phone_number')
           .populate({
               path: 'items.product',  // Changed from items.item to items.product
@@ -1601,13 +2609,9 @@ const downloadOrdersData = async (req, res) => {
   }
 };
 
-
-
-
-
  const getPendingApprovals = async (req, res) => {
   try {
-    console.log("🧩 req.user full object:", req.user);
+    // console.log("🧩 req.user full object:", req.user);
 
     // ✅ Get userId safely
     const userId = req.user?._id;
@@ -1617,11 +2621,11 @@ const downloadOrdersData = async (req, res) => {
         message: "User ID not found in request",
       });
     }
-    console.log("🧩 User ID:", userId.toString());
+    // console.log("🧩 User ID:", userId.toString());
 
     // ✅ Step 1: Get Role ID from user object
     const roleId = req.user.role;
-    console.log("🧩 Role ID:", roleId?.toString());
+    // console.log("🧩 Role ID:", roleId?.toString());
 
     // ✅ Step 2: Fetch role name manually (since populate not working)
     const roleData = await UserRole.findById(roleId);
@@ -1630,7 +2634,7 @@ const downloadOrdersData = async (req, res) => {
     }
 
     const roleName = roleData.role_name;
-    console.log("✅ Role Name:", roleName);
+    // console.log("✅ Role Name:", roleName);
 
     // ✅ Step 3: (Optional) Load user fully populated, only if needed
     let user = await Customer.findById(userId)
@@ -1642,7 +2646,7 @@ const downloadOrdersData = async (req, res) => {
         }
       
 
-    console.log("✅ Populated User:", user?.role?.role_name || "Not populated");
+    // console.log("✅ Populated User:", user?.role?.role_name || "Not populated");
 
     // ✅ Step 4: Proceed with role logic
     let query = { approvalStatus: "PENDING" };
@@ -1652,7 +2656,7 @@ const downloadOrdersData = async (req, res) => {
       const warehouses = await Warehouse.find({ districtManager: userId }).select("_id");
       const warehouseIds = warehouses.map((w) => w._id);
 
-      console.log("Found warehouses for DM:", warehouseIds.length);
+      // console.log("Found warehouses for DM:", warehouseIds.length);
 
       if (warehouseIds.length === 0) {
         return res.status(200).json({
@@ -1679,7 +2683,7 @@ const downloadOrdersData = async (req, res) => {
       const warehouses = await Warehouse.find({ corporateManager: userId }).select("_id");
       const warehouseIds = warehouses.map((w) => w._id);
 
-      console.log("Found warehouses for CM:", warehouseIds.length);
+      // console.log("Found warehouses for CM:", warehouseIds.length);
 
       if (warehouseIds.length === 0) {
         return res.status(200).json({
@@ -1723,7 +2727,7 @@ const downloadOrdersData = async (req, res) => {
       });
     }
 
-    console.log("✅ Final Query:", JSON.stringify(query, null, 2));
+    // console.log("✅ Final Query:", JSON.stringify(query, null, 2));
 
     // 🧾 FETCH ORDERS
     const orders = await Order.find(query)
@@ -1762,7 +2766,7 @@ const downloadOrdersData = async (req, res) => {
       data: orders,
     });
   } catch (error) {
-    console.error("❌ Error fetching pending approvals:", error);
+    // console.error("❌ Error fetching pending approvals:", error);
     res.status(400).json({
       success: false,
       message: error.message,
@@ -1770,13 +2774,11 @@ const downloadOrdersData = async (req, res) => {
   }
 };
  
-
-  
-
-
 module.exports = {
     calculateOrderTotals,
     placeOrder,
+    warehouseToWarehouseTransfer,
+    approveNormalWarehouseOrder,
     approveOrder,
     getPendingApprovals,
     getUserOrders,

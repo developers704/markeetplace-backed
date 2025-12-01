@@ -515,6 +515,7 @@ const getAllCertificateRequests = async (req, res) => {
       .limit(parseInt(limit));
 
     // Format response with all paths
+    // console.log(requests,"requests here")
     const formattedRequests = requests.map(request => ({
       id: request._id,
       status: request.status,
@@ -547,7 +548,7 @@ const getAllCertificateRequests = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error getting all certificate requests:', error);
+    // console.error('Error getting all certificate requests:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to get certificate requests',
@@ -777,7 +778,7 @@ const approveCertificateRequest = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error processing certificate request:', error);
+    // console.error('Error processing certificate request:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to process certificate request',
@@ -795,7 +796,7 @@ const getCertificateByUserAndCourse = async (req, res) => {
     const { courseId } = req.params;
     const userId = req.user.id; // From auth middleware
 
-    console.log('Getting certificate for user:', userId, 'course:', courseId);
+    // console.log('Getting certificate for user:', userId, 'course:', courseId);
 
     // Validate course ID
     if (!mongoose.Types.ObjectId.isValid(courseId)) {
@@ -885,7 +886,7 @@ const getCertificateByUserAndCourse = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error getting certificate by course:', error);
+    // console.error('Error getting certificate by course:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to retrieve certificate information',
@@ -921,23 +922,23 @@ const sendCertificateNotification = async (userId, action, certificateRequest) =
     // Get user details
     const user = await Customer.findById(userId).select('username email');
     if (!user) {
-      console.log('❌ User not found:', userId);
+      // console.log('❌ User not found:', userId);
       return;
     }
 
     // 🆕 Make sure certificateRequest has populated data
     if (!certificateRequest.course || !certificateRequest.course.name) {
-      console.log('⚠️ Course not populated, populating now...');
+      // console.log('⚠️ Course not populated, populating now...');
       await certificateRequest.populate('course', 'name description');
     }
 
-    console.log('📧 Sending certificate notification:', {
-      action,
-      userId,
-      courseName: certificateRequest.course.name,
-      userName: user.username,
-      certificateId: certificateRequest.certificateId
-    });
+    // console.log('📧 Sending certificate notification:', {
+    //   action,
+    //   userId,
+    //   courseName: certificateRequest.course.name,
+    //   userName: user.username,
+    //   certificateId: certificateRequest.certificateId
+    // });
 
     let notificationContent = '';
     let adminNotificationContent = '';
@@ -1011,15 +1012,15 @@ const sendCertificateNotification = async (userId, action, certificateRequest) =
         url: `/courses/certificate-status/${certificateRequest.course._id}`
       });
       await customerNotification.save();
-      console.log('✅ Customer notification created');
+      // console.log('✅ Customer notification created');
     } catch (customerNotifError) {
-      console.error('❌ Error creating customer notification:', customerNotifError);
+      // console.error('❌ Error creating customer notification:', customerNotifError);
     }
 
     // 2. Send notification to all super users (admins)
     try {
       const superUsers = await User.find({ is_superuser: true }).select('_id username');
-      console.log('👥 Found super users:', superUsers.length);
+      // console.log('👥 Found super users:', superUsers.length);
       
       if (superUsers.length > 0) {
         const adminNotifications = superUsers.map(admin => ({
@@ -1032,17 +1033,17 @@ const sendCertificateNotification = async (userId, action, certificateRequest) =
         }));
 
         const result = await AdminNotification.insertMany(adminNotifications);
-        console.log('✅ Admin notifications created:', result.length);
+        // console.log('✅ Admin notifications created:', result.length);
         
         // Log each admin notification for debugging
         superUsers.forEach(admin => {
-          console.log(`📢 Admin notification sent to: ${admin.username} (${admin._id})`);
+          // console.log(`📢 Admin notification sent to: ${admin.username} (${admin._id})`);
         });
       } else {
-        console.log('⚠️ No super users found in database');
+        // console.log('⚠️ No super users found in database');
       }
     } catch (adminNotifError) {
-      console.error('❌ Error creating admin notifications:', adminNotifError);
+      // console.error('❌ Error creating admin notifications:', adminNotifError);
     }
 
     // 3. Send email notification to customer
@@ -1055,19 +1056,19 @@ const sendCertificateNotification = async (userId, action, certificateRequest) =
         };
 
         const emailResult = await sendEmail(mailOptions);
-        console.log('✅ Email sent successfully to:', user.email);
+        // console.log('✅ Email sent successfully to:', user.email);
       } catch (emailError) {
-        console.error('❌ Error sending email:', emailError);
+        // console.error('❌ Error sending email:', emailError);
         // Don't throw error, just log it - notifications should still work
       }
     } else {
-      console.log('⚠️ No email address found for user:', user.username);
+      // console.log('⚠️ No email address found for user:', user.username);
     }
 
-    console.log(`🎉 Certificate ${action} notification process completed for user ${userId}`);
+    // console.log(`🎉 Certificate ${action} notification process completed for user ${userId}`);
 
   } catch (error) {
-    console.error('❌ Error in sendCertificateNotification:', error);
+    // console.error('❌ Error in sendCertificateNotification:', error);
     console.error('Certificate request data:', {
       id: certificateRequest._id,
       course: certificateRequest.course,
@@ -1081,8 +1082,8 @@ const sendCertificateNotification = async (userId, action, certificateRequest) =
 // Generate final certificate with both signatures
 const generateFinalCertificate = async (req, res) => {
   try {
-    console.log('Generate final certificate:', req.body);
-    console.log('Files received:', req.files);
+    // console.log('Generate final certificate:', req.body);
+    // console.log('Files received:', req.files);
 
     const { requestId } = req.params;
     const { certificateText } = req.body; // Optional custom text for certificate
@@ -1138,7 +1139,7 @@ const generateFinalCertificate = async (req, res) => {
 
     // Process final certificate image - STORE PATH
     const certificateImagePath = req.files.certificateImage[0].path.replace(/\\/g, '/');
-    console.log('Final certificate image stored at:', certificateImagePath);
+    // console.log('Final certificate image stored at:', certificateImagePath);
 
     // Update certificate request with final certificate path
     certificateRequest.status = 'Certificate_Generated';
@@ -1179,7 +1180,7 @@ const generateFinalCertificate = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error generating final certificate:', error);
+    // console.error('Error generating final certificate:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to generate final certificate',
@@ -1260,7 +1261,7 @@ const rejectCertificateRequest = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error rejecting certificate request:', error);
+    // console.error('Error rejecting certificate request:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to reject certificate request',
@@ -1316,7 +1317,7 @@ const getCertificateRequestDetails = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error getting certificate request details:', error);
+    // console.error('Error getting certificate request details:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to get certificate request details',
@@ -1363,7 +1364,7 @@ const downloadCertificate = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error downloading certificate:', error);
+    // console.error('Error downloading certificate:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to download certificate',

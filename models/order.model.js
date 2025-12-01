@@ -15,6 +15,12 @@ const orderSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Warehouse",
     },
+    sellerWarehouseId: {
+      type: String,
+    },
+    isMain:{
+      type: String 
+    },
     guestInfo: {
       name: String,
       email: String,
@@ -24,22 +30,6 @@ const orderSchema = new mongoose.Schema(
       type: String, // For guest checkout sessions
     },
     items: [
-      // {
-      //   product: {
-      //     type: mongoose.Schema.Types.ObjectId,
-      //     ref: 'Product',
-      //     required: true,
-      //   },
-      //   quantity: {
-      //     type: Number,
-      //     required: true,
-      //   },
-      //   price: {
-      //     type: Number,
-      //     required: true,
-      //   },
-      // },
-
       {
         itemType: {
           type: String,
@@ -63,6 +53,13 @@ const orderSchema = new mongoose.Schema(
           type: String,
           default: null,
         },
+        sellerWarehouseId:{
+          type: String,
+        },
+        isMain: {
+        type: Boolean,
+        default: false
+      },
       },
     ],
     shippingAddress: {
@@ -126,7 +123,7 @@ const orderSchema = new mongoose.Schema(
     },
     approvalHistory: [
       {
-        role: String, // e.g. "District Manager", "Corporate Manager", "Admin"
+        role: String, 
         approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
         status: { type: String, enum: ["APPROVED", "DISAPPROVED"] },
         date: { type: Date, default: Date.now },
@@ -140,7 +137,7 @@ const orderSchema = new mongoose.Schema(
 
     orderStatus: {
       type: String,
-      default: "Pending", // Options: Pending, Processing, Shipped, Delivered, Cancelled, etc.
+      default: "Pending", 
     },
     specialInstructions: {
       type: String,

@@ -162,7 +162,7 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 const sendEmail = async (mailOptions) => {
   try {
-    const fromEmail = process.env.FROM_EMAIL || "no-reply@studylinksuk.com"; // must be verified in SendGrid
+    const fromEmail = process.env.FROM_EMAIL || "no-reply@studylinksuk.com"; 
     const html = mailOptions.html || (mailOptions.message ? `<p>${mailOptions.message}</p>` : undefined);
     const text = mailOptions.text || mailOptions.message || mailOptions.subject || " ";
 

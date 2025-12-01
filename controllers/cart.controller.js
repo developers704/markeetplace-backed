@@ -390,7 +390,7 @@ const getCart = async (req, res) => {
 
       res.json(cart);
   } catch (error) {
-      console.error("Error in getCart:", error);
+      // console.error("Error in getCart:", error);
       res.status(500).json({ message: "Internal server error" });
   }
 };
@@ -400,7 +400,7 @@ const getCart = async (req, res) => {
 
 const addToCart = async (req, res) => {
   try {
-    const { itemId, quantity, price, itemType, color} = req.body;
+    const { itemId, quantity, price, itemType, color, isMain , sellerWarehouseId} = req.body;
 
     if (!['Product', 'SpecialProduct'].includes(itemType)) {
       return res.status(400).json({ message: 'Invalid item type' });
@@ -433,25 +433,27 @@ const addToCart = async (req, res) => {
         item: itemObjectId, // ✅ Ensure correct format
         quantity,
         price: validPrice,
-        color: color || null
+        color: color || null,
+        isMain: isMain ,
+        sellerWarehouseId: sellerWarehouseId
       };
 
-      console.log('New Item:', newItem);
+      // console.log('New Item:', newItem);
       cart.items.push(newItem);
     }
 
-    console.log("Cart Items After Push:", JSON.stringify(cart.items, null, 2));  // ✅ Debug
+    // console.log("Cart Items After Push:", JSON.stringify(cart.items, null, 2));  // ✅ Debug
 
     await calculateCartTotal(cart);
     await cart.save();
 
     const populatedCart = await Cart.findById(cart._id).populate('items.item');
 
-    console.log('Cart after adding:', JSON.stringify(populatedCart, null, 2));
+    // console.log('Cart after adding:', JSON.stringify(populatedCart, null, 2));
 
     res.status(200).json(populatedCart);
   } catch (error) {
-    console.error('Error in addToCart:', error);
+    // console.error('Error in addToCart:', error);
     res.status(400).json({ message: error.message });
   }
 };
@@ -609,15 +611,17 @@ const removeFromCart = async (req, res) => {
 const updateCartItemQuantity = async (req, res) => {
   try {
     const { itemId } = req.params;
-    const { quantity, itemType, color} = req.body;
-
+    const { quantity, itemType} = req.body;
+      const itemIdObj = (new mongoose.Types.ObjectId(itemId))
+    // console.log("itemid", itemIdObj)
     if (!quantity || isNaN(quantity) || quantity < 0) {
       return res.status(400).json({ message: 'Invalid quantity provided' });
     }
 
     const cart = await getOrCreateCart(req);
+    // console.log("cart is here",cart)
     const cartItem = cart.items.find(item => 
-      item.item.equals(itemId) && item.itemType === itemType && item.color === (color || null)
+      item.item.equals(itemIdObj) && item.itemType === itemType
     );
 
     if (!cartItem) {
@@ -626,7 +630,7 @@ const updateCartItemQuantity = async (req, res) => {
 
     if (quantity === 0) {
       cart.items = cart.items.filter(item => 
-        !(item.item.equals(itemId) && item.itemType === itemType && item.color === (color || null))
+        !(item.item.equals(itemIdObj) && item.itemType === itemType )
       );
     } else {
       cartItem.quantity = quantity;
@@ -875,9 +879,9 @@ const cleanupSessionCarts = async () => {
           sessionId: { $ne: null },
           customer: null 
       });
-      console.log(`Cleaned up ${result.deletedCount} session-based carts`);
+      // console.log(`Cleaned up ${result.deletedCount} session-based carts`);
   } catch (error) {
-      console.error('Cart cleanup error:', error);
+      // console.error('Cart cleanup error:', error);
   }
 };
 

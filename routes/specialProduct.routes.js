@@ -13,6 +13,8 @@ const uploadFields = upload.fields([
 router.post('/', [authMiddleware,uploadFields], controller.createProduct);
 router.post('/bulk-delete', authMiddleware , controller.bulkDeleteProducts)
 router.get('/', authMiddleware,controller.getAllProducts);
+router.get('/search', authMiddleware,controller.searchSpecialProducts);
+
 router.get('/type/:type', controller.specialProductController.getProductsByType);
 router.get('/filters/:categoryId', controller.getCategoryFiltersAndProducts)
 router.get('/category/:categoryId', controller.specialProductController.getProductsByCategory);
