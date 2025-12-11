@@ -403,57 +403,46 @@ const updateInventory = async (req, res) => {
 const getAllInventories = async (req, res) => {
     try {
         const inventories = await Inventory.find()
-            .populate({
-                path: 'warehouse city'
-            })
-            .populate({
-                path: 'product',
-                // populate: [
-                //     {
-                //         path: 'category',
-                //         select: 'name'
-                //     }
-                // ],
-                select: 'name sku'
-            })
+            .populate('warehouse')
+            .populate('city')
             .populate({
                 path: 'product',
-                // populate: [
-                //     {
-                //         path: 'specialCategory',
-                //         select: 'name'
-                //     }
-                // ],
                 select: 'name sku type'
             });
 
-        // Transform the data to include proper category info based on product type
         const transformedInventories = inventories.map(inv => {
             const inventory = inv.toObject();
-            
+            const product = inventory?.product;
+
+            if (!product) {
+                inventory.productInfo = {
+                    name: "Unknown Product",
+                    sku: "N/A",
+                    type: "N/A"
+                };
+                return inventory;
+            }
+
             if (inventory.productType === 'Product') {
                 inventory.productInfo = {
-                    name: inventory.product.name,
-                    sku: inventory.product.sku,
-                    // category: inventory.product.category?.name
+                    name: product?.name,
+                    sku: product?.sku
                 };
             } else {
                 inventory.productInfo = {
-                    name: inventory.product.name,
-                    sku: inventory.product.sku,
-                    // category: inventory.product.specialCategory?.name,
-                    type: inventory.product.type
+                    name: product?.name,
+                    sku: product?.sku,
+                    type: product?.type
                 };
             }
 
             return inventory;
         });
 
-        // Separate and sort inventories based on stock threshold
-        const lowStockInventories = transformedInventories.filter(inv => inv.quantity <= inv.stockAlertThreshold);
-        const otherInventories = transformedInventories.filter(inv => inv.quantity > inv.stockAlertThreshold);
+        const lowStock = transformedInventories.filter(inv => inv.quantity <= inv.stockAlertThreshold);
+        const other = transformedInventories.filter(inv => inv.quantity > inv.stockAlertThreshold);
 
-        const sortedInventories = [...lowStockInventories, ...otherInventories];
+        const sortedInventories = [...lowStock, ...other];
 
         res.status(200).json(sortedInventories);
     } catch (error) {

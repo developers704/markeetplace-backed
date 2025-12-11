@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { uploadBulkProductCSV } = require('../middlewares/bulkProductUploadMiddleware');
-const { importBulkProducts, getCSVTemplate } = require('../controllers/bulkProductImport.controller');
+const { importBulkProducts, getCSVTemplate, csvFormat } = require('../controllers/bulkProductImport.controller');
 const authMiddleware  = require('../middlewares/authMiddleware');
 const { checkSuperuserOrPermission } = require('../middlewares/checkSuperuserOrPermission');
 
@@ -9,6 +9,7 @@ const { checkSuperuserOrPermission } = require('../middlewares/checkSuperuserOrP
 router.use(authMiddleware);
 // router.use(checkSuperuserOrPermission('product_management'));
 
+router.post('/upload-csv', uploadBulkProductCSV, csvFormat);
 // Route to get CSV template
 router.get('/template', getCSVTemplate);
 

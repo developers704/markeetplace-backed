@@ -23,7 +23,7 @@ dotenv.config();
 connectDB();
 
 // Middleware
-app.use(express.json()); // Parse JSON bodies
+app.use(express.json({limit: "50mb"})); // Parse JSON bodies
 // // CORS options to allow all origins, methods, and headers
 // const corsOptions = {
 //   origin: '*', // Allow all origins

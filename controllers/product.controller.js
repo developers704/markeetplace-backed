@@ -321,17 +321,6 @@ const getNewProducts = async (req, res) => {
   }
 };
 
-
-
-
-
-
-
-
-
-
-
-
 const createProduct = async (req, res) => {
   try {
     const {
