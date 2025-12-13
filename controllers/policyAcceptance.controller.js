@@ -90,7 +90,8 @@ const acceptPolicy = async (req, res) => {
 
         let policyAcceptance;
 
-        const existingVersion = parseFloat(existingAcceptance.policyVersion || 0);
+      const existingVersion = existingAcceptance ? parseFloat(existingAcceptance.policyVersion || 0) : 0;
+
         const newVersion = parseFloat(policy.version || 0);
 
 
