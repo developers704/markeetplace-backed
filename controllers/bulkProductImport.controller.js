@@ -376,20 +376,31 @@ function transformJewelmanteCSV(rows) {
         meta_title: r.meta_title || "",
         meta_description: r.meta_description || "",
         videoLink: r.videoLink || "",
-        variantsCombined: []
+        metalColors: new Set(),
+        variantsCombined: new Set()
       };
+    }
+   
+    if (r.Metal_color) {
+    grouped[sku].metalColors.add(r.Metal_color.trim());
     }
 
     // Add variant name:value
-    if (r.variants && r.variantvalue) {
-      grouped[sku].variantsCombined.push(`${r.variants}:${r.variantvalue}`);
+    // if (r.variants && r.variantvalue) {
+    //   grouped[sku].variantsCombined.push(`${r.variants}:${r.variantvalue}`);
+    // }
+       if (r.variants && r.variantvalue) {
+      grouped[sku].variantsCombined.add(
+        `${r.variants.trim()}:${r.variantvalue.trim()}`
+      );
     }
   }
 
   return Object.values(grouped).map((p) => {
     return {
       ...p,
-      variants: p.variantsCombined.join(","),
+      Metal_color: Array.from(p.metalColors),
+      variants: Array.from(p.variantsCombined).join(",")
     };
   });
 }
@@ -563,6 +574,7 @@ const importBulkProducts = async (req, res) => {
           brand: brandId,
           description: row?.description || "",
           sku: row?.sku,
+          metal_color: row.Metal_color || [],
           prices,
           currency: row?.currency || "USD",
           category: categories,

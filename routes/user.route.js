@@ -17,12 +17,14 @@ const {
   getUserById,
   deleteUsers,
   getTwoFactorAuthSetting,
-  bulkDeleteUserRoles
+  bulkDeleteUserRoles,
+  importBulkUsers
 } = require('../controllers/user.controller');
 const authMiddleware = require('../middlewares/authMiddleware');
 const checkSuperuserOrPermission = require('../middlewares/checkSuperuserOrPermission.js');
 const adminLogger = require('../middlewares/adminLogger');
-
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/temp/' });
 
 
 router.post('/role/', authMiddleware, checkSuperuserOrPermission('Users', 'Create'), adminLogger(), createUserRole);
@@ -33,6 +35,7 @@ router.delete('/role/:id', authMiddleware, checkSuperuserOrPermission('Users', '
 
 // Only a superuser or a user with 'Create' permission on 'users' page can create users
 router.post("/", authMiddleware, checkSuperuserOrPermission('Users', 'Create'), adminLogger(), createUser);
+router.post("/bulk-upload-users", authMiddleware, checkSuperuserOrPermission('Users', 'Create'), adminLogger(), upload.single('csvFile'), importBulkUsers);
 
 // Users can update their own information
 router.put("/update-info", authMiddleware, updateUserInfo);

@@ -25,6 +25,7 @@ const productSchema = new mongoose.Schema(
     image: { type: String },
     variationId: { type: String }, // Can be unique or non-unique based on source
     gallery: [{ type: String }],
+    metal_color: [{ type: String }],
     videoLink: { type: String },
     variants: [{ type: mongoose.Schema.Types.ObjectId, ref: "ProductVariant" }],
     tags: [{ type: mongoose.Schema.Types.ObjectId, ref: "Tag" }], // Added reference to Tag model

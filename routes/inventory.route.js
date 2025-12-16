@@ -19,7 +19,8 @@ const adminLogger = require('../middlewares/adminLogger');
 
 // router.post('/', checkSuperuserOrPermission('Inventory', 'Create'), adminLogger(), addInventory);
 router.post('/', addInventory);
-router.post('/bulk-upload', checkSuperuserOrPermission('Inventory', 'Create'), upload.single('csv'), bulkUploadInventory);
+// router.post('/bulk-upload', checkSuperuserOrPermission('Inventory', 'Create'), upload.single('csv'), bulkUploadInventory);
+router.post('/bulk-upload',  upload.single('csv'), bulkUploadInventory);
 router.put('/bulk-update', checkSuperuserOrPermission('Inventory', 'Update'), bulkUpdateInventories);
 // router.put('/:id', checkSuperuserOrPermission('Inventory', 'Update'), adminLogger(), updateInventory);
 router.put('/:id', updateInventory);

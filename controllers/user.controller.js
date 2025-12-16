@@ -9,7 +9,10 @@ const Warehouse =  require('../models/warehouse.model');
 const WarehouseWallet = require('../models/warehouseWallet.model');
 const InventoryWallet = require('../models/inventoryWallet.model.js');
 const SuppliesWallet = require('../models/suppliesWallet.model');
-const Department = require('../models/department.model.js')
+const Department = require('../models/department.model.js');
+const fsSync = require('fs');
+const csv = require('csv-parser');
+const { deleteFile } = require('../config/fileOperations.js');
 
 // Create User Role
 const createUserRole = async (req, res) => {
@@ -96,6 +99,191 @@ const bulkDeleteUserRoles = async (req, res) => {
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
+};
+
+
+// Create User bulk import 
+
+function transformUserCSV(rows) {
+  return rows.map((r) => ({
+    username: r.username?.trim() || "",
+    email: r.email?.trim().toLowerCase() || "",
+    password: r.password?.trim() || "",
+    phone_number: r.phone_number?.trim() || "",
+    roleName: r.role?.trim() || "",
+    departmentName: r.department?.trim() || "",
+    storeNames: r.store
+      ? r.store.split(",").map((s) => s.trim())
+      : [],
+    initialBalance: Number(r.initialBalance) || 0
+  }));
+}
+
+const findOrCreateRole = async (name) => {
+  if (!name) return null;
+
+  let role = await UserRole.findOne({
+    name: new RegExp(`^${name}$`, "i")
+  });
+
+  if (!role) {
+    role = await UserRole.create({ name });
+  }
+
+  return role;
+};
+
+
+const findOrCreateDepartment = async (name) => {
+  if (!name) return null;
+
+  let dept = await Department.findOne({
+    name: new RegExp(`^${name}$`, "i")
+  });
+
+  if (!dept) {
+    dept = await Department.create({ name });
+  }
+
+  return dept;
+};
+
+
+const findStoresByNames = async (names = []) => {
+  if (!names.length) return [];
+
+  return await Warehouse.find({
+    name: { $in: names.map(n => new RegExp(`^${n}$`, "i")) }
+  });
+};
+const importBulkUsers = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No CSV file uploaded" });
+    }
+
+    const csvFilePath = req.file.path;
+    const results = [];
+    const errors = [];
+
+    let successCount = 0;
+    let skippedCount = 0;
+    let errorCount = 0;
+
+    // Read CSV
+    await new Promise((resolve, reject) => {
+      fsSync.createReadStream(csvFilePath)
+        .pipe(csv())
+        .on("data", (data) => results.push(data))
+        .on("end", resolve)
+        .on("error", reject);
+    });
+
+    const cleanRows = transformUserCSV(results);
+
+    for (let i = 0; i < cleanRows.length; i++) {
+      const row = cleanRows[i];
+      const rowNumber = i + 2;
+
+      try {
+        // Required
+        if (!row.username || !row.email || !row.password) {
+          errors.push({
+            row: rowNumber,
+            error: "Username, Email & Password required",
+            data: row
+          });
+          errorCount++;
+          continue;
+        }
+
+        // Skip duplicate email
+        const exists =
+          await User.findOne({ email: row.email }) ||
+          await Customer.findOne({ email: row.email });
+
+        if (exists) {
+          skippedCount++;
+          continue;
+        }
+
+        // 🔹 Role (NAME based)
+         const role = await findOrCreateRole(row.roleName);
+
+        // 🔹 Department (NAME based)
+        const department = await findOrCreateDepartment(row.departmentName);
+
+
+        // 🔹 Stores (optional)
+        const warehouses = await findStoresByNames(row.storeNames);
+        const warehouseIds = warehouses.map((w) => w._id);
+
+        // Hash password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(row.password, salt);
+
+        // Create User
+        const user = await User.create({
+          username: row.username,
+          email: row.email,
+          password: hashedPassword,
+          phone_number: row.phone_number,
+          role: role._id,
+          department: department._id,
+          warehouse: warehouseIds 
+        });
+
+        // Create Customer
+        const customer = await Customer.create({
+          username: row.username,
+          email: row.email,
+          password: hashedPassword,
+          phone_number: row.phone_number,
+          role: role._id,
+          department: department._id,
+          warehouse: warehouseIds
+        });
+
+        // Wallet
+        await Wallet.create({
+          customer: customer._id,
+          balance: row.initialBalance
+        });
+
+        successCount++;
+      } catch (err) {
+        errors.push({
+          row: rowNumber,
+          error: err.message,
+          data: row
+        });
+        errorCount++;
+      }
+    }
+
+    await deleteFile(csvFilePath);
+
+    res.status(200).json({
+      message: "Bulk user import completed",
+      summary: {
+        totalRows: results.length,
+        successCount,
+        skippedCount,
+        errorCount,
+        successRate: `${(
+          (successCount / results.length) *
+          100
+        ).toFixed(2)}%`
+      },
+      errors: errors.length ? errors : undefined
+    });
+  } catch (error) {
+    if (req.file?.path) await deleteFile(req.file.path);
+    res.status(500).json({
+      message: "Error processing CSV file",
+      error: error.message
+    });
+  }
 };
 
 const createUser = async (req, res) => {
@@ -615,4 +803,4 @@ const toggleTwoFactorAuth = async (req, res) => {
 
 
 
-module.exports = { createUserRole, getAllUserRoles, updateUserRole, deleteUserRole, createUser, updateUser, updateOwnPassword, getAllUsers, getOwnData, deleteUser, updateUserInfo, toggleTwoFactorAuth, getDeactivationRequests, getUserById, deleteUsers, getTwoFactorAuthSetting, bulkDeleteUserRoles };
+module.exports = { createUserRole, getAllUserRoles, updateUserRole, deleteUserRole, createUser, importBulkUsers , updateUser, updateOwnPassword, getAllUsers, getOwnData, deleteUser, updateUserInfo, toggleTwoFactorAuth, getDeactivationRequests, getUserById, deleteUsers, getTwoFactorAuthSetting, bulkDeleteUserRoles };

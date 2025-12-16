@@ -489,7 +489,7 @@ const getAvailableInventoriesDetailed = async (req, res) => {
                     { path: 'specialCategory', select: 'name', strictPopulate: false },
                     { path: 'specialSubcategory', select: 'name', strictPopulate: false }
                 ],
-                select: 'name sku image gallery prices variationId tags brand type specialCategory specialSubcategory variants discounts dealOfTheDay'
+                select: 'name sku image gallery metal_color prices variationId tags brand type specialCategory specialSubcategory variants discounts dealOfTheDay'
             });
 
         // Transform inventories for frontend
@@ -516,6 +516,7 @@ const getAvailableInventoriesDetailed = async (req, res) => {
                     prices: prices,
                     price: chosenPrice,
                     variants: product.variants || [],
+                    metal_color: product.metal_color || [],
                     discounts: product.discounts || [],
                     dealOfTheDay: product.dealOfTheDay || [],
                     brand: product.brand || null,
@@ -1283,19 +1284,15 @@ const bulkUploadInventory = async (req, res) => {
         try {
             const warehouse = await Warehouse.findOne({ name: { $regex: new RegExp(`^${warehouseName.trim()}`, 'i') } });
             if (!warehouse) {
-                // console.log(`Warehouse not found: ${warehouseName}`);
                 skippedCount++;
                 return;
             }
 
             let product;
-            // const normalizedSku = sku.toString().trim();
-            // const normalizedSku = sku.toString().replace('E+', 'E');
+    
             const normalizedSku = sku.toString().includes('E+') ? 
             sku.toString().replace('.', '').replace('E+', '').padEnd(13, '0') : 
             sku.toString().trim();
-            // console.log('Original SKU:', sku);
-            // console.log('Normalized SKU:', normalizedSku);
             if (productType === 'SpecialProduct') {
                 product = await SpecialProduct.findOne({ sku: normalizedSku });
             } else {
@@ -1303,18 +1300,22 @@ const bulkUploadInventory = async (req, res) => {
             }
 
             if (!product) {
-                // console.log(`Product not found: ${normalizedSku}`);
+      
                 skippedCount++;
                 return;
             }
-
+            const parsedQuantity = quantity ? parseInt(quantity, 10) : 0;
+            if (isNaN(parsedQuantity)) {
+            skippedCount++;
+            return; 
+            }
             const key = `${product._id}-${warehouse._id}-${normalizedSku}`;
             const inventoryData = {
                 product: product._id,
                 productType,
                 warehouse: warehouse._id,
                 city: '67400e8a7b963a1282d218b5',
-                quantity: parseInt(quantity, 10),
+                quantity: parsedQuantity,
                 vat: vat ? parseFloat(vat) : 0,
                 stockAlertThreshold: stockAlertThreshold ? parseInt(stockAlertThreshold, 10) : 10,
                 locationWithinWarehouse: locationWithinWarehouse || '',
@@ -1325,38 +1326,19 @@ const bulkUploadInventory = async (req, res) => {
                 expiryDateThreshold: expiryDateThreshold ? parseInt(expiryDateThreshold, 10) : 30
             };
 
-            // if (inventoryMap.has(key)) {
-            //     const existingData = inventoryMap.get(key);
-            //     existingData.quantity += parseInt(quantity, 10);
-            //     inventoryMap.set(key, existingData);
-            //     mergedCount++;
-            // } else {
-            //     inventoryMap.set(key, inventoryData);
-            // }
+  
 
             if (inventoryMap.has(key)) {
-    const existingData = inventoryMap.get(key);
-    // existingData.quantity += parseInt(quantity, 10);
-    existingData.quantity += inventoryData.quantity;
-    inventoryMap.set(key, existingData);
-    mergedCount++;
-} else {
-    // Check if inventory already exists in database
-    // const existingInventory = await Inventory.findOne({
-    //     product: product._id,
-    //     warehouse: warehouse._id,
-    //     productType: productType
-    // });
+            const existingData = inventoryMap.get(key);
+            existingData.quantity += inventoryData.quantity;
+            inventoryMap.set(key, existingData);
+            mergedCount++;
+            } else {
 
-    // if (existingInventory) {
-    //     // Update existing inventory
-    //     inventoryData.quantity = existingInventory.quantity + parseInt(quantity, 10);
-    // }
-    
-    inventoryMap.set(key, inventoryData);
-}
+            inventoryMap.set(key, inventoryData);
+        }
         } catch (error) {
-            // console.log('Row processing error:', error);
+           
             skippedCount++;
         }
     };
@@ -1377,14 +1359,7 @@ const bulkUploadInventory = async (req, res) => {
             });
 
             if (existingInventory) {
-                // console.log('Updating existing inventory:', existingInventory);
-                // Object.assign(existingInventory, inventoryData);
-                // await existingInventory.save();
-                // updatedCount++;
-
-                // console.log('Before Update:', existingInventory.quantity);
-                // console.log('New Quantity:', inventoryData.quantity);
-                
+             
                 const updated = await Inventory.findOneAndUpdate(
                     {
                         product: inventoryData.product,
@@ -1408,7 +1383,7 @@ const bulkUploadInventory = async (req, res) => {
                     { new: true, runValidators: true }
                 );
                 
-                // console.log('After Update:', updated.quantity);
+               
                 updatedCount++;
             } else {
                 const newInventory = new Inventory(inventoryData);
@@ -1422,37 +1397,8 @@ const bulkUploadInventory = async (req, res) => {
             }
         }
 
-//         const uniqueKeys = Array.from(inventoryMap.keys());
-// for (const key of uniqueKeys) {
-//     const [productId, warehouseId, sku] = key.split('-');
-    
-//     const duplicateInventories = await Inventory.find({
-//         product: productId,
-//         warehouse: warehouseId
-//     }).sort({ updatedAt: -1 });
 
-//     if (duplicateInventories.length > 1) {
-//         const [latestInventory, ...oldInventories] = duplicateInventories;
-//         const oldInventoryIds = oldInventories.map(inv => inv._id);
-        
-//         await Inventory.deleteMany({ _id: { $in: oldInventoryIds } });
-        
-//         // Remove old inventory IDs from the product's inventory array
-//         await Product.updateOne(
-//             { _id: productId },
-//             { $pull: { inventory: { $in: oldInventoryIds } } }
-//         );
-        
-//         await SpecialProduct.updateOne(
-//             { _id: productId },
-//             { $pull: { inventory: { $in: oldInventoryIds } } }
-//         );
-
-//         console.log(`Removed ${oldInventories.length} duplicate entries for product ${sku} in warehouse ${warehouseId}`);
-//     }
-// }
-
-        // After all inventory updates are done, add this code
+       
         const uniqueKeys = Array.from(inventoryMap.keys());
         for (const key of uniqueKeys) {
             const [productId, warehouseId, sku] = key.split('-');
@@ -1468,7 +1414,7 @@ const bulkUploadInventory = async (req, res) => {
                 
                 await Inventory.deleteMany({ _id: { $in: oldInventoryIds } });
                 
-                // Remove old inventory IDs from both Product and SpecialProduct models
+               
                 await Product.updateOne(
                     { _id: productId },
                     { $pull: { inventory: { $in: oldInventoryIds } } }
@@ -1495,22 +1441,7 @@ const bulkUploadInventory = async (req, res) => {
             return !currentInventoryKeys.includes(invKey);
         });
 
-        // Remove obsolete inventories and their references
-        for (const inv of obsoleteOnes) {
-            await Product.updateOne(
-                { _id: inv.product },
-                { $pull: { inventory: inv._id } }
-            );
-
-            await SpecialProduct.updateOne(
-                { _id: inv.product },
-                { $pull: { inventory: inv._id } }
-            );
-
-            await Inventory.deleteOne({ _id: inv._id });
-        }
-
-
+    
 
     } catch (error) {
         return res.status(500).json({ message: 'Error processing CSV file', error: error.message });
@@ -1522,6 +1453,283 @@ const bulkUploadInventory = async (req, res) => {
         message: `Bulk upload completed. ${newCount} new inventories created, ${updatedCount} inventories updated, ${mergedCount} inventories merged, ${skippedCount} rows skipped.`
     });
 };
+
+
+// old bulk uploader controller commit by naveed
+
+// const bulkUploadInventory = async (req, res) => {
+//     if (!req.file) {
+//         return res.status(400).json({ message: 'No CSV file uploaded' });
+//     }
+
+//     let updatedCount = 0;
+//     let newCount = 0;
+//     let skippedCount = 0;
+//     let mergedCount = 0;
+
+//     const inventoryMap = new Map();
+
+//     const processRow = async (data) => {
+//         const { 
+//             productName, 
+//             productType, 
+//             sku, 
+//             warehouseName, 
+//             quantity,
+//             vat,
+//             stockAlertThreshold,
+//             locationWithinWarehouse,
+//             lastRestocked,
+//             batchId,
+//             expiryDate,
+//             barcode,
+//             expiryDateThreshold
+//         } = data;
+
+//         try {
+//             const warehouse = await Warehouse.findOne({ name: { $regex: new RegExp(`^${warehouseName.trim()}`, 'i') } });
+//             if (!warehouse) {
+//                 // console.log(`Warehouse not found: ${warehouseName}`);
+//                 skippedCount++;
+//                 return;
+//             }
+
+//             let product;
+//             // const normalizedSku = sku.toString().trim();
+//             // const normalizedSku = sku.toString().replace('E+', 'E');
+//             const normalizedSku = sku.toString().includes('E+') ? 
+//             sku.toString().replace('.', '').replace('E+', '').padEnd(13, '0') : 
+//             sku.toString().trim();
+//             // console.log('Original SKU:', sku);
+//             // console.log('Normalized SKU:', normalizedSku);
+//             if (productType === 'SpecialProduct') {
+//                 product = await SpecialProduct.findOne({ sku: normalizedSku });
+//             } else {
+//                 product = await Product.findOne({ sku: normalizedSku });
+//             }
+
+//             if (!product) {
+//                 // console.log(`Product not found: ${normalizedSku}`);
+//                 skippedCount++;
+//                 return;
+//             }
+
+//             const key = `${product._id}-${warehouse._id}-${normalizedSku}`;
+//             const inventoryData = {
+//                 product: product._id,
+//                 productType,
+//                 warehouse: warehouse._id,
+//                 city: '67400e8a7b963a1282d218b5',
+//                 quantity: parseInt(quantity, 10),
+//                 vat: vat ? parseFloat(vat) : 0,
+//                 stockAlertThreshold: stockAlertThreshold ? parseInt(stockAlertThreshold, 10) : 10,
+//                 locationWithinWarehouse: locationWithinWarehouse || '',
+//                 lastRestocked: new Date(),
+//                 batchId: batchId || '',
+//                 expiryDate: expiryDate ? new Date(expiryDate) : null,
+//                 barcode: barcode || '',
+//                 expiryDateThreshold: expiryDateThreshold ? parseInt(expiryDateThreshold, 10) : 30
+//             };
+
+//             // if (inventoryMap.has(key)) {
+//             //     const existingData = inventoryMap.get(key);
+//             //     existingData.quantity += parseInt(quantity, 10);
+//             //     inventoryMap.set(key, existingData);
+//             //     mergedCount++;
+//             // } else {
+//             //     inventoryMap.set(key, inventoryData);
+//             // }
+
+//             if (inventoryMap.has(key)) {
+//     const existingData = inventoryMap.get(key);
+//     // existingData.quantity += parseInt(quantity, 10);
+//     existingData.quantity += inventoryData.quantity;
+//     inventoryMap.set(key, existingData);
+//     mergedCount++;
+// } else {
+//     // Check if inventory already exists in database
+//     // const existingInventory = await Inventory.findOne({
+//     //     product: product._id,
+//     //     warehouse: warehouse._id,
+//     //     productType: productType
+//     // });
+
+//     // if (existingInventory) {
+//     //     // Update existing inventory
+//     //     inventoryData.quantity = existingInventory.quantity + parseInt(quantity, 10);
+//     // }
+    
+//     inventoryMap.set(key, inventoryData);
+// }
+//         } catch (error) {
+//             // console.log('Row processing error:', error);
+//             skippedCount++;
+//         }
+//     };
+
+//     try {
+//         const stream = fsSync.createReadStream(req.file.path).pipe(csv());
+//         for await (const data of stream) {
+//             await processRow(data);
+//         }
+
+//         // Process the merged data
+//         for (const [key, inventoryData] of inventoryMap) {
+//             const existingInventory = await Inventory.findOne({
+//                 product: inventoryData.product,
+//                 productType: inventoryData.productType,
+//                 warehouse: inventoryData.warehouse,
+//                 city: inventoryData.city
+//             });
+
+//             if (existingInventory) {
+//                 // console.log('Updating existing inventory:', existingInventory);
+//                 // Object.assign(existingInventory, inventoryData);
+//                 // await existingInventory.save();
+//                 // updatedCount++;
+
+//                 // console.log('Before Update:', existingInventory.quantity);
+//                 // console.log('New Quantity:', inventoryData.quantity);
+                
+//                 const updated = await Inventory.findOneAndUpdate(
+//                     {
+//                         product: inventoryData.product,
+//                         productType: inventoryData.productType,
+//                         warehouse: inventoryData.warehouse,
+//                         city: inventoryData.city
+//                     },
+//                     {
+//                         $set: {
+//                             quantity: parseInt(inventoryData.quantity),
+//                             stockAlertThreshold: parseInt(inventoryData.stockAlertThreshold),
+//                             expiryDateThreshold: parseInt(inventoryData.expiryDateThreshold),
+//                             vat: parseFloat(inventoryData.vat),
+//                             locationWithinWarehouse: inventoryData.locationWithinWarehouse,
+//                             lastRestocked: inventoryData.lastRestocked,
+//                             batchId: inventoryData.batchId,
+//                             expiryDate: inventoryData.expiryDate,
+//                             barcode: inventoryData.barcode
+//                         }
+//                     },
+//                     { new: true, runValidators: true }
+//                 );
+                
+//                 // console.log('After Update:', updated.quantity);
+//                 updatedCount++;
+//             } else {
+//                 const newInventory = new Inventory(inventoryData);
+//                 await newInventory.save();
+//                 const product = await (inventoryData.productType === 'SpecialProduct' ? SpecialProduct : Product).findById(inventoryData.product);
+//                 if (product && !product.inventory.includes(newInventory._id)) {
+//                     product.inventory.push(newInventory._id);
+//                     await product.save();
+//                 }
+//                 newCount++;
+//             }
+//         }
+
+// //         const uniqueKeys = Array.from(inventoryMap.keys());
+// // for (const key of uniqueKeys) {
+// //     const [productId, warehouseId, sku] = key.split('-');
+    
+// //     const duplicateInventories = await Inventory.find({
+// //         product: productId,
+// //         warehouse: warehouseId
+// //     }).sort({ updatedAt: -1 });
+
+// //     if (duplicateInventories.length > 1) {
+// //         const [latestInventory, ...oldInventories] = duplicateInventories;
+// //         const oldInventoryIds = oldInventories.map(inv => inv._id);
+        
+// //         await Inventory.deleteMany({ _id: { $in: oldInventoryIds } });
+        
+// //         // Remove old inventory IDs from the product's inventory array
+// //         await Product.updateOne(
+// //             { _id: productId },
+// //             { $pull: { inventory: { $in: oldInventoryIds } } }
+// //         );
+        
+// //         await SpecialProduct.updateOne(
+// //             { _id: productId },
+// //             { $pull: { inventory: { $in: oldInventoryIds } } }
+// //         );
+
+// //         console.log(`Removed ${oldInventories.length} duplicate entries for product ${sku} in warehouse ${warehouseId}`);
+// //     }
+// // }
+
+//         // After all inventory updates are done, add this code
+//         const uniqueKeys = Array.from(inventoryMap.keys());
+//         for (const key of uniqueKeys) {
+//             const [productId, warehouseId, sku] = key.split('-');
+            
+//             const duplicateInventories = await Inventory.find({
+//                 product: productId,
+//                 warehouse: warehouseId
+//             }).sort({ updatedAt: -1 });
+
+//             if (duplicateInventories.length > 1) {
+//                 const [latestInventory, ...oldInventories] = duplicateInventories;
+//                 const oldInventoryIds = oldInventories.map(inv => inv._id);
+                
+//                 await Inventory.deleteMany({ _id: { $in: oldInventoryIds } });
+                
+//                 // Remove old inventory IDs from both Product and SpecialProduct models
+//                 await Product.updateOne(
+//                     { _id: productId },
+//                     { $pull: { inventory: { $in: oldInventoryIds } } }
+//                 );
+                
+//                 await SpecialProduct.updateOne(
+//                     { _id: productId },
+//                     { $pull: { inventory: { $in: oldInventoryIds } } }
+//                 );
+
+//                 console.log(`Merged ${oldInventories.length} duplicate entries for product ${sku} in warehouse ${warehouseId}`);
+//             }
+//         }
+
+//         const currentInventoryKeys = Array.from(inventoryMap.keys()).map(key => {
+//             const [productId, warehouseId] = key.split('-');
+//             return `${productId}-${warehouseId}`;
+//         });
+
+//         // Find inventories not present in current CSV
+//         const obsoleteInventories = await Inventory.find({});
+//         const obsoleteOnes = obsoleteInventories.filter(inv => {
+//             const invKey = `${inv.product}-${inv.warehouse}`;
+//             return !currentInventoryKeys.includes(invKey);
+//         });
+
+//         // Remove obsolete inventories and their references
+//         for (const inv of obsoleteOnes) {
+//             await Product.updateOne(
+//                 { _id: inv.product },
+//                 { $pull: { inventory: inv._id } }
+//             );
+
+//             await SpecialProduct.updateOne(
+//                 { _id: inv.product },
+//                 { $pull: { inventory: inv._id } }
+//             );
+
+//             await Inventory.deleteOne({ _id: inv._id });
+//         }
+
+
+
+//     } catch (error) {
+//         return res.status(500).json({ message: 'Error processing CSV file', error: error.message });
+//     } finally {
+//         await deleteFile(req.file.path);
+//     }
+
+//     res.status(200).json({
+//         message: `Bulk upload completed. ${newCount} new inventories created, ${updatedCount} inventories updated, ${mergedCount} inventories merged, ${skippedCount} rows skipped.`
+//     });
+// };
+
+
 
 
 
