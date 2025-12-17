@@ -87,7 +87,8 @@ const createPolicy = async (req, res) => {
 const getUserPolicies = async (req, res) => {
     try {
          const { customerId } = req.params;
-        const { roleId, warehouseId } = req.query;
+        const { roleId} = req.query;
+        const warehouseId = req?.user?.selectedWarehouse;
         
         if (!roleId && !warehouseId) {
             return res.status(400).json({ message: 'Either roleId or warehouseId is required in query params' });

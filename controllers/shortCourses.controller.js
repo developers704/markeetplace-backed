@@ -7,6 +7,8 @@ const Quiz = require('../models/quiz.model');
 const getShortCourses = async (req, res) => {
   try {
     const customerId = req.user.id;
+    const warehouseID = req?.user?.selectedWarehouse;
+    // console.log('complete request', req.user.selectedWarehouse );
     console.log('Customer ID:', customerId);
 
     // Get user details with role and warehouse
@@ -29,7 +31,7 @@ const shortCourses = await Course.find({
   isActive: true,
   $and: [
     { 'accessControl.roles': user.role._id },
-    { 'accessControl.stores': user.warehouse._id }
+    { 'accessControl.stores': warehouseID }
   ]
 }).sort({ sequence: 1 });
 

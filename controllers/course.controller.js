@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const Customer = require('../models/customer.model');
 const Quiz = require('../models/quiz.model');
 const { sendCourseAssignmentEmails } = require('../helpers/courseAssignmentHelper.js');
+const Warehouse = require('../models/warehouse.model.js');
 
 const createCourse = async (req, res) => {
   try {
@@ -290,6 +291,7 @@ const getAllCoursesSimplified = async (req, res) => {
 const getCustomerCourses = async (req, res) => {
   try {
     const customerId = req.user.id; // From auth middleware
+    const warehouseID = req?.user?.selectedWarehouse;
 
     // Get customer details with role and warehouse
     const customer = await Customer.findById(customerId)
@@ -316,7 +318,7 @@ const getCustomerCourses = async (req, res) => {
         },
         {
           $or: [
-            { 'accessControl.stores': customer.warehouse._id },
+            { 'accessControl.stores': warehouseID },
             { 'accessControl.stores': { $size: 0 } } // If no stores specified, accessible to all
           ]
         }
@@ -407,6 +409,7 @@ const getCourseChaptersAndSections = async (req, res) => {
   try {
     const { courseId } = req.params;
     const customerId = req.user.id; // From auth middleware
+    const warehouseID = req?.user?.selectedWarehouse;
 
     // Get customer details with role and warehouse
     const customer = await Customer.findById(customerId)
@@ -439,7 +442,7 @@ const getCourseChaptersAndSections = async (req, res) => {
       course.accessControl.roles.some(roleId => roleId.toString() === customer.role._id.toString());
 
     const hasWarehouseAccess = course.accessControl.stores.length === 0 ||
-      (customer.warehouse && course.accessControl.stores.some(storeId => storeId.toString() === customer.warehouse._id.toString()));
+      (customer.warehouse && course.accessControl.stores.some(storeId => storeId.toString() === warehouseID.toString()));
 
     if (!hasRoleAccess && !hasWarehouseAccess) {
       return res.status(403).json({
@@ -4477,11 +4480,13 @@ const bulkDeleteCourses = async (req, res) => {
       try {
         // Check if there are enrolled users
         if (course.enrolledUsers.length > 0) {
-          // Mark as inactive instead of deleting
-          course.isActive = false;
-          await course.save();
-          deactivatedCount++;
-        } else {
+        // Mark as inactive instead of deleting
+            await Course.updateOne(
+              { _id: course._id },
+              { $set: { isActive: false } }
+            );
+            deactivatedCount++;
+          }  else {
           // Delete associated files
           try {
             // Delete course thumbnail
@@ -6126,7 +6131,7 @@ const calculateCourseProgress = async (course, enrollment, courseQuizResults, us
 const getUserProgressById = async (req, res) => {
   try {
     const { userId } = req.params;
-
+     const warehouseID = req?.user?.selectedWarehouse;
     if (!mongoose.Types.ObjectId.isValid(userId)) {
       return res.status(400).json({
         success: false,
@@ -6147,7 +6152,8 @@ const getUserProgressById = async (req, res) => {
         message: 'User not found'
       });
     }
-
+    const selectedwarehouse = await Warehouse.findById(warehouseID);
+    console.log(`Selected warehouse: ${selectedwarehouse ? selectedwarehouse.name : 'None'}`);
     // Get all courses with enrollments
     const courses = await Course.find({
       isActive: true,

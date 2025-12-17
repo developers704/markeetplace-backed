@@ -150,7 +150,7 @@ const courseSchema = new mongoose.Schema({
     },
     courseDuration: {
         type: String,
-        required: true
+        // required: true
     },
     description: {
         type: String,

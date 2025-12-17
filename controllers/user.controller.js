@@ -116,23 +116,26 @@ function transformUserCSV(rows) {
       ? r.store.split(",").map((s) => s.trim())
       : [],
     initialBalance: Number(r.initialBalance) || 0
-  }));
+}));
 }
 
 const findOrCreateRole = async (name) => {
   if (!name) return null;
 
   let role = await UserRole.findOne({
-    name: new RegExp(`^${name}$`, "i")
+    role_name: new RegExp(`^${name}$`, "i")
   });
 
   if (!role) {
-    role = await UserRole.create({ name });
+    // create default role with empty permissions
+    role = await UserRole.create({
+      role_name: name,
+      permissions: {} 
+    });
   }
 
   return role;
 };
-
 
 const findOrCreateDepartment = async (name) => {
   if (!name) return null;
