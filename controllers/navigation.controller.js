@@ -1660,172 +1660,380 @@ const getCustomerDashboard = async (req, res) => {
 
 
 // new duplicate
+// const updateContentProgress = async (req, res) => {
+//   try {
+//     const { courseId, chapterId, sectionId, contentId } = req.params;
+//     const userId = req.user.id;
+//     const { watchedDuration, completed } = req.body;
+    
+//     console.log("Updating content progress:", { 
+//       courseId, chapterId, sectionId, contentId, watchedDuration, completed 
+//     });
+    
+//     const course = await Course.findById(courseId)
+//       .populate('chapters.sections.quiz', 'title description timeLimit passingScore maxAttempts enableSuffling enableTimer questionTimeLimit weightage questions isActive createdAt updatedAt');
+    
+//     if (!course) {
+//       return res.status(404).json({
+//         success: false,
+//         message: 'Course not found'
+//       });
+//     }
+    
+//     // Find user's enrollment
+//     const enrollmentIndex = course.enrolledUsers.findIndex(
+//       enrollment => enrollment.user.toString() === userId
+//     );
+    
+//     if (enrollmentIndex === -1) {
+//       return res.status(404).json({
+//         success: false,
+//         message: 'User not enrolled in this course'
+//       });
+//     }
+    
+//     // 🆕 UPDATE STATUS TO "IN PROGRESS" ON FIRST CONTENT ACCESS
+//     if (course.enrolledUsers[enrollmentIndex].status === 'Not Started') {
+//       course.enrolledUsers[enrollmentIndex].status = 'In Progress';
+//       console.log(`User ${userId} started course - status updated to In Progress`);
+//     }
+    
+//     // Find chapter, section, content indices
+//     const chapterIndex = course.chapters.findIndex(chapter => chapter._id.toString() === chapterId);
+//     const chapter = course.chapters[chapterIndex];
+//     const sectionIndex = chapter.sections.findIndex(section => section._id.toString() === sectionId);
+//     const section = chapter.sections[sectionIndex];
+//     const contentIndex = section.content.findIndex(content => content._id.toString() === contentId);
+//     const content = section.content[contentIndex];
+    
+//     // Find progress indices
+//     const chapterProgressIndex = course.enrolledUsers[enrollmentIndex].chapterProgress.findIndex(
+//       cp => cp.chapterId.toString() === chapter._id.toString()
+//     );
+    
+//     const sectionProgressIndex = course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
+//       .sectionProgress.findIndex(
+//         sp => sp.sectionId.toString() === section._id.toString()
+//       );
+    
+//     const contentProgressIndex = course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
+//       .sectionProgress[sectionProgressIndex].contentProgress.findIndex(
+//         cp => cp.contentId.toString() === content._id.toString()
+//       );
+
+//     // Get existing progress
+//     const existingProgress = course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
+//       .sectionProgress[sectionProgressIndex].contentProgress[contentProgressIndex];
+    
+//     const wasAlreadyCompleted = existingProgress.completed;
+    
+//     // Check minimum watch time for videos
+//     if (content.contentType === 'video' && completed && !wasAlreadyCompleted) {
+//       if (watchedDuration < content.minimumWatchTime) {
+//         return res.status(400).json({
+//           success: false,
+//           message: 'Minimum watch time not met.',
+//           requiredTime: content.minimumWatchTime,
+//           currentTime: watchedDuration
+//         });
+//       }
+//     }
+    
+//     // Update content progress
+//     const finalWatchedDuration = wasAlreadyCompleted ? 
+//       Math.max(existingProgress.watchedDuration, watchedDuration) : watchedDuration;
+    
+//     course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
+//       .sectionProgress[sectionProgressIndex].contentProgress[contentProgressIndex].watchedDuration = finalWatchedDuration;
+    
+//     const canMarkCompleted = wasAlreadyCompleted || 
+//       (content.contentType === 'video' ? watchedDuration >= content.minimumWatchTime : true) ||
+//       (content.contentType === 'text' ? completed : false);
+    
+//     course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
+//       .sectionProgress[sectionProgressIndex].contentProgress[contentProgressIndex].completed = 
+//       completed && canMarkCompleted ? true : existingProgress.completed;
+    
+//     course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
+//       .sectionProgress[sectionProgressIndex].contentProgress[contentProgressIndex].lastAccessedAt = new Date();
+    
+//     // 🆕 UPDATE CURRENT POSITION
+//     course.enrolledUsers[enrollmentIndex].currentChapter = chapterIndex;
+//     course.enrolledUsers[enrollmentIndex].currentSection = sectionIndex;
+//     course.enrolledUsers[enrollmentIndex].currentContent = contentIndex;
+    
+//     const statusUpdated = updateCompletionStatus(course, enrollmentIndex);
+//     console.log('Completion status updated:', statusUpdated);
+
+//     // 🆕 CALCULATE OVERALL PROGRESS (NOT GRADE YET)
+// const overallProgress = calculateOverallProgress(course, enrollmentIndex);
+//     course.enrolledUsers[enrollmentIndex].progress = overallProgress;
+    
+//     // 🆕 CHECK IF ENTIRE COURSE IS COMPLETED
+//     const courseCompleted = checkCourseCompletion(course, enrollmentIndex);
+    
+//     if (courseCompleted.allCompleted) {
+//       // Calculate final grade only when everything is done
+//      const finalGrade = calculateFinalGrade(course, enrollmentIndex);
+  
+//       course.enrolledUsers[enrollmentIndex].gradePercentage = finalGrade.percentage;
+//       course.enrolledUsers[enrollmentIndex].gradeLabel = finalGrade.label;
+//       course.enrolledUsers[enrollmentIndex].allChaptersCompleted = true;
+//       course.enrolledUsers[enrollmentIndex].allQuizzesPassed = courseCompleted.allQuizzesPassed;
+//       course.enrolledUsers[enrollmentIndex].completionDate = new Date();
+//       course.enrolledUsers[enrollmentIndex].progress = 100; // 🆕 FORCE 100%
+      
+//       // Determine final status
+//       if (finalGrade.percentage >= course.passingGrade && courseCompleted.allQuizzesPassed) {
+//         course.enrolledUsers[enrollmentIndex].status = 'Completed';
+//         course.enrolledUsers[enrollmentIndex].certificateRequestStatus = 'Eligible';
+//         course.enrolledUsers[enrollmentIndex].certificateEarned = true;
+//       } else {
+//         course.enrolledUsers[enrollmentIndex].status = 'Failed';
+//         course.enrolledUsers[enrollmentIndex].certificateRequestStatus = 'Not Eligible';
+//         course.enrolledUsers[enrollmentIndex].certificateEarned = false;
+        
+//         console.log(`User ${userId} failed course due to low overall grade`);
+//       }
+//     }
+    
+//     await course.save();
+    
+//     // Determine next content
+//     let nextContent = null;
+//     const isContentCompleted = course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
+//       .sectionProgress[sectionProgressIndex].contentProgress[contentProgressIndex].completed;
+    
+//     if (isContentCompleted) {
+//       nextContent = findNextContent(course, chapterIndex, sectionIndex, contentIndex, enrollmentIndex);
+//     }
+    
+//     res.status(200).json({
+//       success: true,
+//       message: 'Progress updated successfully',
+//       data: {
+//         contentCompleted: isContentCompleted,
+//         progress: course.enrolledUsers[enrollmentIndex].progress,
+//         status: course.enrolledUsers[enrollmentIndex].status,
+//         currentChapter: course.enrolledUsers[enrollmentIndex].currentChapter,
+//         currentSection: course.enrolledUsers[enrollmentIndex].currentSection,
+//         currentContent: course.enrolledUsers[enrollmentIndex].currentContent,
+//         gradePercentage: course.enrolledUsers[enrollmentIndex].gradePercentage,
+//         gradeLabel: course.enrolledUsers[enrollmentIndex].gradeLabel,
+//         nextContent: nextContent,
+//         courseCompleted: course.enrolledUsers[enrollmentIndex].status === 'Completed' || course.enrolledUsers[enrollmentIndex].status === 'Failed'
+//       }
+//     });
+//   } catch (error) {
+//     console.error('Error updating content progress:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: 'Failed to update content progress',
+//       error: error.message
+//     });
+//   }
+// };
+
+
 const updateContentProgress = async (req, res) => {
   try {
     const { courseId, chapterId, sectionId, contentId } = req.params;
     const userId = req.user.id;
-    const { watchedDuration, completed } = req.body;
-    
-    console.log("Updating content progress:", { 
-      courseId, chapterId, sectionId, contentId, watchedDuration, completed 
-    });
-    
-    const course = await Course.findById(courseId)
-      .populate('chapters.sections.quiz', 'title description timeLimit passingScore maxAttempts enableSuffling enableTimer questionTimeLimit weightage questions isActive createdAt updatedAt');
-    
+    const { watchedDuration = 0, completed = false } = req.body;
+
+    const course = await Course.findById(courseId);
     if (!course) {
-      return res.status(404).json({
-        success: false,
-        message: 'Course not found'
-      });
+      return res.status(404).json({ success: false, message: 'Course not found' });
     }
-    
-    // Find user's enrollment
+
+    // ✅ Enrollment check
     const enrollmentIndex = course.enrolledUsers.findIndex(
-      enrollment => enrollment.user.toString() === userId
+      e => e.user.toString() === userId
     );
-    
     if (enrollmentIndex === -1) {
-      return res.status(404).json({
+      return res.status(404).json({ success: false, message: 'User not enrolled' });
+    }
+
+    const enrollment = course.enrolledUsers[enrollmentIndex];
+
+    // ✅ Update status on first access
+    if (enrollment.status === 'Not Started') {
+      enrollment.status = 'In Progress';
+    }
+
+    // =======================
+    // FIND CHAPTER / SECTION / CONTENT
+    // =======================
+
+    const chapterIndex = course.chapters.findIndex(c => c._id.toString() === chapterId);
+    if (chapterIndex === -1) return res.status(404).json({ success: false, message: 'Chapter not found' });
+    const chapter = course.chapters[chapterIndex];
+
+    const sectionIndex = chapter.sections.findIndex(s => s._id.toString() === sectionId);
+    if (sectionIndex === -1) return res.status(404).json({ success: false, message: 'Section not found' });
+    const section = chapter.sections[sectionIndex];
+
+    const contentIndex = section.content.findIndex(c => c._id.toString() === contentId);
+    if (contentIndex === -1) return res.status(404).json({ success: false, message: 'Content not found' });
+    const content = section.content[contentIndex];
+
+    // =======================
+    // ENSURE CHAPTER PROGRESS
+    // =======================
+
+    let chapterProgress = enrollment.chapterProgress.find(
+      cp => cp.chapterId.toString() === chapterId
+    );
+
+    if (!chapterProgress) {
+      chapterProgress = {
+        chapterId: chapter._id,
+        sectionProgress: []
+      };
+      enrollment.chapterProgress.push(chapterProgress);
+    }
+
+    // =======================
+    // ENSURE SECTION PROGRESS
+    // =======================
+
+    let sectionProgress = chapterProgress.sectionProgress.find(
+      sp => sp.sectionId.toString() === sectionId
+    );
+
+    if (!sectionProgress) {
+      sectionProgress = {
+        sectionId: section._id,
+        contentProgress: []
+      };
+      chapterProgress.sectionProgress.push(sectionProgress);
+    }
+
+    // =======================
+    // ENSURE CONTENT PROGRESS
+    // =======================
+
+    let contentProgress = sectionProgress.contentProgress.find(
+      cp => cp.contentId.toString() === contentId
+    );
+
+    if (!contentProgress) {
+      contentProgress = {
+        contentId: content._id,
+        watchedDuration: 0,
+        completed: false,
+        lastAccessedAt: new Date()
+      };
+      sectionProgress.contentProgress.push(contentProgress);
+    }
+
+    // =======================
+    // VALIDATION (VIDEO)
+    // =======================
+
+    if (
+      content.contentType === 'video' &&
+      completed &&
+      !contentProgress.completed &&
+      watchedDuration < content.minimumWatchTime
+    ) {
+      return res.status(400).json({
         success: false,
-        message: 'User not enrolled in this course'
+        message: 'Minimum watch time not met',
+        required: content.minimumWatchTime,
+        watched: watchedDuration
       });
     }
-    
-    // 🆕 UPDATE STATUS TO "IN PROGRESS" ON FIRST CONTENT ACCESS
-    if (course.enrolledUsers[enrollmentIndex].status === 'Not Started') {
-      course.enrolledUsers[enrollmentIndex].status = 'In Progress';
-      console.log(`User ${userId} started course - status updated to In Progress`);
-    }
-    
-    // Find chapter, section, content indices
-    const chapterIndex = course.chapters.findIndex(chapter => chapter._id.toString() === chapterId);
-    const chapter = course.chapters[chapterIndex];
-    const sectionIndex = chapter.sections.findIndex(section => section._id.toString() === sectionId);
-    const section = chapter.sections[sectionIndex];
-    const contentIndex = section.content.findIndex(content => content._id.toString() === contentId);
-    const content = section.content[contentIndex];
-    
-    // Find progress indices
-    const chapterProgressIndex = course.enrolledUsers[enrollmentIndex].chapterProgress.findIndex(
-      cp => cp.chapterId.toString() === chapter._id.toString()
+
+    // =======================
+    // UPDATE CONTENT PROGRESS
+    // =======================
+
+    contentProgress.watchedDuration = Math.max(
+      contentProgress.watchedDuration,
+      watchedDuration
     );
-    
-    const sectionProgressIndex = course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
-      .sectionProgress.findIndex(
-        sp => sp.sectionId.toString() === section._id.toString()
-      );
-    
-    const contentProgressIndex = course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
-      .sectionProgress[sectionProgressIndex].contentProgress.findIndex(
-        cp => cp.contentId.toString() === content._id.toString()
-      );
 
-    // Get existing progress
-    const existingProgress = course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
-      .sectionProgress[sectionProgressIndex].contentProgress[contentProgressIndex];
-    
-    const wasAlreadyCompleted = existingProgress.completed;
-    
-    // Check minimum watch time for videos
-    if (content.contentType === 'video' && completed && !wasAlreadyCompleted) {
-      if (watchedDuration < content.minimumWatchTime) {
-        return res.status(400).json({
-          success: false,
-          message: 'Minimum watch time not met.',
-          requiredTime: content.minimumWatchTime,
-          currentTime: watchedDuration
-        });
-      }
+    if (completed) {
+      contentProgress.completed = true;
     }
-    
-    // Update content progress
-    const finalWatchedDuration = wasAlreadyCompleted ? 
-      Math.max(existingProgress.watchedDuration, watchedDuration) : watchedDuration;
-    
-    course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
-      .sectionProgress[sectionProgressIndex].contentProgress[contentProgressIndex].watchedDuration = finalWatchedDuration;
-    
-    const canMarkCompleted = wasAlreadyCompleted || 
-      (content.contentType === 'video' ? watchedDuration >= content.minimumWatchTime : true) ||
-      (content.contentType === 'text' ? completed : false);
-    
-    course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
-      .sectionProgress[sectionProgressIndex].contentProgress[contentProgressIndex].completed = 
-      completed && canMarkCompleted ? true : existingProgress.completed;
-    
-    course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
-      .sectionProgress[sectionProgressIndex].contentProgress[contentProgressIndex].lastAccessedAt = new Date();
-    
-    // 🆕 UPDATE CURRENT POSITION
-    course.enrolledUsers[enrollmentIndex].currentChapter = chapterIndex;
-    course.enrolledUsers[enrollmentIndex].currentSection = sectionIndex;
-    course.enrolledUsers[enrollmentIndex].currentContent = contentIndex;
-    
-    const statusUpdated = updateCompletionStatus(course, enrollmentIndex);
-    console.log('Completion status updated:', statusUpdated);
 
-    // 🆕 CALCULATE OVERALL PROGRESS (NOT GRADE YET)
-const overallProgress = calculateOverallProgress(course, enrollmentIndex);
-    course.enrolledUsers[enrollmentIndex].progress = overallProgress;
-    
-    // 🆕 CHECK IF ENTIRE COURSE IS COMPLETED
+    contentProgress.lastAccessedAt = new Date();
+
+    // =======================
+    // UPDATE CURRENT POSITION
+    // =======================
+
+    enrollment.currentChapter = chapterIndex;
+    enrollment.currentSection = sectionIndex;
+    enrollment.currentContent = contentIndex;
+
+    // =======================
+    // CALCULATIONS
+    // =======================
+
+    enrollment.progress = calculateOverallProgress(course, enrollmentIndex);
+
     const courseCompleted = checkCourseCompletion(course, enrollmentIndex);
-    
+
     if (courseCompleted.allCompleted) {
-      // Calculate final grade only when everything is done
-     const finalGrade = calculateFinalGrade(course, enrollmentIndex);
-  
-      course.enrolledUsers[enrollmentIndex].gradePercentage = finalGrade.percentage;
-      course.enrolledUsers[enrollmentIndex].gradeLabel = finalGrade.label;
-      course.enrolledUsers[enrollmentIndex].allChaptersCompleted = true;
-      course.enrolledUsers[enrollmentIndex].allQuizzesPassed = courseCompleted.allQuizzesPassed;
-      course.enrolledUsers[enrollmentIndex].completionDate = new Date();
-      course.enrolledUsers[enrollmentIndex].progress = 100; // 🆕 FORCE 100%
-      
-      // Determine final status
-      if (finalGrade.percentage >= course.passingGrade && courseCompleted.allQuizzesPassed) {
-        course.enrolledUsers[enrollmentIndex].status = 'Completed';
-        course.enrolledUsers[enrollmentIndex].certificateRequestStatus = 'Eligible';
-        course.enrolledUsers[enrollmentIndex].certificateEarned = true;
+      const finalGrade = calculateFinalGrade(course, enrollmentIndex);
+
+      enrollment.gradePercentage = finalGrade.percentage;
+      enrollment.gradeLabel = finalGrade.label;
+      enrollment.allChaptersCompleted = true;
+      enrollment.allQuizzesPassed = courseCompleted.allQuizzesPassed;
+      enrollment.completionDate = new Date();
+      enrollment.progress = 100;
+
+      if (
+        finalGrade.percentage >= course.passingGrade &&
+        courseCompleted.allQuizzesPassed
+      ) {
+        enrollment.status = 'Completed';
+        enrollment.certificateEarned = true;
+        enrollment.certificateRequestStatus = 'Eligible';
       } else {
-        course.enrolledUsers[enrollmentIndex].status = 'Failed';
-        course.enrolledUsers[enrollmentIndex].certificateRequestStatus = 'Not Eligible';
-        course.enrolledUsers[enrollmentIndex].certificateEarned = false;
-        
-        console.log(`User ${userId} failed course due to low overall grade`);
+        enrollment.status = 'Failed';
+        enrollment.certificateEarned = false;
+        enrollment.certificateRequestStatus = 'Not Eligible';
       }
     }
-    
+
     await course.save();
-    
-    // Determine next content
+
+    // =======================
+    // NEXT CONTENT
+    // =======================
+
     let nextContent = null;
-    const isContentCompleted = course.enrolledUsers[enrollmentIndex].chapterProgress[chapterProgressIndex]
-      .sectionProgress[sectionProgressIndex].contentProgress[contentProgressIndex].completed;
-    
-    if (isContentCompleted) {
-      nextContent = findNextContent(course, chapterIndex, sectionIndex, contentIndex, enrollmentIndex);
+    if (contentProgress.completed) {
+      nextContent = findNextContent(
+        course,
+        chapterIndex,
+        sectionIndex,
+        contentIndex,
+        enrollmentIndex
+      );
     }
-    
+
     res.status(200).json({
       success: true,
       message: 'Progress updated successfully',
       data: {
-        contentCompleted: isContentCompleted,
-        progress: course.enrolledUsers[enrollmentIndex].progress,
-        status: course.enrolledUsers[enrollmentIndex].status,
-        currentChapter: course.enrolledUsers[enrollmentIndex].currentChapter,
-        currentSection: course.enrolledUsers[enrollmentIndex].currentSection,
-        currentContent: course.enrolledUsers[enrollmentIndex].currentContent,
-        gradePercentage: course.enrolledUsers[enrollmentIndex].gradePercentage,
-        gradeLabel: course.enrolledUsers[enrollmentIndex].gradeLabel,
-        nextContent: nextContent,
-        courseCompleted: course.enrolledUsers[enrollmentIndex].status === 'Completed' || course.enrolledUsers[enrollmentIndex].status === 'Failed'
+        progress: enrollment.progress,
+        status: enrollment.status,
+        currentChapter: enrollment.currentChapter,
+        currentSection: enrollment.currentSection,
+        currentContent: enrollment.currentContent,
+        nextContent,
+        courseCompleted:
+          enrollment.status === 'Completed' || enrollment.status === 'Failed'
       }
     });
+
   } catch (error) {
-    console.error('Error updating content progress:', error);
+    console.error(error);
     res.status(500).json({
       success: false,
       message: 'Failed to update content progress',
