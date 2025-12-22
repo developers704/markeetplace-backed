@@ -553,46 +553,137 @@ const getProductsByCategoryId = async (req, res) => {
 };
 
 
+// const getProductsByCategory = async (req, res) => {
+//   try {
+//       const { categoryId, subCategoryId } = req.params;
+      
+//       let query = {};
+      
+//       if (categoryId) {
+//           query.category = categoryId;
+//       }
+      
+//       if (subCategoryId) {
+//           query.subcategory = subCategoryId;
+//       }
+
+//       const products = await Product.find(query)
+//           .populate('brand')
+//           .populate('category')
+//           .populate('subcategory')
+//           .populate('prices.city')
+//           .populate('tags')
+//           .populate({
+//             path: 'variants',
+//               populate: {
+//                   path: 'variantName',
+//                   model: 'VariantName'
+//               }
+//           })
+//           .select('name description image prices isBestSeller isNewArrival sku gallery');
+
+//       res.status(200).json({
+//           success: true,
+//           count: products.length,
+//           data: products
+//       });
+
+//   } catch (error) {
+//       res.status(500).json({
+//           success: false,
+//           message: error.message
+//       });
+//   }
+// };
+
+
 const getProductsByCategory = async (req, res) => {
   try {
-      const { categoryId, subCategoryId } = req.params;
-      
-      let query = {};
-      
-      if (categoryId) {
-          query.category = categoryId;
-      }
-      
-      if (subCategoryId) {
-          query.subcategory = subCategoryId;
+    const { categoryId, subCategoryId } = req.params;
+
+    // Step 1: Get inventories with quantity > 0
+    const inventories = await Inventory.find()
+    .populate('warehouse city')
+            .populate({
+                path: 'product',
+                strictPopulate: false, // ignore missing paths for populate
+                populate: [
+                    // Only populate fields if exist in schema
+                    { path: 'category', select: 'name _id' , strictPopulate: false },
+                    { path: 'subcategory', select: 'name _id', strictPopulate: false },
+                    { path: 'subsubcategory', select: 'name _id', strictPopulate: false },
+                    { path: 'brand', select: 'name', strictPopulate: false },
+                    { path: 'prices.city', model: 'City', strictPopulate: false },
+                    {
+                        path: 'variants',
+                        populate: {
+                            path: 'variantName',
+                            populate: { path: 'parentVariant', model: 'VariantName', strictPopulate: false },
+                            strictPopulate: false
+                        },
+                        strictPopulate: false
+                    },
+                    { path: 'discounts.discountId', strictPopulate: false },
+                    { path: 'dealOfTheDay', strictPopulate: false },
+                    { path: 'specialCategory', select: 'name', strictPopulate: false },
+                    { path: 'specialSubcategory', select: 'name', strictPopulate: false }
+                ],
+                select: 'name sku image gallery metal_color prices variationId tags brand type specialCategory specialSubcategory variants discounts dealOfTheDay'
+            }).lean();
+
+    // Step 2: Filter inventories by category/subcategory
+    const filtered = inventories.filter(inv => {
+      const product = inv.product;
+      if (!product) return false;
+
+      const hasCategory = product.category.some(c => c._id.toString() === categoryId);
+      const hasSubcategory = product.subcategory.some(sc => sc._id.toString() === subCategoryId);
+
+      return hasCategory && hasSubcategory;
+    });
+
+    // Step 3: Group inventories by product
+    const productMap = new Map();
+
+    filtered.forEach(inv => {
+      const prodId = inv.product._id.toString();
+
+      if (!productMap.has(prodId)) {
+        productMap.set(prodId, {
+          _id: inv.product._id,
+          name: inv.product.name,
+          sku: inv.product.sku,
+          type: inv.product.type,
+          image: inv.product.image || '',
+          gallery: inv.product.gallery || [],
+          variants: inv.product.variants || [],
+          category: inv.product.category || [],
+          subcategory: inv.product.subcategory || [],
+          warehouse: inv.warehouse,
+          quantity: inv.quantity,
+          city: inv.city,
+          lastRestocked: inv.lastRestocked,
+          prices: inv.product.prices || [],
+        });
       }
 
-      const products = await Product.find(query)
-          .populate('brand')
-          .populate('category')
-          .populate('subcategory')
-          .populate('prices.city')
-          .populate('tags')
-          .populate({
-            path: 'variants',
-              populate: {
-                  path: 'variantName',
-                  model: 'VariantName'
-              }
-          })
-          .select('name description image prices isBestSeller isNewArrival sku gallery');
+    });
 
-      res.status(200).json({
-          success: true,
-          count: products.length,
-          data: products
-      });
+    const responseData = Array.from(productMap.values());
+
+    res.status(200).json({
+      success: true,
+      count: responseData.length,
+      data: responseData,
+    });
 
   } catch (error) {
-      res.status(500).json({
-          success: false,
-          message: error.message
-      });
+    console.error(error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch inventories by category',
+      error: error.message,
+    });
   }
 };
 
