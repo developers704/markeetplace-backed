@@ -261,7 +261,8 @@ const updatePolicy = async (req, res) => {
         if (existingSequenceAlreadyExists) {
             return res.status(400).json({ message: 'Sequence already exists for another policy' });
         }
-
+        
+        let oldImagePath = policy.picture;
         // Handle image upload
         if (req.file) {
             // Delete old image if new image is uploaded
@@ -278,7 +279,7 @@ const updatePolicy = async (req, res) => {
         }
 
         // Store old image path and old content/version for comparison
-        const oldImagePath = policy.picture;
+        
         const oldContent = policy.content;
         const oldVersion = policy.version;
         
