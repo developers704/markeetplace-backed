@@ -15,6 +15,7 @@ const authMiddleware = require('../middlewares/authMiddleware');
 const checkSuperuserOrPermission = require('../middlewares/checkSuperuserOrPermission');
 const adminLogger = require('../middlewares/adminLogger');
 
+router.get('/product-variants/categoryId/:categoryId/subcategory/:subCategoryId', getAllProductVariants);
 
 // Routes for Variant Names
 router.post('/variant-names', authMiddleware, checkSuperuserOrPermission('Products', 'Create'), adminLogger(), createVariantName);
@@ -24,7 +25,6 @@ router.delete('/variant-names/bulk-delete', authMiddleware, checkSuperuserOrPerm
 
 // Routes for Product Variants
 router.post('/product-variants', authMiddleware, checkSuperuserOrPermission('Products', 'Create'), adminLogger(), createProductVariant);
-router.get('/product-variants', getAllProductVariants);
 router.put('/product-variants/:id', authMiddleware, checkSuperuserOrPermission('Products', 'Update'), adminLogger(), updateProductVariant);
 router.delete('/product-variants/bulk-delete', authMiddleware, checkSuperuserOrPermission('Products', 'Delete'), adminLogger(), bulkDeleteProductVariants); // Bulk delete route for product variants
 router.delete('/product-variants/:id', authMiddleware, checkSuperuserOrPermission('Products', 'Delete'), adminLogger(), deleteProductVariant);

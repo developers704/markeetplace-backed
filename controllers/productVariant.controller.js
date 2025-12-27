@@ -1,3 +1,5 @@
+const Inventory = require('../models/inventory.model');
+const Product = require('../models/product.model');
 const ProductVariant = require('../models/productVarriant.model');
 const VariantName = require('../models/variantName.model');
 
@@ -136,22 +138,136 @@ const createProductVariant = async (req, res) => {
 
 
 
+// const getAllProductVariants = async (req, res) => {
+//     try {
+//         const {productId} = req.params;
+
+//         const productVariants = await ProductVariant.find()
+//             .populate({
+//                 path: 'variantName',
+//                 select: 'name parentVariant',
+//                 populate: {
+//                     path: 'parentVariant',
+//                     select: 'name'
+//                 }
+//             });
+//         res.status(200).json(productVariants);
+//     } catch (error) {
+//         res.status(400).json({ message: error.message });
+//     }
+// };
+// const getAllProductVariants = async (req, res) => {
+//   try {
+//     const { categoryId, subCategoryId } = req.params;
+
+//     // Step 1: Get products by category & subcategory
+//     const products = await Product.find(
+//       {
+//         category: categoryId,
+//         subcategory: subCategoryId
+//       },
+//       { variants: 1 } // sirf variants chahiye
+//     ).lean();
+
+//     // Step 2: Collect unique variant IDs
+//     const variantIds = [
+//       ...new Set(
+//         products.flatMap(p => p.variants || [])
+//       )
+//     ];
+
+//     if (!variantIds.length) {
+//       return res.status(200).json({
+//         success: true,
+//         data: []
+//       });
+//     }
+
+//     // Step 3: Get variants using those IDs
+//     const variants = await ProductVariant.find({
+//       _id: { $in: variantIds }
+//     })
+//     .populate({
+//       path: 'variantName',
+//       select: 'name parentVariant',
+//       populate: {
+//         path: 'parentVariant',
+//         select: 'name'
+//       }
+//     });
+
+//     res.status(200).json({
+//       success: true,
+//       count: variants.length,
+//       data: variants
+//     });
+
+//   } catch (error) {
+//     res.status(500).json({
+//       success: false,
+//       message: error.message
+//     });
+//   }
+// };
 const getAllProductVariants = async (req, res) => {
-    try {
-        const productVariants = await ProductVariant.find()
-            .populate({
-                path: 'variantName',
-                select: 'name parentVariant',
-                populate: {
-                    path: 'parentVariant',
-                    select: 'name'
-                }
-            });
-        res.status(200).json(productVariants);
-    } catch (error) {
-        res.status(400).json({ message: error.message });
+  try {
+    const { categoryId, subCategoryId } = req.params;
+
+    // Step 1: Find products in the category/subcategory that have available inventory
+    const inventories = await Inventory.find({
+      quantity: { $gt: 0 }
+    })
+    .populate({
+      path: 'product',
+      match: {
+        category: categoryId,
+        subcategory: subCategoryId
+      },
+      select: 'variants'
+    })
+    .lean();
+
+    // Step 2: Collect all variant IDs from available products
+    const variantIds = [
+      ...new Set(
+        inventories
+          .map(inv => inv.product)       // take product from inventory
+          .filter(Boolean)               // remove nulls
+          .flatMap(p => p.variants || []) // collect variant IDs
+      )
+    ];
+
+    if (!variantIds.length) {
+      return res.status(200).json({
+        success: true,
+        data: []
+      });
     }
+
+    // Step 3: Get variant details
+    const variants = await ProductVariant.find({
+      _id: { $in: variantIds }
+    })
+    .populate({
+      path: 'variantName',
+      select: 'name parentVariant',
+      populate: { path: 'parentVariant', select: 'name' }
+    });
+
+    res.status(200).json({
+      success: true,
+      count: variants.length,
+      data: variants
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
 };
+
 
 
 

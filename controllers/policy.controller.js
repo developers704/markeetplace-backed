@@ -137,7 +137,7 @@ const getUserPolicies = async (req, res) => {
                 isSigned: !!acceptance,
                 signedAt: acceptance ? acceptance.acceptedAt : null,
                 signatureData: acceptance ? acceptance.signatureData : null,
-                signedDocumentPath: acceptance ? acceptance.signedDocumentPath : null,
+                signedDocumentPath: acceptance ? `uploads/${acceptance.signedDocumentPath}` : null,
                 ipAddress: acceptance ? acceptance.ipAddress : null,
                 userAgent: acceptance ? acceptance.userAgent : null,
                 policyVersion: acceptance ? acceptance.policyVersion : null,

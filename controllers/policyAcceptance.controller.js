@@ -392,8 +392,8 @@ const getAllPolicyAcceptances = async (req, res) => {
         const formattedAcceptances = acceptances.map(acceptance => {
             const data = acceptance.toObject();
             return {
-        id: data._id,
-        customer: data.customer ? {
+            id: data._id,
+            customer: data.customer ? {
             id: data.customer._id,
             username: data.customer.username,
             email: data.customer.email,
@@ -403,7 +403,7 @@ const getAllPolicyAcceptances = async (req, res) => {
                 name: data.customer.role.role_name,
                 permissions: data.customer.role.permissions
             } : null,
-            warehouse: data.customer.warehouse ? {
+                warehouse: data.customer.warehouse ? {
                 id: data.customer.warehouse._id,
                 name: data.customer.warehouse.name,
                 location: data.customer.warehouse.location,

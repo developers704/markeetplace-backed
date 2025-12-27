@@ -1,6 +1,8 @@
 const Course = require('../models/course.model.js');
 const Quiz = require('../models/quiz.model.js');
 const Customer = require('../models/customer.model.js');
+const UserRole = require('../models/userRole.model.js');
+const Warehouse = require('../models/warehouse.model.js');
 
 const calculateQuizStats = (enrollment) => {
     let totalScore = 0;
@@ -255,7 +257,7 @@ const generateGraphData = async (enrollments, dateRanges, period) => {
 // Main dashboard function
 const getCustomerDashboard = async (req, res) => {
     try {
-        const customerId = req.user.id;
+        const customerId = req.user.id.toString();
         const { period = 'weekly' } = req.query;
 
         const dateRanges = getDateRanges(period);
@@ -264,20 +266,32 @@ const getCustomerDashboard = async (req, res) => {
             'enrolledUsers.user': customerId
         }).populate('enrolledUsers.user', 'username email');
 
-        const customerEnrollments = customerCourses.map(course => {
-            const enrollment = course.enrolledUsers.find(
-                user => user.user._id.toString() === customerId
-            );
-            return {
-                courseId: course._id,
-                courseName: course.name,
-                courseType: course.courseType,
-                level: course.level,
-                thumbnail: course.thumbnail,
-                enrollment: enrollment
-            };
-        });
+        console.log('Customer Courses:', customerCourses);
 
+      const customerEnrollments = customerCourses.map(course => {
+    const enrollment = course.enrolledUsers.find(enr => {
+        if (!enr.user) return false;
+
+        if (enr.user._id) {
+            return enr.user._id.toString() === customerId;
+        }
+
+        return enr.user.toString() === customerId;
+    });
+
+    return {
+        courseId: course._id,
+        courseName: course.name,
+        courseType: course.courseType,
+        level: course.level,
+        thumbnail: course.thumbnail,
+        enrollment: enrollment ?? null
+    };
+});
+
+
+        console.log('Customer Enrollments:', customerEnrollments);
+ 
         const stats = await calculateDashboardStats(customerEnrollments, dateRanges, period);
         stats.graphData = await generateGraphData(customerEnrollments, dateRanges, period);
 
@@ -2500,14 +2514,36 @@ const getAvailableCoursesWithStatus = async (req, res) => {
     const userId = req.user.id;
     const userRoleId = req.user.role;
     const userWarehouseId = req.user.warehouse;
+
+    
+    
+    if (!userRoleId || !userWarehouseId) { 
+      return res.status(400).json({
+        success: false,
+        message: 'User role or warehouse not found. Please contact administrator.',
+        debug: {
+          hasRole: !!userRoleId,
+          hasWarehouse: !!userWarehouseId
+        }
+      });
+    }
+
+
+    const UserRole = await UserRole.findById(userRoleId)
+    .select('role_name _id')
+    .lean();
+    const Warehouse = await Warehouse.findById(userWarehouseId)
+    .select('name _id')
+    .lean();
+
     
     // Get all courses for user's role and warehouse
     const allCourses = await Course.find({
       courseType: "Course", // Only main courses, not short courses
       isActive: true,
-      $or: [
+      $and: [
         { 'accessControl.roles': userRoleId },
-        { 'accessControl.stores': userWarehouseId }
+        { 'accessControl.stores': Warehouse?._id }
       ]
     })
     .populate('accessControl.roles', 'name')
@@ -2610,7 +2646,7 @@ const getDashboardSidebar = async (req, res) => {
     console.log('User Info:', { userId, userRoleId, userWarehouseId });
     
     // ✅ Validation - Check if role and warehouse exist
-    if (!userRoleId || !userWarehouseId) {
+    if (!userRoleId || !userWarehouseId) { 
       return res.status(400).json({
         success: false,
         message: 'User role or warehouse not found. Please contact administrator.',
@@ -2620,6 +2656,14 @@ const getDashboardSidebar = async (req, res) => {
         }
       });
     }
+      const userRole = await UserRole.findById(userRoleId)
+      .select('role_name _id')
+      .lean();
+      const userWarehouse = await Warehouse.findById(userWarehouseId)
+      .select('name _id')
+      .lean();
+
+      console.log('Userrole and warehouse:', userRole , userWarehouse);
     
     // Object to store all sidebar information
     const sidebarInfo = {
@@ -2633,9 +2677,9 @@ const getDashboardSidebar = async (req, res) => {
     // ✅ FIXED QUERY - Both role AND warehouse must match
     const accessQuery = {
       isActive: true,
-      $and: [
-        { 'accessControl.roles': userRoleId },      // Role MUST match
-        { 'accessControl.stores': userWarehouseId } // Warehouse MUST match
+       $and: [
+        { 'accessControl.roles': userRoleId },
+        { 'accessControl.stores': userWarehouse?._id }
       ]
     };
     
@@ -2658,8 +2702,8 @@ const getDashboardSidebar = async (req, res) => {
           summary: {
             userInfo: {
               id: userId,
-              roleName: req.user.roleData?.role_name,
-              warehouseName: req.user.warehouseData?.name
+              roleName: userRole.role_name,
+              warehouseName: userWarehouse?.name
             },
             totalAccessibleCourses: 0,
             message: 'No courses assigned to your role and warehouse combination'
@@ -2784,9 +2828,9 @@ const getDashboardSidebar = async (req, res) => {
     // Add summary
     const summary = {
       userInfo: {
-        id: userId,
-        roleName: req.user.roleData?.role_name,
-        warehouseName: req.user.warehouseData?.name
+       id: userId,
+       roleName: userRole.role_name,
+       warehouseName: userWarehouse?.name
       },
       totalAccessibleCourses: accessibleCourses.length,
       totalEnrolledCourses: enrolledCourseIds.length,
