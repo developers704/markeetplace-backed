@@ -4,16 +4,31 @@ const Customer = require('../models/customer.model.js');
 const path = require('path');
 const fs = require('fs');
 const { saveFileToDisk }  = require('../config/policyMulter.js');
+const Warehouse = require('../models/warehouse.model.js');
 
 
 const acceptPolicy = async (req, res) => {
     try {
         const customerId = req.user.id;
         const { policyId, signatureData } = req.body;
+        const warehouseID = req?.user?.selectedWarehouse;
+    
         
-        // Check if file was uploaded
-        if (!req.file) {
+        
+        const warehouse = await Warehouse.findById(warehouseID);
+        if (!warehouse) {
+            return res.status(404).json({ message: 'Selected warehouse not found' });
+        }
+        
+       
+
+        // Check if files were uploaded
+        if (!req.files || !req.files.signedDocument || !req.files.signedDocument[0]) {
             return res.status(400).json({ message: 'Signed document image is required' });
+        }
+        
+        if (!req.files.photoFile || !req.files.photoFile[0]) {
+            return res.status(400).json({ message: 'Employee photo is required' });
         }
         
         // Get client IP and user agent
@@ -68,17 +83,24 @@ const acceptPolicy = async (req, res) => {
         if (!customer) {
             return res.status(404).json({ message: 'Customer not found' });
         }
+
+     
         
         // Check if this policy applies to this customer
         const isApplicable = policy.applicableRoles.some(role => role.equals(customer.role)) || 
-                            policy.applicableWarehouses.some(warehouse => warehouse.equals(customer.warehouse));
+        policy.applicableWarehouses.some(warehouse => warehouse.equals(customer.warehouse));
         
         if (!isApplicable) {
             return res.status(400).json({ 
                 message: 'This policy is not applicable to your role or warehouse' 
             });
         }
-        const signedDocumentPath = await saveFileToDisk(req.file, customerId, policyId);
+        // Save both signature and photo
+        const signatureFile = req.files.signedDocument[0];
+        const photoFile = req.files.photoFile[0];
+        
+        const signedDocumentPath = await saveFileToDisk(signatureFile, customerId, policyId);
+        const photoPath = await saveFileToDisk(photoFile, customerId, `${policyId}_photo`);
 
         const forced = Array.isArray(policy.forceForUsers) && policy.forceForUsers.some(f => String(f.user) === String(customerId));
         
@@ -87,6 +109,8 @@ const acceptPolicy = async (req, res) => {
             customer: customerId,
             policy: policyId
         });
+
+
 
         let policyAcceptance;
 
@@ -107,6 +131,7 @@ const acceptPolicy = async (req, res) => {
          // Forced policy OR version upgrade
         existingAcceptance.signatureData = signatureData;
         existingAcceptance.signedDocumentPath = signedDocumentPath;
+        existingAcceptance.photoPath = photoPath;
         existingAcceptance.policyVersion = newVersion;
         existingAcceptance.policySnapshot = policy.content;
         existingAcceptance.acceptedAt = new Date();
@@ -121,10 +146,12 @@ const acceptPolicy = async (req, res) => {
         policy: policyId,
         signatureData,
         signedDocumentPath,
+        photoPath,
         ipAddress,
         userAgent,
         policyVersion: parseFloat(policy.version),
-        policySnapshot: policy.content
+        policySnapshot: policy?.content,
+        warehouse: warehouse?._id
         });
         await policyAcceptance.save();
         }
@@ -178,7 +205,8 @@ const acceptPolicy = async (req, res) => {
                 id: policyAcceptance._id,
                 policyId: policyAcceptance.policy,
                 acceptedAt: policyAcceptance.acceptedAt,
-                documentUrl: `/uploads/${policyAcceptance.signedDocumentPath}`
+                documentUrl: `/uploads/${policyAcceptance.signedDocumentPath}`,
+                photoUrl: `/uploads/${policyAcceptance.photoPath}`
             },
            allPoliciesAccepted: customer.policiesAccepted
         });
@@ -352,7 +380,7 @@ const getAllPolicyAcceptances = async (req, res) => {
         const acceptances = await PolicyAcceptance.find(filter)
             .populate({
                 path: 'customer',
-                select: 'username email phone_number role warehouse department',
+                select: 'username email phone_number role department',
                 populate: [
                     {
                         path: 'role',
@@ -368,6 +396,9 @@ const getAllPolicyAcceptances = async (req, res) => {
                         select: 'name description'
                     }
                 ]
+            }).populate({
+                path: 'warehouse',
+                select: 'name location address'
             })
             .populate({
                 path: 'policy',
@@ -393,6 +424,12 @@ const getAllPolicyAcceptances = async (req, res) => {
             const data = acceptance.toObject();
             return {
             id: data._id,
+            warehouse: data.warehouse ? {
+                id: data.warehouse._id,
+                name: data.warehouse.name,
+                location: data.warehouse.location,
+                address: data.warehouse.address
+            } : null,
             customer: data.customer ? {
             id: data.customer._id,
             username: data.customer.username,
@@ -403,11 +440,11 @@ const getAllPolicyAcceptances = async (req, res) => {
                 name: data.customer.role.role_name,
                 permissions: data.customer.role.permissions
             } : null,
-                warehouse: data.customer.warehouse ? {
-                id: data.customer.warehouse._id,
-                name: data.customer.warehouse.name,
-                location: data.customer.warehouse.location,
-                address: data.customer.warehouse.address
+                warehouseData: data.warehouseData ? {
+                id: data.warehouseData._id,
+                name: data.warehouseData.name,
+                location: data.warehouseData.location,
+                address: data.warehouseData.address
             } : null,
             department: data.customer.department ? {
                 id: data.customer.department._id,
@@ -442,6 +479,7 @@ const getAllPolicyAcceptances = async (req, res) => {
         ipAddress: data.ipAddress,
         userAgent: data.userAgent,
         documentUrl: data.signedDocumentPath ? `/uploads/${data.signedDocumentPath}` : null,
+        photoPath: data.photoPath ? `/uploads/${data.photoPath}` : null,
         signatureData: data.signatureData ? 'Available' : 'Not Available'
     };
         });

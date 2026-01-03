@@ -22,6 +22,26 @@ const upload = multer({
     }
 });
 
+// Configure multer for multiple files (signature and photo)
+const uploadMultiple = multer({
+    storage: memoryStorage,
+    limits: {
+        fileSize: 5 * 1024 * 1024, // 5MB limit
+    },
+    fileFilter: (req, file, cb) => {
+        // Accept only images and PDFs
+        const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'application/pdf'];
+        if (allowedTypes.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error('Invalid file type. Only JPEG, PNG, GIF, and PDF are allowed.'));
+        }
+    }
+}).fields([
+    { name: 'signedDocument', maxCount: 1 },
+    { name: 'photoFile', maxCount: 1 }
+]);
+
 // Function to save file to disk after validation
 const saveFileToDisk = (file, customerId, policyId) => {
     return new Promise((resolve, reject) => {
@@ -52,5 +72,6 @@ const saveFileToDisk = (file, customerId, policyId) => {
 
 module.exports = {
     upload,
+    uploadMultiple,
     saveFileToDisk
 };

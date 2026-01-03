@@ -2,12 +2,12 @@ const express = require('express');
 const router = express.Router();
 const controller = require('../controllers/policyAcceptance.controller.js');
 const authMiddleware = require('../middlewares/authMiddleware.js');
-const { upload } = require('../config/policyMulter.js')
+const { uploadMultiple } = require('../config/policyMulter.js')
 
 
 
-// policy with digital sign:
-router.post('/accept', authMiddleware, upload.single('signedDocument'), controller.acceptPolicy);
+// policy with digital sign and photo:
+router.post('/accept', authMiddleware, uploadMultiple, controller.acceptPolicy);
 
 // get all acceptances
 router.get('/', authMiddleware, controller.getAllPolicyAcceptances);

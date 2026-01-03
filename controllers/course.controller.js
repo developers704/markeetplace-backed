@@ -456,44 +456,6 @@ const getCourseChaptersAndSections = async (req, res) => {
       enrollment => enrollment.user.toString() === customerId
     );
 
-    // If not enrolled but has access, auto-enroll the user
-    // if (!userEnrollment) {
-    //   // Create enrollment structure
-    //   const newEnrollment = {
-    //     user: customerId,
-    //     enrollmentDate: new Date(),
-    //     progress: 0,
-    //     currentChapter: 0,
-    //     currentSection: 0,
-    //     currentContent: 0,
-    //     chapterProgress: course.chapters.map(chapter => ({
-    //       chapterId: chapter._id,
-    //       // deadline: chapter.deadline,
-    //       sequence: chapter.sequence,
-    //       completed: false,
-    //       sectionProgress: chapter.sections.map(section => ({
-    //         sectionId: section._id,
-    //         sequence: section.sequence,
-    //         completed: false,
-    //         contentProgress: section.content.map(content => ({
-    //           contentId: content._id,
-    //           sequence: content.sequence,
-    //           watchedDuration: 0,
-    //           completed: false
-    //         })),
-    //         quizProgress: section.quiz ? {
-    //           quizId: section.quiz,
-    //           attempts: 0,
-    //           bestScore: 0,
-    //           passed: false
-    //         } : null
-    //       }))
-    //     })),
-    //     overallGrade: 0,
-    //     gradePercentage: 0,
-    //     gradeLabel: 'Incomplete'
-    //   };
-
     if (!userEnrollment) {
       const newEnrollment = {
         user: customerId,
@@ -573,301 +535,6 @@ const getCourseChaptersAndSections = async (req, res) => {
 };
 
 
-
-
-// new controller section detail by section id
-// const getSectionDetails = async (req, res) => {
-//   try {
-//     const { courseId, sectionId } = req.params;
-//     const customerId = req.user.id;
-
-//     // Find course
-//     const course = await Course.findById(courseId);
-//     if (!course) {
-//       return res.status(404).json({
-//         success: false,
-//         message: 'Course not found'
-//       });
-//     }
-
-//     // Check enrollment
-//     const userEnrollment = course.enrolledUsers.find(
-//       enrollment => enrollment.user.toString() === customerId
-//     );
-
-//     if (!userEnrollment) {
-//       return res.status(403).json({
-//         success: false,
-//         message: 'Not enrolled in this course'
-//       });
-//     }
-
-//     // Find section
-//     let targetSection = null;
-//     let chapterIndex = -1;
-//     let sectionIndex = -1;
-//     let chapter = null;
-
-//     for (let chIdx = 0; chIdx < course.chapters.length; chIdx++) {
-//       chapter = course.chapters[chIdx];
-//       for (let sIdx = 0; sIdx < chapter.sections.length; sIdx++) {
-//         const section = chapter.sections[sIdx];
-//         if (section._id.toString() === sectionId) {
-//           targetSection = section;
-//           chapterIndex = chIdx;
-//           sectionIndex = sIdx;
-//           break;
-//         }
-//       }
-//       if (targetSection) break;
-//     }
-
-//     if (!targetSection) {
-//       return res.status(404).json({
-//         success: false,
-//         message: 'Section not found'
-//       });
-//     }
-
-//     // Check section access - First section is always unlocked
-//     let canAccess = false;
-//     if (chapterIndex === 0 && sectionIndex === 0) {
-//       canAccess = true;
-//     } else {
-//       // Check if previous section is completed
-//       let prevChapterIdx = chapterIndex;
-//       let prevSectionIdx = sectionIndex - 1;
-
-//       // If first section of chapter, check last section of previous chapter
-//       if (prevSectionIdx < 0 && chapterIndex > 0) {
-//         prevChapterIdx = chapterIndex - 1;
-//         prevSectionIdx = course.chapters[prevChapterIdx].sections.length - 1;
-//       }
-
-//       if (prevSectionIdx >= 0) {
-//         const prevSection = course.chapters[prevChapterIdx].sections[prevSectionIdx];
-
-//         // Check previous section completion
-//         const prevChapterProgress = userEnrollment.chapterProgress.find(
-//           cp => cp.sequence === prevChapterIdx
-//         );
-
-//         if (prevChapterProgress) {
-//           const prevSectionProgress = prevChapterProgress.sectionProgress.find(
-//             sp => sp.sequence === prevSectionIdx
-//           );
-
-//           if (prevSectionProgress) {
-//             // Check content completion
-//             let allContentCompleted = true;
-//             for (const content of prevSection.content) {
-//               const contentProg = prevSectionProgress.contentProgress.find(
-//                 cp => cp.contentId.toString() === content._id.toString()
-//               );
-
-//               if (content.contentType === 'video') {
-//                 if (!contentProg || contentProg.watchedDuration < content.minimumWatchTime) {
-//                   allContentCompleted = false;
-//                   break;
-//                 }
-//               } else if (content.contentType === 'text') {
-//                 if (!contentProg || !contentProg.completed) {
-//                   allContentCompleted = false;
-//                   break;
-//                 }
-//               }
-//             }
-
-//             // Check quiz completion if exists
-//             let quizCompleted = true;
-//             if (prevSection.quiz) {
-//               const quiz = await Quiz.findById(prevSection.quiz);
-//               if (quiz) {
-//                 const userAttempts = quiz.attempts.filter(
-//                   attempt => attempt.userId.toString() === customerId
-//                 );
-
-//                 if (userAttempts.length > 0) {
-//                   const bestAttempt = userAttempts.reduce((best, current) => 
-//                     current.percentage > best.percentage ? current : best
-//                   );
-//                   quizCompleted = bestAttempt.passed && bestAttempt.percentage >= 70;
-//                 } else {
-//                   quizCompleted = false;
-//                 }
-//               }
-//             }
-
-//             canAccess = allContentCompleted && quizCompleted;
-//           }
-//         }
-//       }
-//     }
-
-//     if (!canAccess) {
-//       return res.status(403).json({
-//         success: false,
-//         message: 'Section is locked. Complete previous sections first.'
-//       });
-//     }
-
-//     // Get user's content progress for this section
-//     const chapterProgress = userEnrollment.chapterProgress.find(
-//       cp => cp.sequence === chapterIndex
-//     );
-
-//     let contentProgress = [];
-//     if (chapterProgress) {
-//       const sectionProgress = chapterProgress.sectionProgress.find(
-//         sp => sp.sequence === sectionIndex
-//       );
-//       if (sectionProgress) {
-//         contentProgress = sectionProgress.contentProgress;
-//       }
-//     }
-
-//     // Process content with progress
-//     const processedContent = targetSection.content.map(item => {
-//       const userProgress = contentProgress.find(
-//         cp => cp.contentId.toString() === item._id.toString()
-//       );
-
-//       let status = 'Not Started';
-//       let watchProgress = 0;
-
-//       if (userProgress) {
-//         if (item.contentType === 'video') {
-//           watchProgress = Math.round((userProgress.watchedDuration / item.duration) * 100);
-
-//           if (userProgress.watchedDuration >= item.minimumWatchTime) {
-//             status = 'Completed';
-//           } else if (userProgress.watchedDuration > 0) {
-//             status = 'In Progress';
-//           }
-//         } else if (item.contentType === 'text') {
-//           status = userProgress.completed ? 'Completed' : 'In Progress';
-//           watchProgress = userProgress.completed ? 100 : 0;
-//         }
-//       }
-
-//       return {
-//         _id: item._id,
-//         contentType: item.contentType,
-//         title: item.title,
-//         description: item.description,
-//         sequence: item.sequence,
-//         ...(item.contentType === 'video' && {
-//           videoUrl: item.videoUrl,
-//           duration: item.duration,
-//           thumbnail: item.thumbnail,
-//           minimumWatchTime: item.minimumWatchTime
-//         }),
-//         ...(item.contentType === 'text' && {
-//           textContent: item.textContent
-//         }),
-//         status,
-//         watchProgress,
-//         watchedDuration: userProgress ? userProgress.watchedDuration : 0,
-//         lastAccessedAt: userProgress ? userProgress.lastAccessedAt : null,
-//         likes: item.likes,
-//         dislikes: item.dislikes
-//       };
-//     }).sort((a, b) => a.sequence - b.sequence);
-
-//     // Get quiz details if exists
-//     let quizDetails = null;
-//     if (targetSection.quiz) {
-//       const quiz = await Quiz.findById(targetSection.quiz);
-//       if (quiz) {
-//         const userAttempts = quiz.attempts.filter(
-//           attempt => attempt.userId.toString() === customerId
-//         );
-
-//         let bestAttempt = null;
-//         if (userAttempts.length > 0) {
-//           bestAttempt = userAttempts.reduce((best, current) => 
-//             current.percentage > best.percentage ? current : best
-//           );
-//         }
-
-//         quizDetails = {
-//           _id: quiz._id,
-//           title: quiz.title,
-//           description: quiz.description,
-//           timeLimit: quiz.timeLimit,
-//           maxAttempts: quiz.maxAttempts,
-//           weightage: quiz.weightage,
-//           passingScore: quiz.passingScore,
-//           totalQuestions: quiz.questions.length,
-//           userAttempts: {
-//             totalAttempts: userAttempts.length,
-//             remainingAttempts: quiz.maxAttempts - userAttempts.length,
-//             bestScore: bestAttempt ? bestAttempt.score : 0,
-//             bestPercentage: bestAttempt ? bestAttempt.percentage : 0,
-//             bestGrade: bestAttempt ? bestAttempt.grade : 'Not Attempted',
-//             passed: bestAttempt ? bestAttempt.passed : false,
-//             lastAttemptDate: bestAttempt ? bestAttempt.attemptDate : null
-//           },
-//           canAttempt: userAttempts.length < quiz.maxAttempts,
-//           questions: quiz.questions.map(q => ({
-//             question: q.question,
-//             options: q.options,
-//             points: q.points
-//           }))
-//         };
-//       }
-//     }
-
-//     // Calculate section completion
-//     const totalItems = processedContent.length + (quizDetails ? 1 : 0);
-//     const completedContent = processedContent.filter(c => c.status === 'Completed').length;
-//     const quizCompleted = quizDetails && quizDetails.userAttempts.passed ? 1 : 0;
-//     const completedItems = completedContent + quizCompleted;
-//     const completionPercentage = totalItems > 0 ? Math.round((completedItems / totalItems) * 100) : 100;
-
-//     let completionStatus = 'Not Started';
-//     if (completionPercentage === 100) {
-//       completionStatus = 'Completed';
-//     } else if (completionPercentage > 0) {
-//       completionStatus = 'In Progress';
-//     }
-
-//     const response = {
-//       _id: targetSection._id,
-//       title: targetSection.title,
-//       sequence: targetSection.sequence,
-//       introduction: targetSection.introduction,
-//       objective: targetSection.objective,
-//       chapterTitle: chapter.title,
-//       chapterSequence: chapter.sequence,
-//       content: processedContent,
-//       quiz: quizDetails,
-//       completion: {
-//         percentage: completionPercentage,
-//         status: completionStatus,
-//         completedContent,
-//         totalContent: processedContent.length,
-//         quizCompleted: quizCompleted === 1
-//       },
-//       canAccess: true
-//     };
-
-//     res.status(200).json({
-//       success: true,
-//       data: response,
-//       message: 'Section details retrieved successfully'
-//     });
-
-//   } catch (error) {
-//     console.error('Error fetching section details:', error);
-//     res.status(500).json({
-//       success: false,
-//       message: 'Internal server error',
-//       error: error.message
-//     });
-//   }
-// };
-// new controller section detail by section id
 // new controller section detail by section id
 const getSectionDetails = async (req, res) => {
   try {
@@ -1112,37 +779,6 @@ const getSectionDetails = async (req, res) => {
         }
       }
 
-
-        // quizDetails = {
-        //   _id: quiz._id,
-        //   title: quiz.title,
-        //   description: quiz.description,
-        //   timeLimit: quiz.timeLimit,
-        //   maxAttempts: quiz.maxAttempts,
-        //   weightage: quiz.weightage,
-        //   passingScore: quiz.passingScore,
-        //   totalQuestions: quiz.questions.length,
-        //   enableTimer: quiz.enableTimer !== undefined ? quiz.enableTimer : false,
-        //   enableSuffling: quiz.enableSuffling !== undefined ? quiz.enableSuffling : true,
-        //   chapterId: chapter._id,
-        //   sectionId: targetSection._id,
-        //   userAttempts: {
-        //     totalAttempts: userAttempts.length,
-        //     remainingAttempts: quiz.maxAttempts - userAttempts.length,
-        //     bestScore: bestAttempt ? bestAttempt.score : 0,
-        //     bestPercentage: bestAttempt ? bestAttempt.percentage : 0,
-        //     bestGrade: bestAttempt ? bestAttempt.grade : 'Not Attempted',
-        //     passed: bestAttempt ? bestAttempt.passed : false,
-        //     lastAttemptDate: bestAttempt ? bestAttempt.attemptDate : null
-        //   },
-        //   canAttempt: canAttemptQuiz,
-        //   allContentCompleted: allContentCompleted,
-        //   questions: quiz.questions.map(q => ({
-        //     question: q.question,
-        //     options: q.options,
-        //     points: q.points
-        //   }))
-        // };
         quizDetails = {
           _id: quiz._id,
           title: quiz.title,
@@ -1398,11 +1034,6 @@ const toggleContentReaction = async (req, res) => {
   }
 };
 
-
-
-
-
-
 const getUserQuizResults = async (courseId, userId) => {
   const quizzes = await Quiz.find({
     courseId: courseId,
@@ -1525,37 +1156,45 @@ const processSectionsWithUnlockStatus = async (sections, userQuizResults, chapte
     let sectionStatus = 'Locked';
     let canAccess = false;
 
+    // if (!chapterCanAccess) {
+    //   // If chapter is locked, all sections are locked
+    //   sectionStatus = 'Locked';
+    //   canAccess = false;
+    // } else {
+    //   // First section in unlocked chapter is always unlocked
+    //   if (i === 0) {
+    //     sectionStatus = 'Unlocked';
+    //     canAccess = true;
+    //   } else {
+    //     // Check if previous section is completed (quiz passed with 70%+)
+    //     const previousSection = sortedSections[i - 1];
+    //     const isPreviousSectionCompleted = isSectionCompleted(
+    //       previousSection,
+    //       userQuizResults
+    //     );
+
+    //     if (isPreviousSectionCompleted) {
+    //       sectionStatus = 'Unlocked';
+    //       canAccess = true;
+    //     }
+    //   }
+    // }
+      
     if (!chapterCanAccess) {
-      // If chapter is locked, all sections are locked
-      sectionStatus = 'Locked';
       canAccess = false;
+      sectionStatus = 'Locked';
     } else {
-      // First section in unlocked chapter is always unlocked
       if (i === 0) {
-        sectionStatus = 'Unlocked';
         canAccess = true;
       } else {
-        // Check if previous section is completed (quiz passed with 70%+)
-        const previousSection = sortedSections[i - 1];
-        const isPreviousSectionCompleted = isSectionCompleted(
-          previousSection,
-          userQuizResults
-        );
-
-        if (isPreviousSectionCompleted) {
-          sectionStatus = 'Unlocked';
-          canAccess = true;
-        }
+        const prevSection = sortedSections[i - 1];
+        canAccess = isSectionCompleted(prevSection, userQuizResults);
       }
 
-      // Check if current section is completed
-      const isCurrentSectionCompleted = isSectionCompleted(
-        section,
-        userQuizResults
-      );
-
-      if (isCurrentSectionCompleted) {
+      if (isSectionCompleted(section, userQuizResults)) {
         sectionStatus = 'Completed';
+      } else if (canAccess) {
+        sectionStatus = 'Unlocked';
       } else if (canAccess && hasSectionProgress(section, userQuizResults)) {
         sectionStatus = 'In Progress';
       }
@@ -1599,27 +1238,64 @@ const processSectionsWithUnlockStatus = async (sections, userQuizResults, chapte
 };
 
 // Helper function to check if chapter is completed
+// const isChapterCompleted = async (chapter, userQuizResults) => {
+//   // Chapter is completed if all sections with quizzes are passed with 70%+
+//   for (const section of chapter.sections) {
+//     if (section.quiz) {
+//       const quizResult = userQuizResults[section._id.toString()];
+//       if (!quizResult || !quizResult.passed || quizResult.bestPercentage < 70) {
+//         return false;
+//       }
+//     }
+//   }
+//   return true;
+// };
+
 const isChapterCompleted = async (chapter, userQuizResults) => {
-  // Chapter is completed if all sections with quizzes are passed with 70%+
   for (const section of chapter.sections) {
-    if (section.quiz) {
-      const quizResult = userQuizResults[section._id.toString()];
-      if (!quizResult || !quizResult.passed || quizResult.bestPercentage < 70) {
-        return false;
-      }
+    if (!isSectionCompleted(section, userQuizResults)) {
+      return false;
     }
   }
   return true;
 };
 
+
+
+
 // Helper function to check if section is completed
 const isSectionCompleted = (section, userQuizResults) => {
+
+  // ✅ CASE 1: No content & no quiz → auto completed
+  if (
+    (!section.content || section.content.length === 0) &&
+    !section.quiz
+  ) {
+    return true;
+  }
+
+  // ✅ CASE 2: Has quiz → quiz must be passed
   if (section.quiz) {
     const quizResult = userQuizResults[section._id.toString()];
     return quizResult && quizResult.passed && quizResult.bestPercentage >= 70;
   }
-  return false; // If no quiz, consider based on content completion
+
+  // ✅ CASE 3: Content exists but no quiz → completed (content progress handled elsewhere)
+  if (section.content && section.content.length > 0 && !section.quiz) {
+    return true;
+  }
+
+  return false;
 };
+
+
+// const isSectionCompleted = (section, userQuizResults) => {
+//   if (section.quiz) {
+//     const quizResult = userQuizResults[section._id.toString()];
+//     return quizResult && quizResult.passed && quizResult.bestPercentage >= 70;
+//   }
+//   return false; // If no quiz, consider based on content completion
+// };
 
 // Helper function to check if chapter has progress
 const hasChapterProgress = (chapter, userEnrollment) => {

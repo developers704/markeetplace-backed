@@ -6,6 +6,10 @@ const policyAcceptanceSchema = new mongoose.Schema({
         ref: 'Customer',
         required: true
     },
+    warehouse: {
+       type: mongoose.Schema.Types.ObjectId,
+        ref: 'Warehouse',
+    },
     policy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Policy',
@@ -16,6 +20,10 @@ const policyAcceptanceSchema = new mongoose.Schema({
     },
     signedDocumentPath:{
         type: String
+    },
+    photoPath:{
+        type: String,
+        default: null
     },
     acceptedAt: {
         type: Date,

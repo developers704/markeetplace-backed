@@ -67,17 +67,6 @@ const presedentroutes = require('../routes/presidentSignature.routes.js');
 const bulkProductImportRoutes = require('../routes/bulkProductImport.route');
 const bulkOtherProductImportRoutes = require('../routes/bulkOtherProductImport.route');
 
-
-
-
-
-
-
-
-
-
-
-
 const router = express.Router();
 
 router.use('/president', presedentroutes);
@@ -146,13 +135,5 @@ router.use('/admin-logs', adminRoutes);
 router.use('/mobilemiddlebanner', mobileMiddleBannerRoutes);
 router.use('/subscribers', suscribeRoutes);
 router.use('/admin-notifications', adminNotificationRoutes);
-
-
-
-
-
-
-
-
 
 module.exports = router;
