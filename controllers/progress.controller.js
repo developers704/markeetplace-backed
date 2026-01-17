@@ -335,14 +335,23 @@ const updateContentProgress = async (req, res) => {
     }
 
     // Check if all content in section is completed
-    const allContentCompleted = course.enrolledUsers[enrollmentIndex]
-      .chapterProgress[chapterProgressIndex]
-      .sectionProgress[sectionProgressIndex]
-      .contentProgress.every(cp => cp.completed) &&
-      course.enrolledUsers[enrollmentIndex]
+    // For video: check minimumWatchTime, for text: check completed flag
+    const allContentCompleted = course.chapters[chIdx].sections[secIdx].content.every(content => {
+      const contentProgress = course.enrolledUsers[enrollmentIndex]
         .chapterProgress[chapterProgressIndex]
         .sectionProgress[sectionProgressIndex]
-        .contentProgress.length === course.chapters[chIdx].sections[secIdx].content.length;
+        .contentProgress.find(cp => cp.contentId.toString() === content._id.toString());
+
+      if (!contentProgress) return false;
+
+      if (content.contentType === 'video') {
+        const minWatchTime = content.minimumWatchTime || 0;
+        return contentProgress.watchedDuration >= minWatchTime;
+      } else if (content.contentType === 'text') {
+        return contentProgress.completed === true;
+      }
+      return false;
+    });
 
     // Update section completion status
     course.enrolledUsers[enrollmentIndex]
@@ -350,14 +359,47 @@ const updateContentProgress = async (req, res) => {
       .sectionProgress[sectionProgressIndex].completed = allContentCompleted;
 
     // Check if all sections in chapter are completed
-    const allSectionsCompleted = course.enrolledUsers[enrollmentIndex]
-      .chapterProgress[chapterProgressIndex]
-      .sectionProgress.every(sp => sp.completed) &&
-      course.enrolledUsers[enrollmentIndex]
+    // All sections must be completed (content + section quiz if exists)
+    const allSectionsCompleted = course.chapters[chIdx].sections.every(section => {
+      const sectionProgress = course.enrolledUsers[enrollmentIndex]
         .chapterProgress[chapterProgressIndex]
-        .sectionProgress.length === course.chapters[chIdx].sections.length;
+        .sectionProgress.find(sp => sp.sectionId.toString() === section._id.toString());
+
+      if (!sectionProgress) return false;
+
+      // Check if all content in section is completed
+      if (section.content && section.content.length > 0) {
+        const allContentDone = section.content.every(content => {
+          const contentProgress = sectionProgress.contentProgress.find(
+            cp => cp.contentId.toString() === content._id.toString()
+          );
+
+          if (!contentProgress) return false;
+
+          if (content.contentType === 'video') {
+            const minWatchTime = content.minimumWatchTime || 0;
+            return contentProgress.watchedDuration >= minWatchTime;
+          } else if (content.contentType === 'text') {
+            return contentProgress.completed === true;
+          }
+          return false;
+        });
+
+        if (!allContentDone) return false;
+      }
+
+      // Check if section has its own quiz (section-level quiz) and if it's passed
+      if (section.quiz) {
+        if (!sectionProgress.quizProgress || !sectionProgress.quizProgress.passed) {
+          return false;
+        }
+      }
+
+      return sectionProgress.completed === true;
+    });
 
     // Update chapter completion status
+    // Note: Chapter-level quiz is checked separately, not here
     course.enrolledUsers[enrollmentIndex]
       .chapterProgress[chapterProgressIndex].completed = allSectionsCompleted;
 

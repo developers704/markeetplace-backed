@@ -14,7 +14,7 @@ const certificateRequestSchema = new mongoose.Schema({
   // User's signature image PATH
   userSignaturePath: {
     type: String,
-    required: true
+   
   },
   // President's signature image PATH (will be added by admin)
   presidentSignaturePath: {

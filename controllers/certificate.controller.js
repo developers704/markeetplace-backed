@@ -1,11 +1,14 @@
 const CertificateRequest = require('../models/certificateRequest.model.js');
 const Course = require('../models/course.model.js');
+const Quiz = require('../models/quiz.model.js');
 const Customer = require('../models/customer.model.js'); // Assuming this is your user model
 const mongoose = require('mongoose');
 const PresidentSignature = require('../models/presidentSignature.model');
 const AdminNotification = require('../models/adminNotification.model.js');
 const Notification = require('../models/notification.model.js');
 const User = require('../models/user.model.js');
+
+
 
 // Request certificate (by user)
 // const requestCertificate = async (req, res) => {
@@ -269,14 +272,6 @@ const requestCertificate = async (req, res) => {
       });
     }
 
-    // Check if user signature is uploaded
-    if (!req.files || !req.files.userSignature || req.files.userSignature.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'User signature image is required'
-      });
-    }
-
     // Validate course ID
     if (!mongoose.Types.ObjectId.isValid(courseId)) {
       return res.status(400).json({
@@ -295,6 +290,8 @@ const requestCertificate = async (req, res) => {
       });
     }
 
+    console.log('Fetching course and enrollment details..., ', user);
+
     // Find the course and user's enrollment
     const course = await Course.findById(courseId);
     if (!course) {
@@ -303,6 +300,7 @@ const requestCertificate = async (req, res) => {
         message: 'Course not found'
       });
     }
+     console.log('Fetching course details..., ', course);
 
     // Find user's enrollment in the course
     const userEnrollment = course.enrolledUsers.find(
@@ -316,17 +314,207 @@ const requestCertificate = async (req, res) => {
       });
     }
 
-    // 🆕 CHECK IF COURSE IS COMPLETED AND ELIGIBLE FOR CERTIFICATE
-    if (userEnrollment.status !== 'Completed') {
+    // =============================
+    // ✅ PROGRAM-LEVEL CERTIFICATE RULES
+    // =============================
+    // Certificate is NOT per course. It can be requested ONLY from the last assigned main course
+    // after ALL main courses are completed and ALL program quizzes are passed.
+
+    const mainCourses = await Course.find({
+      courseType: 'Course',
+      'enrolledUsers.user': userId
+    })
+      .select('sequence chapters enrolledUsers')
+      .sort({ sequence: 1 });
+
+    if (!mainCourses || mainCourses.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'Course not completed yet. Complete all chapters and quizzes first.',
-        currentProgress: {
-          status: userEnrollment.status,
-          progress: userEnrollment.progress,
-          gradePercentage: userEnrollment.gradePercentage,
-          gradeLabel: userEnrollment.gradeLabel,
-          certificateEligible: false
+        message: 'No assigned main courses found for certificate program',
+      });
+    }
+
+    const anchorCourse = mainCourses[mainCourses.length - 1];
+    const anchorCourseId = anchorCourse._id.toString();
+
+    if (courseId.toString() !== anchorCourseId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Certificate can only be requested after completing all assigned courses. Please request from the final course.',
+        data: { anchorCourseId }
+      });
+    }
+
+    // Ensure all main courses are completed (content completion; grade handled by program/remediation)
+    const allMainCoursesCompleted = mainCourses.every((c) => {
+      const enr = c.enrolledUsers.find((e) => e.user.toString() === userId.toString());
+      return enr && (enr.progress === 100 || enr.status === 'Completed' || enr.status === 'Done');
+    });
+
+    if (!allMainCoursesCompleted) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please complete all assigned main courses before requesting certificate.',
+        data: { anchorCourseId, allMainCoursesCompleted: false }
+      });
+    }
+    
+    // Compute program quiz status (weighted) across ALL main courses
+    const mainCourseIds = mainCourses.map((c) => c._id);
+    const programQuizzes = await Quiz.find({
+      courseId: { $in: mainCourseIds }
+    }).select('weightage passingScore attempts');
+
+    let totalWeight = 0;
+    let weightedScore = 0;
+    let totalQuizzes = 0;
+    let attemptedQuizzes = 0;
+    let passedQuizzes = 0;
+    let failedQuizzes = 0;
+    let hasAnyAttempt = false;
+
+    for (const q of programQuizzes) {
+      totalQuizzes++;
+      const weight = q.weightage || 100;
+      totalWeight += weight;
+
+      const attempts = (q.attempts || []).filter(
+        (a) => a.userId.toString() === userId.toString()
+      );
+
+      if (attempts.length > 0) {
+        hasAnyAttempt = true;
+        attemptedQuizzes++;
+        const bestPercentage = Math.max(...attempts.map((a) => a.percentage || 0));
+        weightedScore += bestPercentage * weight;
+
+        const passMark = q.passingScore || 70;
+        if (bestPercentage >= passMark) passedQuizzes++;
+        else failedQuizzes++;
+      } else {
+        weightedScore += 0;
+      }
+    }
+    
+    let programPercentage = totalWeight > 0 ? Math.round(weightedScore / totalWeight) : 0;
+
+    // If there are no quizzes at all, treat the program as 100% when courses are completed
+    if (totalQuizzes === 0 && allMainCoursesCompleted) {
+      programPercentage = 100;
+    }
+
+    let programGradeLabel = 'Incomplete';
+    if (hasAnyAttempt || (totalQuizzes === 0 && allMainCoursesCompleted)) {
+      if (programPercentage >= 90) programGradeLabel = 'A';
+      else if (programPercentage >= 80) programGradeLabel = 'B';
+      else if (programPercentage >= 70) programGradeLabel = 'C';
+      else programGradeLabel = 'F';
+    }
+
+    const allAttempted = totalQuizzes === 0 ? true : attemptedQuizzes === totalQuizzes;
+    const allPassed = totalQuizzes === 0 ? true : passedQuizzes === totalQuizzes;
+
+    const passingThreshold = 70;
+    // Short-course remediation: if main program is below threshold but short courses completed with >=70, allow certificate
+    const shortCourses = await Course.find({
+      courseType: 'Short Course',
+      'enrolledUsers.user': userId
+    });
+    // console.log('Found short courses for remediation check:', shortCourses.length);
+    console.log('Found short course:', shortCourses);
+
+    // const completedShorts = shortCourses.filter(sc => {
+    //   const enr = sc.enrolledUsers.find(e => e.user.toString() === userId.toString());
+    //   return enr && (enr.progress === 100 || enr.status === 'Completed' || enr.status === 'Done');
+    // });
+    // console.log('Completed short courses for remediation check:', completedShorts);
+
+        const completedShorts = shortCourses.filter(sc => {
+          const enr = sc.enrolledUsers.find(e => e.user.toString() === userId.toString());
+
+          if (!enr) return false;
+
+          // Check if course has any video content
+          const hasContent = sc.chapters?.some(chapter =>
+            chapter.sections?.some(section => section.type === 'video')
+          );
+
+          // If no video content, consider progress as 100%
+          const effectiveProgress = hasContent ? Number(enr.progress) : 100;
+          const effectiveStatus = hasContent ? enr.status : 'Completed';
+
+          return effectiveProgress === 100 || effectiveStatus === 'Completed' || effectiveStatus === 'Done';
+        });
+   
+    const allShortsCompleted = shortCourses.length > 0 && completedShorts.length === shortCourses.length;
+    console.log('All short courses completed:', allShortsCompleted);
+    const shortAvg = completedShorts.length > 0
+      ? Math.round(completedShorts.reduce((sum, sc) => {
+          const enr = sc.enrolledUsers.find(e => e.user.toString() === userId.toString());
+          return sum + (enr?.gradePercentage || 0);
+        }, 0) / completedShorts.length)
+      : 0;
+
+      console.log('Short courses average grade percentage:', shortAvg);
+
+
+  //   const remediationPassed =
+  // (shortCourses.length === 0 && programPercentage < passingThreshold) ||
+  // (allShortsCompleted && shortAvg >= passingThreshold);
+
+    let remediationPassed = false;
+    
+
+    if (shortCourses.length === 0) {
+      remediationPassed = true; 
+    } else if (allShortsCompleted && shortAvg >= passingThreshold) {
+      remediationPassed = true;
+    }
+
+
+    // If remediation passed, lift programPercentage to passing threshold for consistency
+    if (remediationPassed && programPercentage < passingThreshold) {
+      programPercentage = passingThreshold;
+      programGradeLabel = 'C';
+    }
+
+    // If short-course remediation passed, certificate is allowed even if main program % is low (or 0)
+    const eligibleForCertificate =
+      allMainCoursesCompleted &&
+      allAttempted &&
+      (totalQuizzes === 0 || programPercentage >= passingThreshold || remediationPassed);
+
+      console.log('Certificate eligibility check:', eligibleForCertificate)
+
+    const requiresShortCourses =
+      allMainCoursesCompleted &&
+      allAttempted &&
+      totalQuizzes > 0 &&
+      programPercentage < passingThreshold &&
+      !remediationPassed;
+
+    if (!eligibleForCertificate) {
+      return res.status(400).json({
+        success: false,
+        message: allAttempted
+          ? 'You are not eligible for certificate yet. Please complete required short courses and retake quizzes.'
+          : 'Please attempt all quizzes before requesting certificate.',
+        data: {
+          anchorCourseId,
+          requiresShortCourses,
+          programStats: {
+            totalQuizzes,
+            attemptedQuizzes,
+            passedQuizzes,
+            failedQuizzes,
+            percentage: programPercentage,
+            gradeLabel: programGradeLabel,
+            passingThreshold,
+            allAttempted,
+            allPassed,
+            remediationPassed,
+            shortAverage: shortAvg
+          }
         }
       });
     }
@@ -365,33 +553,24 @@ const requestCertificate = async (req, res) => {
       });
     }
 
-    // Process user signature
-    const userSignaturePath = req.files.userSignature[0].path.replace(/\\/g, '/');
-    console.log('User signature stored at:', userSignaturePath);
-
     // Calculate completion data
-    const completedChapters = userEnrollment.chapterProgress.filter(cp => cp.completed).length;
-    const totalQuizzes = userEnrollment.chapterProgress.reduce((total, cp) => {
-      return total + cp.sectionProgress.filter(sp => sp.quizProgress && sp.quizProgress.quizId).length;
-    }, 0);
-    const passedQuizzes = userEnrollment.chapterProgress.reduce((total, cp) => {
-      return total + cp.sectionProgress.filter(sp => sp.quizProgress && sp.quizProgress.passed).length;
-    }, 0);
+    const totalChapters = mainCourses.reduce((sum, c) => sum + (c.chapters?.length || 0), 0);
+    const completedChapters = totalChapters; // all main courses completed (content)
 
     // Create certificate request
     const certificateRequest = new CertificateRequest({
       user: userId,
       course: courseId,
       userName: user.username,
-      userSignaturePath: userSignaturePath,
+      userSignaturePath: null,
       presidentSignaturePath: null,
       certificateImagePath: null,
       completionData: {
         completionDate: userEnrollment.completionDate || new Date(),
-        finalGrade: userEnrollment.overallGrade,
-        gradePercentage: userEnrollment.gradePercentage,
-        gradeLabel: userEnrollment.gradeLabel,
-        totalChapters: course.chapters.length,
+        finalGrade: programPercentage,
+        gradePercentage: programPercentage,
+        gradeLabel: programGradeLabel,
+        totalChapters: totalChapters,
         completedChapters: completedChapters,
         totalQuizzes: totalQuizzes,
         passedQuizzes: passedQuizzes
@@ -813,7 +992,7 @@ const getCertificateByUserAndCourse = async (req, res) => {
     })
     .populate('course', 'name description thumbnail level')
     .populate('user', 'username firstName lastName');
-
+    
     // If no certificate request found
     if (!certificateRequest) {
       return res.status(404).json({

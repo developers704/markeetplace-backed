@@ -40,7 +40,7 @@ const updateBestSellerProducts = async () => {
     try {
         const config = await BestSellerConfig.findOne();
         if (!config) {
-            console.log('Best Seller configuration not found');
+           
             return;
         }
 

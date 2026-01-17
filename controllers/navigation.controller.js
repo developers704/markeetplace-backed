@@ -1902,6 +1902,8 @@ const updateContentProgress = async (req, res) => {
     if (!chapterProgress) {
       chapterProgress = {
         chapterId: chapter._id,
+        sequence: chapterIndex,
+        completed: false,
         sectionProgress: []
       };
       enrollment.chapterProgress.push(chapterProgress);
@@ -1918,6 +1920,8 @@ const updateContentProgress = async (req, res) => {
     if (!sectionProgress) {
       sectionProgress = {
         sectionId: section._id,
+        sequence: sectionIndex,
+        completed: false,
         contentProgress: []
       };
       chapterProgress.sectionProgress.push(sectionProgress);
@@ -1934,6 +1938,7 @@ const updateContentProgress = async (req, res) => {
     if (!contentProgress) {
       contentProgress = {
         contentId: content._id,
+        sequence: contentIndex,
         watchedDuration: 0,
         completed: false,
         lastAccessedAt: new Date()
@@ -1986,31 +1991,48 @@ const updateContentProgress = async (req, res) => {
     // CALCULATIONS
     // =======================
 
+    // =======================
+    // UPDATE SECTION/CHAPTER COMPLETION (CONTENT-ONLY)
+    // =======================
+
+    // Mark section completed when all its content meets completion rules
+    const isSectionContentCompleted = section.content.every((item) => {
+      const cp = sectionProgress.contentProgress.find(
+        (p) => p.contentId.toString() === item._id.toString()
+      );
+      if (!cp) return false;
+
+      if (item.contentType === 'video') {
+        const minWatchTime = item.minimumWatchTime || 0;
+        return (cp.watchedDuration || 0) >= minWatchTime;
+      }
+
+      // text/other
+      return cp.completed === true;
+    });
+    sectionProgress.completed = isSectionContentCompleted;
+
+    // Mark chapter completed when all its sections are completed (content-only)
+    const isChapterContentCompleted = chapter.sections.every((sec) => {
+      const sp = chapterProgress.sectionProgress.find(
+        (p) => p.sectionId.toString() === sec._id.toString()
+      );
+      return sp?.completed === true;
+    });
+    chapterProgress.completed = isChapterContentCompleted;
+
+    // Recalculate overall progress (content-only)
     enrollment.progress = calculateOverallProgress(course, enrollmentIndex);
 
-    const courseCompleted = checkCourseCompletion(course, enrollmentIndex);
-
-    if (courseCompleted.allCompleted) {
-      const finalGrade = calculateFinalGrade(course, enrollmentIndex);
-
-      enrollment.gradePercentage = finalGrade.percentage;
-      enrollment.gradeLabel = finalGrade.label;
-      enrollment.allChaptersCompleted = true;
-      enrollment.allQuizzesPassed = courseCompleted.allQuizzesPassed;
-      enrollment.completionDate = new Date();
-      enrollment.progress = 100;
-
-      if (
-        finalGrade.percentage >= course.passingGrade &&
-        courseCompleted.allQuizzesPassed
-      ) {
+    // Update status from progress (don't override final status like "Done")
+    if (enrollment.status !== 'Done') {
+      if (enrollment.progress === 100) {
         enrollment.status = 'Completed';
-        enrollment.certificateEarned = true;
-        enrollment.certificateRequestStatus = 'Eligible';
+        enrollment.completionDate = enrollment.completionDate || new Date();
+      } else if (enrollment.progress > 0) {
+        enrollment.status = 'In Progress';
       } else {
-        enrollment.status = 'Failed';
-        enrollment.certificateEarned = false;
-        enrollment.certificateRequestStatus = 'Not Eligible';
+        enrollment.status = 'Not Started';
       }
     }
 
@@ -2062,77 +2084,45 @@ function calculateOverallProgress(course, enrollmentIndex) {
   
   console.log('=== CALCULATING PROGRESS ===');
   
-  // 🆕 FIRST CHECK: If already marked as completed, return 100%
-  if (userEnrollment.status === 'Completed' && 
-      userEnrollment.allChaptersCompleted && 
-      userEnrollment.allQuizzesPassed) {
-    console.log('Course marked as completed, returning 100%');
-    return 100;
-  }
-  
   let totalItems = 0;
   let completedItems = 0;
   
-  // Count all content items and quizzes
+  // Count ONLY content items (videos/text). Quizzes are grading, not progression.
   course.chapters.forEach((chapter) => {
     chapter.sections.forEach((section) => {
-      // Count content items
       section.content.forEach((content) => {
         totalItems++;
-        
-        // Check if content is completed
+
         const chapterProgress = userEnrollment.chapterProgress.find(
-          cp => cp.chapterId.toString() === chapter._id.toString()
+          (cp) => cp.chapterId.toString() === chapter._id.toString()
         );
-        
-        if (chapterProgress) {
-          const sectionProgress = chapterProgress.sectionProgress.find(
-            sp => sp.sectionId.toString() === section._id.toString()
-          );
-          
-          if (sectionProgress) {
-            const contentProgress = sectionProgress.contentProgress.find(
-              cp => cp.contentId.toString() === content._id.toString()
-            );
-            
-            if (contentProgress && contentProgress.completed) {
-              completedItems++;
-            }
-          }
-        }
-      });
-      
-      // Count quiz if exists
-      if (section.quiz) {
-        totalItems++;
-        
-        const chapterProgress = userEnrollment.chapterProgress.find(
-          cp => cp.chapterId.toString() === chapter._id.toString()
+        const sectionProgress = chapterProgress?.sectionProgress?.find(
+          (sp) => sp.sectionId.toString() === section._id.toString()
         );
-        
-        if (chapterProgress) {
-          const sectionProgress = chapterProgress.sectionProgress.find(
-            sp => sp.sectionId.toString() === section._id.toString()
-          );
-          
-          if (sectionProgress && sectionProgress.quizProgress && sectionProgress.quizProgress.passed) {
+        const contentProgress = sectionProgress?.contentProgress?.find(
+          (cp) => cp.contentId.toString() === content._id.toString()
+        );
+
+        if (!contentProgress) return;
+
+        if (content.contentType === 'video') {
+          const minWatchTime = content.minimumWatchTime || 0;
+          if ((contentProgress.watchedDuration || 0) >= minWatchTime) {
             completedItems++;
           }
+          return;
         }
-      }
+
+        if (contentProgress.completed) {
+          completedItems++;
+        }
+      });
     });
   });
   
   const calculatedProgress = totalItems > 0 ? Math.round((completedItems / totalItems) * 100) : 0;
   
   console.log(`Progress calculation: ${completedItems}/${totalItems} = ${calculatedProgress}%`);
-  
-  // 🆕 FORCE 100% if everything is actually completed
-  if (calculatedProgress === 100 || 
-      (userEnrollment.allChaptersCompleted && userEnrollment.allQuizzesPassed)) {
-    console.log('Forcing progress to 100%');
-    return 100;
-  }
   
   return calculatedProgress;
 }
@@ -2248,110 +2238,139 @@ function findNextContent(course, chapterIndex, sectionIndex, contentIndex, enrol
       chapterId: chapter._id,
       sectionId: section._id,
       contentId: nextContentItem._id,
-      content: nextContentItem
-    };
-  } 
-  // If no more content, check if there's a quiz
-  else if (section.quiz) {
-    const userEnrollment = course.enrolledUsers[enrollmentIndex];
-    const chapterProgress = userEnrollment.chapterProgress.find(
-      cp => cp.chapterId.toString() === chapter._id.toString()
-    );
-    
-    const sectionProgress = chapterProgress.sectionProgress.find(
-      sp => sp.sectionId.toString() === section._id.toString()
-    );
-    
-    const quizPassed = sectionProgress?.quizProgress?.passed || false;
-    
-    // return {
-    //   navigationType: 'quiz',
-    //   chapterId: chapter._id,
-    //   sectionId: section._id,
-    //   quizId: section.quiz._id,
-    //   quizPassed: quizPassed,
-
-      
-    // };
-     return {
-    navigationType: 'quiz',
-    chapterId: chapter._id,
-    sectionId: section._id,
-    quizId: section.quiz._id,
-    quizPassed: quizPassed,
-    quiz: {
-      _id: section.quiz._id,
-      courseId: section.quiz.courseId,
-      chapterId: section.quiz.chapterId,
-      sectionId: section.quiz.sectionId,
-      title: section.quiz.title || '',
-      description: section.quiz.description || '',
-      timeLimit: section.quiz.timeLimit || 30,
-      maxAttempts: section.quiz.maxAttempts || 3,
-      weightage: section.quiz.weightage || 100,
-      
-      // 🆕 FIXED: Properly include these fields
-      enableSuffling: section.quiz.enableSuffling !== undefined ? section.quiz.enableSuffling : true,
-      enableTimer: section.quiz.enableTimer !== undefined ? section.quiz.enableTimer : false,
-      
-      questionTimeLimit: section.quiz.questionTimeLimit || 30,
-      questions: section.quiz.questions && Array.isArray(section.quiz.questions) 
-        ? section.quiz.questions.map(question => ({
-            _id: question._id,
-            question: question.question || '',
-            options: question.options || [],
-            correctAnswer: question.correctAnswer || 0,
-            points: question.points || 1
-          }))
-        : [],
-      passingScore: section.quiz.passingScore || 70,
-      isActive: section.quiz.isActive !== undefined ? section.quiz.isActive : true,
-      createdAt: section.quiz.createdAt,
-      updatedAt: section.quiz.updatedAt,
-      userProgress: {
-        attempts: sectionProgress?.quizProgress?.attempts || 0,
-        bestScore: sectionProgress?.quizProgress?.bestScore || 0,
-        passed: quizPassed,
-        lastAttemptDate: sectionProgress?.quizProgress?.lastAttemptDate || null
+      content: {
+        _id: nextContentItem._id,
+        title: nextContentItem.title,
+        contentType: nextContentItem.contentType,
+        sequence: nextContentItem.sequence,
+        description: nextContentItem.description || '',
+        ...(nextContentItem.contentType === 'video' && {
+          videoUrl: nextContentItem.videoUrl,
+          duration: nextContentItem.duration,
+          thumbnail: nextContentItem.thumbnail,
+          minimumWatchTime: nextContentItem.minimumWatchTime,
+          likes: nextContentItem.likes || 0,
+          dislikes: nextContentItem.dislikes || 0,
+        }),
+        ...(nextContentItem.contentType === 'text' && {
+          textContent: nextContentItem.textContent,
+          likes: nextContentItem.likes || 0,
+          dislikes: nextContentItem.dislikes || 0,
+        }),
       }
-    }
-  };
+    };
   }
-  // Check next section
-  else if (sectionIndex + 1 < chapter.sections.length) {
+
+  // No more content in this section.
+  const userEnrollment = course.enrolledUsers[enrollmentIndex];
+  const chapterProgress = userEnrollment.chapterProgress.find(
+    (cp) => cp.chapterId.toString() === chapter._id.toString()
+  );
+
+  // 1) Section-level quiz (legacy) - navigation only (details fetched via section details API)
+  if (section.quiz) {
+    const quizId = section.quiz?._id || section.quiz;
+    return {
+      navigationType: 'quiz',
+      chapterId: chapter._id,
+      sectionId: section._id,
+      quizId,
+      isChapterQuiz: false
+    };
+  }
+
+  // 2) Next section in the same chapter
+  if (sectionIndex + 1 < chapter.sections.length) {
     const nextSection = chapter.sections[sectionIndex + 1];
-    
+
     if (nextSection.content && nextSection.content.length > 0) {
+      const first = nextSection.content[0];
       return {
         navigationType: 'content',
         chapterId: chapter._id,
         sectionId: nextSection._id,
-        contentId: nextSection.content[0]._id,
-        content: nextSection.content[0]
+        contentId: first._id,
+        content: {
+          _id: first._id,
+          title: first.title,
+          contentType: first.contentType,
+          sequence: first.sequence,
+          description: first.description || '',
+          ...(first.contentType === 'video' && {
+            videoUrl: first.videoUrl,
+            duration: first.duration,
+            thumbnail: first.thumbnail,
+            minimumWatchTime: first.minimumWatchTime,
+            likes: first.likes || 0,
+            dislikes: first.dislikes || 0,
+          }),
+          ...(first.contentType === 'text' && {
+            textContent: first.textContent,
+            likes: first.likes || 0,
+            dislikes: first.dislikes || 0,
+          }),
+        }
       };
     }
   }
-  // Check next chapter
-  else if (chapterIndex + 1 < course.chapters.length) {
+
+  // 3) Chapter-level quiz (only after finishing the last section of the chapter)
+  if (chapter.quiz) {
+    const allSectionsCompleted = chapter.sections.every((sec) => {
+      const sp = chapterProgress?.sectionProgress?.find(
+        (p) => p.sectionId.toString() === sec._id.toString()
+      );
+      return sp?.completed === true;
+    });
+    if (allSectionsCompleted) {
+      const quizPassed = chapterProgress?.quizProgress?.passed || false;
+      return {
+        navigationType: 'quiz',
+        chapterId: chapter._id,
+        quizId: chapter.quiz,
+        quizPassed,
+        isChapterQuiz: true
+      };
+    }
+  }
+
+  // 4) Next chapter
+  if (chapterIndex + 1 < course.chapters.length) {
     const nextChapter = course.chapters[chapterIndex + 1];
-    
-    if (nextChapter.sections && 
-        nextChapter.sections.length > 0 && 
-        nextChapter.sections[0].content && 
-        nextChapter.sections[0].content.length > 0) {
-      
+    const firstSection = nextChapter.sections?.[0];
+    const firstContent = firstSection?.content?.[0];
+
+    if (firstSection && firstContent) {
       return {
         navigationType: 'content',
         chapterId: nextChapter._id,
-        sectionId: nextChapter.sections[0]._id,
-        contentId: nextChapter.sections[0].content[0]._id,
-        content: nextChapter.sections[0].content[0]
+        sectionId: firstSection._id,
+        contentId: firstContent._id,
+        content: {
+          _id: firstContent._id,
+          title: firstContent.title,
+          contentType: firstContent.contentType,
+          sequence: firstContent.sequence,
+          description: firstContent.description || '',
+          ...(firstContent.contentType === 'video' && {
+            videoUrl: firstContent.videoUrl,
+            duration: firstContent.duration,
+            thumbnail: firstContent.thumbnail,
+            minimumWatchTime: firstContent.minimumWatchTime,
+            likes: firstContent.likes || 0,
+            dislikes: firstContent.dislikes || 0,
+          }),
+          ...(firstContent.contentType === 'text' && {
+            textContent: firstContent.textContent,
+            likes: firstContent.likes || 0,
+            dislikes: firstContent.dislikes || 0,
+          }),
+        }
       };
     }
   }
   
   // Course completed
-  const userEnrollment = course.enrolledUsers[enrollmentIndex];
   return {
     navigationType: 'complete',
     courseCompleted: true,
@@ -2442,11 +2461,6 @@ function updateCompletionStatus(course, enrollmentIndex) {
   console.log('Status update result:', statusUpdated);
   return statusUpdated;
 }
-
-
-
-
-
 
 
 // 1. get reomended short courses for failed users:
@@ -3245,12 +3259,6 @@ const nextChapter = course.chapters[chapterIndex + 1];
     // Check if course is passed (grade >= passing grade)
     const coursePassed = enrollment.gradePercentage >= course.passingGrade;
     
-    // If course is passed, award certificate
-    if (coursePassed) {
-      enrollment.certificateEarned = true;
-      enrollment.certificateUrl = `/certificates/${courseId}/${userId}`;
-    }
-    
     await course.save();
     
     // If course is failed, find recommended short courses
@@ -3275,8 +3283,8 @@ const nextChapter = course.chapters[chapterIndex + 1];
         progress: enrollment.progress,
         gradePercentage: enrollment.gradePercentage,
         gradeLabel: enrollment.gradeLabel,
-        certificateEarned: enrollment.certificateEarned,
-        certificateUrl: enrollment.certificateUrl,
+        certificateEarned: false, // Certificate only after admin approval (program-level)
+        certificateUrl: null,
         coursePassed: coursePassed,
         message: coursePassed 
           ? 'Congratulations! You have successfully completed this course.' 

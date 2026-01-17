@@ -7,8 +7,8 @@ const Warehouse = require('../models/warehouse.model.js');
 
 const createCourse = async (req, res) => {
   try {
-    console.log('Received request to create course:', req.body);
-    console.log('Received request files:', req.files);
+    // console.log('Received request to create course:', req.body);
+    // console.log('Received request files:', req.files);
     const {
       name,
       description,
@@ -27,19 +27,19 @@ const createCourse = async (req, res) => {
     const language = req.body.language || req.body['language '] || req.body.languageValue;
 
     // Validate required fields
-    if (!name || !approximateHours || !level || !language || !sequence) {
-      return res.status(400).json({
-        message: 'Missing required course fields',
-        missing: {
-          name: !name,
-          // description: !description,
-          approximateHours: !approximateHours,
-          level: !level,
-          language: !language,
-          sequence: !sequence
-        }
-      });
-    }
+    // if (!name || !approximateHours || !level || !language || !sequence) {
+    //   return res.status(400).json({
+    //     message: 'Missing required course fields',
+    //     missing: {
+    //       name: !name,
+    //       // description: !description,
+    //       approximateHours: !approximateHours,
+    //       level: !level,
+    //       language: !language,
+    //       sequence: !sequence
+    //     }
+    //   });
+    // }
     // Check if files array exists and if courseThumbnail exists
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ message: 'No files were uploaded' });
@@ -76,16 +76,16 @@ const createCourse = async (req, res) => {
     for (let i = 0; i < parsedChapters.length; i++) {
       const chapter = parsedChapters[i];
 
-      if (!chapter.title || !chapter.sequence || !chapter.sections || !Array.isArray(chapter.sections)) {
-        return res.status(400).json({ message: `Chapter ${i + 1} is missing required fields` });
-      }
+      // if (!chapter.title || !chapter.sequence || !chapter.sections || !Array.isArray(chapter.sections)) {
+      //   return res.status(400).json({ message: `Chapter ${i + 1} is missing required fields` });
+      // }
 
       const processedSections = [];
 
       for (let j = 0; j < chapter.sections.length; j++) {
         const section = chapter.sections[j];
 
-        if (!section.title || !section.sequence || !section.introduction) {
+        if (!section.title || !section.sequence) {
           return res.status(400).json({ message: `Section ${j + 1} in Chapter ${i + 1} is missing required fields` });
         }
 
@@ -308,7 +308,7 @@ const getCustomerCourses = async (req, res) => {
     // Find courses accessible to customer's role and warehouse
     const accessibleCourses = await Course.find({
       isActive: true,
-      courseType: 'Course', // Only show courses, not short courses or tasks
+      courseType: 'Course',
       $and: [
         {
           $or: [
@@ -341,29 +341,46 @@ const getCustomerCourses = async (req, res) => {
 
         // First course (sequence 1 or index 0) should be unlocked
         if (index === 0) {
-          status = 'Unlocked';
           canAccess = true;
+          status = userEnrollment
+            ? (userEnrollment.progress === 100 || userEnrollment.status === 'Completed' || userEnrollment.status === 'Done'
+                ? 'Completed'
+                : (userEnrollment.progress > 0 ? 'In Progress' : 'Unlocked'))
+            : 'Unlocked';
         } else {
-          // Check if previous course is completed with 70%+ grade
+          // Check if previous course is completed (content completion unlocks next course)
           const previousCourse = accessibleCourses[index - 1];
           const previousEnrollment = previousCourse.enrolledUsers.find(
             enrollment => enrollment.user.toString() === customerId
           );
 
-          if (previousEnrollment &&
-            previousEnrollment.gradePercentage >= 70 &&
-            previousEnrollment.certificateEarned) {
-            status = 'Unlocked';
+          // Course is completed if:
+          // 1) Progress is 100% OR
+          // 2) Status is 'Completed' / 'Done'
+          const isPreviousCourseCompleted = previousEnrollment && (
+            previousEnrollment.progress === 100 ||
+            previousEnrollment.status === 'Completed' ||
+            previousEnrollment.status === 'Done'
+          );
+
+          if (isPreviousCourseCompleted) {
             canAccess = true;
+            status = userEnrollment ?
+              (userEnrollment.status === 'Completed' ? 'Completed' : 'In Progress') :
+              'Unlocked';
           }
         }
 
-        // If user is enrolled, get their progress
+        // If enrolled, refine status
         if (userEnrollment) {
-          if (userEnrollment.gradePercentage >= 70 && userEnrollment.certificateEarned) {
+          if (userEnrollment.status === 'Done') {
+            status = 'Completed';
+          } else if (userEnrollment.progress === 100 || userEnrollment.status === 'Completed') {
             status = 'Completed';
           } else if (userEnrollment.progress > 0) {
             status = canAccess ? 'In Progress' : 'Locked';
+          } else if (canAccess) {
+            status = 'Unlocked';
           }
         }
 
@@ -373,13 +390,11 @@ const getCustomerCourses = async (req, res) => {
           canAccess,
           userProgress: userEnrollment ? {
             progress: userEnrollment.progress,
-            currentChapter: userEnrollment.currentChapter,
-            currentSection: userEnrollment.currentSection,
-            enrollmentStatus: userEnrollment.status, // 🆕 ADD THIS
             gradePercentage: userEnrollment.gradePercentage,
             gradeLabel: userEnrollment.gradeLabel,
             certificateEarned: userEnrollment.certificateEarned,
-            completionDate: userEnrollment.completionDate // 🆕 ADD THIS IF EXISTS
+            completionDate: userEnrollment.completionDate,
+            status: userEnrollment.status
           } : null
         };
       })
@@ -408,10 +423,9 @@ const getCustomerCourses = async (req, res) => {
 const getCourseChaptersAndSections = async (req, res) => {
   try {
     const { courseId } = req.params;
-    const customerId = req.user.id; // From auth middleware
+    const customerId = req.user.id;
     const warehouseID = req?.user?.selectedWarehouse;
 
-    // Get customer details with role and warehouse
     const customer = await Customer.findById(customerId)
       .populate('role')
       .populate('warehouse');
@@ -423,10 +437,15 @@ const getCourseChaptersAndSections = async (req, res) => {
       });
     }
 
-    // Find course with populated quiz data
+    // HIGHLIGHTED CHANGE: Populate chapter.quiz field directly
     const course = await Course.findById(courseId)
       .populate({
-        path: 'chapters.sections.quiz',
+        path: 'chapters.quiz',        // ← POPULATE CHAPTER-LEVEL QUIZ
+        model: 'Quiz',
+        select: 'title timeLimit maxAttempts passingScore' // optional: only needed fields
+      })
+      .populate({
+        path: 'chapters.sections.quiz', // keep old section quiz if any (backward compatibility)
         model: 'Quiz'
       });
 
@@ -437,7 +456,7 @@ const getCourseChaptersAndSections = async (req, res) => {
       });
     }
 
-    // Check if user has access to this course based on role or warehouse
+    // Access control check (same as before)
     const hasRoleAccess = course.accessControl.roles.length === 0 ||
       course.accessControl.roles.some(roleId => roleId.toString() === customer.role._id.toString());
 
@@ -451,16 +470,16 @@ const getCourseChaptersAndSections = async (req, res) => {
       });
     }
 
-    // Check if user is enrolled
+    // Enrollment logic (same as before)
     let userEnrollment = course.enrolledUsers.find(
       enrollment => enrollment.user.toString() === customerId
     );
 
-    if (!userEnrollment) {
+if (!userEnrollment) {
       const newEnrollment = {
         user: customerId,
         enrollmentDate: new Date(),
-        status: 'Not Started', // 🆕 ADD THIS
+        status: 'Not Started', 
         progress: 0,
         currentChapter: 0,
         currentSection: 0,
@@ -479,12 +498,7 @@ const getCourseChaptersAndSections = async (req, res) => {
               watchedDuration: 0,
               completed: false
             })),
-            quizProgress: section.quiz ? {
-              quizId: section.quiz,
-              attempts: 0,
-              bestScore: 0,
-              passed: false
-            } : null
+            quizProgress: null,
           }))
         })),
         overallGrade: 0,
@@ -503,10 +517,10 @@ const getCourseChaptersAndSections = async (req, res) => {
       userEnrollment = newEnrollment;
     }
 
-    // Get all quiz results for this user in this course
+    // Get quiz results by chapterId
     const userQuizResults = await getUserQuizResults(courseId, customerId);
 
-    // Process chapters with unlock logic
+    // Process chapters — now includes chapter.quiz!
     const processedChapters = await processChaptersWithUnlockStatus(
       course.chapters,
       userEnrollment,
@@ -541,322 +555,265 @@ const getSectionDetails = async (req, res) => {
     const { courseId, sectionId } = req.params;
     const customerId = req.user.id;
 
-    console.log('=== DEBUG INFO ===');
-    console.log('Customer ID type:', typeof customerId);
-    console.log('Customer ID value:', customerId);
-    console.log('Customer ID string:', customerId.toString());
-
-    // Find course
+    // Fetch course
     const course = await Course.findById(courseId);
     if (!course) {
       return res.status(404).json({
         success: false,
-        message: 'Course not found'
+        message: 'Course not found',
       });
     }
+
 
     // Check enrollment
     const userEnrollment = course.enrolledUsers.find(
       enrollment => enrollment.user.toString() === customerId.toString()
     );
+    
+
+    console.log("user Enrollment", userEnrollment);
+    console.log("user Enrollment", course);
 
     if (!userEnrollment) {
       return res.status(403).json({
         success: false,
-        message: 'Not enrolled in this course'
+        message: 'Not enrolled in this course',
       });
     }
 
-    // 🆕 UPDATE STATUS IF NEEDED
-    if (userEnrollment.status === 'Not Started') {
-      // First time access
-      const enrollmentIndex = course.enrolledUsers.findIndex(
-        enrollment => enrollment.user.toString() === customerId.toString()
-      );
-
-      if (enrollmentIndex !== -1) {
-        course.enrolledUsers[enrollmentIndex].status = 'In Progress';
-        await course.save();
-        console.log(`✅ Status updated: "Not Started" → "In Progress"`);
-      }
-    } else {
-      console.log(`Status is "${userEnrollment.status}" - no update needed`);
-    }
-
-    // Find section
+    // === STEP 1: Find section and parent chapter ===
     let targetSection = null;
-    let chapterIndex = -1;
-    let sectionIndex = -1;
-    let chapter = null;
+    let parentChapter = null;
 
-    for (let chIdx = 0; chIdx < course.chapters.length; chIdx++) {
-      chapter = course.chapters[chIdx];
-      for (let sIdx = 0; sIdx < chapter.sections.length; sIdx++) {
-        const section = chapter.sections[sIdx];
-        if (section._id.toString() === sectionId) {
-          targetSection = section;
-          chapterIndex = chIdx;
-          sectionIndex = sIdx;
-          break;
-        }
-      }
-      if (targetSection) break;
-    }
-
-    if (!targetSection) {
-      return res.status(404).json({
-        success: false,
-        message: 'Section not found'
-      });
-    }
-
-    console.log(`🔍 Section Access Check:`, {
-      targetSection: targetSection.title,
-      chapterIndex,
-      sectionIndex,
-      isFirstSection: chapterIndex === 0 && sectionIndex === 0
-    });
-
-    // 🆕 IMPROVED SECTION ACCESS LOGIC (SAME AS getCourseChaptersAndSections)
-    let canAccess = false;
-
-    // First section is always unlocked
-    if (chapterIndex === 0 && sectionIndex === 0) {
-      canAccess = true;
-      console.log('✅ First section - access granted');
-    } else {
-      // 🆕 USE SAME LOGIC AS getCourseChaptersAndSections
-      canAccess = await checkSectionAccess(course, userEnrollment, chapterIndex, sectionIndex, customerId);
-      console.log(`🔐 Section access result: ${canAccess}`);
-    }
-
-    if (!canAccess) {
-      return res.status(403).json({
-        success: false,
-        message: 'Section is locked. Complete previous sections first.',
-        debug: {
-          chapterIndex,
-          sectionIndex,
-          targetSection: targetSection.title
-        }
-      });
-    }
-
-    // Rest of the function remains the same...
-    // Get user's content progress for this section
-    const currentChapterProgress = userEnrollment.chapterProgress.find(
-      cp => cp.chapterId.toString() === chapter._id.toString()
-    );
-
-    let contentProgress = [];
-    if (currentChapterProgress) {
-      const sectionProgress = currentChapterProgress.sectionProgress.find(
-        sp => sp.sectionId.toString() === targetSection._id.toString()
+    for (const chapter of course.chapters) {
+      const found = chapter.sections.find(
+        (s) => s._id.toString() === sectionId
       );
-      if (sectionProgress) {
-        contentProgress = sectionProgress.contentProgress;
+      if (found) {
+        targetSection = found;
+        parentChapter = chapter;
+        break;
       }
     }
 
-    // Process content with progress
-    const processedContent = targetSection.content.map(item => {
-      const userProgress = contentProgress.find(
-        cp => cp.contentId.toString() === item._id.toString()
-      );
-
-      let status = 'Not Started';
-      let watchProgress = 0;
-
-      if (userProgress) {
-        if (item.contentType === 'video') {
-          watchProgress = Math.round((userProgress.watchedDuration / item.duration) * 100);
-
-          if (userProgress.watchedDuration >= item.minimumWatchTime) {
-            status = 'Completed';
-          } else if (userProgress.watchedDuration > 0) {
-            status = 'In Progress';
-          }
-        } else if (item.contentType === 'text') {
-          status = userProgress.completed ? 'Completed' : 'In Progress';
-          watchProgress = userProgress.completed ? 100 : 0;
-        }
-      }
-
-      return {
-        _id: item._id,
-        contentType: item.contentType,
-        title: item.title,
-        description: item.description,
-        sequence: item.sequence,
-        chapterId: chapter._id,
-        sectionId: targetSection._id,
-        ...(item.contentType === 'video' && {
-          videoUrl: item.videoUrl,
-          duration: item.duration,
-          thumbnail: item.thumbnail,
-          minimumWatchTime: item.minimumWatchTime
-        }),
-        ...(item.contentType === 'text' && {
-          textContent: item.textContent
-        }),
-        status,
-        watchProgress,
-        watchedDuration: userProgress ? userProgress.watchedDuration : 0,
-        lastAccessedAt: userProgress ? userProgress.lastAccessedAt : null,
-        likes: item.likes,
-        dislikes: item.dislikes
-      };
-    }).sort((a, b) => a.sequence - b.sequence);
-
-    // Get quiz details if exists
+    // === STEP 2: Check if this is QUIZ-ONLY access (sectionId is actually quizId) ===
+    let isQuizOnlyAccess = false;
     let quizDetails = null;
-    if (targetSection.quiz) {
-      const quiz = await Quiz.findById(targetSection.quiz);
+
+    if (!targetSection && sectionId.length === 24) {
+      const chapterWithQuiz = course.chapters.find(
+        (ch) => ch.quiz && ch.quiz.toString() === sectionId
+      );
+
+      if (chapterWithQuiz) {
+        isQuizOnlyAccess = true;
+        parentChapter = chapterWithQuiz;
+      }
+    }
+
+    // === STEP 3: Load Quiz ONLY if needed ===
+    if (parentChapter?.quiz) {
+      const quiz = await Quiz.findById(parentChapter.quiz);
       if (quiz) {
         const userAttempts = quiz.attempts.filter(
-          attempt => attempt.userId.toString() === customerId
+          (a) => a.userId.toString() === customerId.toString()
         );
 
-        let bestAttempt = null;
-        if (userAttempts.length > 0) {
-          bestAttempt = userAttempts.reduce((best, current) =>
-            current.percentage > best.percentage ? current : best
-          );
-        }
+        const bestAttempt = userAttempts.length > 0
+          ? userAttempts.reduce((best, curr) =>
+              curr.percentage > best.percentage ? curr : best
+            )
+          : null;
 
-        // Check if all content in this section is completed
+        // Check if user can attempt quiz (content completion only; attempts are unlimited)
         let allContentCompleted = true;
-        console.log('Checking content completion for quiz access:', {
-          totalContent: targetSection.content.length,
-          contentProgressLength: contentProgress.length
-        });
 
-        for (const content of targetSection.content) {
-          const contentProg = contentProgress.find(
-            cp => cp.contentId.toString() === content._id.toString()
-          );
-
-          console.log(`Content ${content.title}:`, {
-            contentType: content.contentType,
-            hasProgress: !!contentProg,
-            watchedDuration: contentProg?.watchedDuration,
-            minimumWatchTime: content.minimumWatchTime,
-            completed: contentProg?.completed
-          });
-
-          if (content.contentType === 'video') {
-            if (!contentProg || contentProg.watchedDuration < content.minimumWatchTime) {
-              allContentCompleted = false;
-              console.log(`Video content ${content.title} not completed`);
-              break;
-            }
-          } else if (content.contentType === 'text') {
-            if (!contentProg || !contentProg.completed) {
-              allContentCompleted = false;
-              console.log(`Text content ${content.title} not completed`);
-              break;
-            }
-          }
+        if (isQuizOnlyAccess) {
+          // For quiz-only access: require all content in the chapter to be completed
+          allContentCompleted = await isChapterCompleted(parentChapter, {}, userEnrollment);
+        } else {
+          // Normal section: require all content in the section to be completed
+          allContentCompleted = isSectionCompleted(targetSection, {}, userEnrollment);
         }
 
-        console.log('All content completed:', allContentCompleted);
+        const canAttempt = allContentCompleted;
 
-        // Can attempt quiz only if all content is completed AND user has remaining attempts
-        const canAttemptQuiz = allContentCompleted && (userAttempts.length < quiz.maxAttempts);
-
-        let processedQuestions = quiz.questions.map((q, originalIndex) => ({
-        originalIndex: originalIndex, // 🆕 ADD: Original database index
-        question: q.question,
-        options: q.options,
-        points: q.points
-      }));
+        // Shuffle questions if enabled
+        let processedQuestions = quiz.questions.map((q, idx) => ({
+          originalIndex: idx,
+          question: q.question,
+          options: q.options,
+          points: q.points,
+        }));
 
         if (quiz.enableSuffling) {
-        // Fisher-Yates shuffle algorithm
-        for (let i = processedQuestions.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [processedQuestions[i], processedQuestions[j]] = [processedQuestions[j], processedQuestions[i]];
+          for (let i = processedQuestions.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [processedQuestions[i], processedQuestions[j]] = [processedQuestions[j], processedQuestions[i]];
+          }
         }
-      }
 
         quizDetails = {
           _id: quiz._id,
           title: quiz.title,
           description: quiz.description,
           timeLimit: quiz.timeLimit,
-          maxAttempts: quiz.maxAttempts,
-          weightage: quiz.weightage,
+          // Attempts are unlimited (we keep maxAttempts in DB for admin visibility only)
+          maxAttempts: null,
+          attemptPolicy: 'unlimited',
           passingScore: quiz.passingScore,
-          totalQuestions: quiz.questions.length,
-          enableTimer: quiz.enableTimer !== undefined ? quiz.enableTimer : false,
-          enableSuffling: quiz.enableSuffling !== undefined ? quiz.enableSuffling : true,
+          enableTimer: quiz.enableTimer ?? false,
+          enableSuffling: quiz.enableSuffling ?? true,
           questionTimeLimit: quiz.questionTimeLimit || 30,
-          chapterId: chapter._id,
-          sectionId: targetSection._id,
+          totalQuestions: quiz.questions.length,
           userAttempts: {
             totalAttempts: userAttempts.length,
-            remainingAttempts: quiz.maxAttempts - userAttempts.length,
-            bestScore: bestAttempt ? bestAttempt.score : 0,
-            bestPercentage: bestAttempt ? bestAttempt.percentage : 0,
-            bestGrade: bestAttempt ? bestAttempt.grade : 'Not Attempted',
-            passed: bestAttempt ? bestAttempt.passed : false,
-            lastAttemptDate: bestAttempt ? bestAttempt.attemptDate : null
+            remainingAttempts: null,
+            bestScore: bestAttempt?.score || 0,
+            bestPercentage: bestAttempt?.percentage || 0,
+            bestGrade: bestAttempt?.grade || 'Not Attempted',
+            passed: bestAttempt?.passed || false,
+            lastAttemptDate: bestAttempt?.attemptDate || null,
           },
-          canAttempt: canAttemptQuiz,
-          allContentCompleted: allContentCompleted,
-          questions: processedQuestions // 🆕 USE PROCESSED QUESTIONS
+          canAttempt,
+          allContentCompleted,
+          questions: processedQuestions,
         };
       }
     }
 
-    // Calculate section completion
-    const totalItems = processedContent.length + (quizDetails ? 1 : 0);
-    const completedContent = processedContent.filter(c => c.status === 'Completed').length;
-    const quizCompleted = quizDetails && quizDetails.userAttempts.passed ? 1 : 0;
-    const completedItems = completedContent + quizCompleted;
-    const completionPercentage = totalItems > 0 ? Math.round((completedItems / totalItems) * 100) : 100;
+    // === STEP 4: Return Response ===
 
-    let completionStatus = 'Not Started';
-    if (completionPercentage === 100) {
-      completionStatus = 'Completed';
-    } else if (completionPercentage > 0) {
-      completionStatus = 'In Progress';
+    // Quiz-Only Access (when user clicks "Quiz" from sidebar)
+    if (isQuizOnlyAccess) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          _id: sectionId, // quizId
+          title: 'Quiz',
+          chapterId: parentChapter._id,
+          chapterTitle: parentChapter.title,
+          quiz: quizDetails,
+          isQuiz: true, // Important flag for frontend
+          canAccess: true,
+        },
+        message: 'Quiz loaded successfully',
+      });
     }
 
-    const response = {
-      _id: targetSection._id,
-      title: targetSection.title,
-      sequence: targetSection.sequence,
-      introduction: targetSection.introduction,
-      objective: targetSection.objective,
-      chapterId: chapter._id,
-      chapterTitle: chapter.title,
-      chapterSequence: chapter.sequence,
-      content: processedContent,
-      quiz: quizDetails,
-      completion: {
-        percentage: completionPercentage,
-        status: completionStatus,
-        completedContent,
-        totalContent: processedContent.length,
-        quizCompleted: quizCompleted === 1
-      },
-      canAccess: true,
-      userStatus: userEnrollment.status
-    };
+    // Normal Section Access
+    if (!targetSection) {
+      return res.status(404).json({
+        success: false,
+        message: 'Section not found',
+      });
+    }
 
+    // 🆕 CHECK SECTION ACCESS - Verify user can access this section
+    const userQuizResults = await getUserQuizResults(courseId, customerId);
+    const processedChapters = await processChaptersWithUnlockStatus(
+      course.chapters,
+      userEnrollment,
+      userQuizResults
+    );
+
+    // Find the chapter and section in processed chapters
+    const processedChapter = processedChapters.find(
+      ch => ch._id.toString() === parentChapter._id.toString()
+    );
+    
+    const processedSection = processedChapter?.sections?.find(
+      sec => sec._id.toString() === targetSection._id.toString()
+    );
+
+    // Check if section is accessible
+    if (!processedSection || !processedSection.canAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'You cannot access this section. Please complete previous sections first.',
+        canAccess: false
+      });
+    }
+
+    // Process content with progress (same as before)
+    const sectionProgress = userEnrollment.chapterProgress
+      .find((cp) => cp.chapterId.toString() === parentChapter._id.toString())
+      ?.sectionProgress.find((sp) => sp.sectionId.toString() === targetSection._id.toString());
+
+    const processedContent = targetSection.content
+      .map((item) => {
+        const userProgress = sectionProgress?.contentProgress.find(
+          (cp) => cp.contentId.toString() === item._id.toString()
+        );
+
+        let status = 'Not Started';
+        let watchProgress = 0;
+
+        if (userProgress) {
+          if (item.contentType === 'video') {
+            watchProgress = item.duration
+              ? Math.round((userProgress.watchedDuration / item.duration) * 100)
+              : 0;
+            if (userProgress.watchedDuration >= item.minimumWatchTime) {
+              status = 'Completed';
+            } else if (userProgress.watchedDuration > 0) {
+              status = 'In Progress';
+            }
+          } else {
+            status = userProgress.completed ? 'Completed' : 'In Progress';
+            watchProgress = userProgress.completed ? 100 : 0;
+          }
+        }
+
+        return {
+          _id: item._id,
+          contentType: item.contentType,
+          title: item.title,
+          sequence: item.sequence,
+          description: item.description || '',
+          ...(item.contentType === 'video' && {
+            videoUrl: item.videoUrl,
+            duration: item.duration,
+            thumbnail: item.thumbnail,
+            minimumWatchTime: item.minimumWatchTime,
+            likes: item.likes || 0,
+            dislikes: item.dislikes || 0,
+          }),
+          ...(item.contentType === 'text' && {
+            textContent: item.textContent,
+            likes: item.likes || 0,
+            dislikes: item.dislikes || 0,
+          }),
+          status,
+          watchProgress,
+          watchedDuration: userProgress?.watchedDuration || 0,
+        };
+      })
+      .sort((a, b) => a.sequence - b.sequence);
+
+    // Final response for normal section
     res.status(200).json({
       success: true,
-      data: response,
-      message: 'Section details retrieved successfully'
+      data: {
+        _id: targetSection._id,
+        title: targetSection.title,
+        introduction: targetSection.introduction || '',
+        objective: targetSection.objective || '',
+        content: processedContent,
+        quiz: null, // Explicitly null — no quiz on normal sections
+        chapterId: parentChapter._id,
+        chapterTitle: parentChapter.title,
+        canAccess: processedSection?.canAccess || true,
+        status: processedSection?.status || 'Unlocked',
+      },
+      message: 'Section details retrieved successfully',
     });
-
   } catch (error) {
-    console.error('Error fetching section details:', error);
+    console.error('Error in getSectionDetails:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error',
-      error: error.message
+      message: 'Server error',
+      error: error.message,
     });
   }
 };
@@ -1035,57 +992,146 @@ const toggleContentReaction = async (req, res) => {
 };
 
 const getUserQuizResults = async (courseId, userId) => {
-  const quizzes = await Quiz.find({
-    courseId: courseId,
-    'attempts.userId': userId
-  });
+  try {
+    // Find all quizzes for this course
+    const quizzes = await Quiz.find({
+      courseId: courseId,
+      'attempts.userId': userId
+    });
 
-  const quizResultsMap = {};
+    const quizResultsMap = {};
 
-  quizzes.forEach(quiz => {
-    const userAttempts = quiz.attempts.filter(
-      attempt => attempt.userId.toString() === userId
-    );
-
-    if (userAttempts.length > 0) {
-      // Get best attempt
-      const bestAttempt = userAttempts.reduce((best, current) =>
-        current.percentage > best.percentage ? current : best
+    quizzes.forEach(quiz => {
+      const userAttempts = quiz.attempts.filter(
+        attempt => attempt.userId.toString() === userId.toString()
       );
 
-      quizResultsMap[quiz.sectionId.toString()] = {
-        quizId: quiz._id,
-        attempts: userAttempts.length,
-        bestScore: bestAttempt.score,
-        bestPercentage: bestAttempt.percentage,
-        passed: bestAttempt.passed,
-        grade: bestAttempt.grade,
-        lastAttemptDate: bestAttempt.attemptDate
-      };
-    }
-  });
+      if (userAttempts.length > 0) {
+        // Get best attempt
+        const bestAttempt = userAttempts.reduce((best, current) =>
+          current.percentage > best.percentage ? current : best
+        );
 
-  return quizResultsMap;
+        const quizResult = {
+          quizId: quiz._id,
+          attempts: userAttempts.length,
+          bestScore: bestAttempt.score,
+          bestPercentage: bestAttempt.percentage,
+          passed: bestAttempt.passed,
+          grade: bestAttempt.grade,
+          lastAttemptDate: bestAttempt.attemptDate
+        };
+
+        // Handle both section-level and chapter-level quizzes
+        // Section-level quizzes: use sectionId as key
+        if (quiz.sectionId) {
+          const sectionKey = quiz.sectionId.toString();
+          quizResultsMap[sectionKey] = quizResult;
+        }
+        
+        // Chapter-level quizzes: use chapterId as key
+        if (quiz.chapterId) {
+          const chapterKey = quiz.chapterId.toString();
+          quizResultsMap[chapterKey] = quizResult;
+        }
+      }
+    });
+
+    return quizResultsMap;
+  } catch (error) {
+    console.error('Error in getUserQuizResults:', error);
+    return {};
+  }
 };
 
 // Helper function to process chapters with unlock status
+// const processChaptersWithUnlockStatus = async (chapters, userEnrollment, userQuizResults) => {
+//   const processedChapters = [];
+
+//   // Sort chapters by sequence
+//   const sortedChapters = chapters.sort((a, b) => a.sequence - b.sequence);
+
+//   for (let i = 0; i < sortedChapters.length; i++) {
+//     const chapter = sortedChapters[i];
+
+//     console.log(`Chapter ${i} deadline:`, chapter.deadline);
+//     console.log(`Chapter ${i} full object:`, JSON.stringify(chapter, null, 2));
+
+//     // Determine chapter unlock status
+//     let chapterStatus = 'Locked';
+//     let canAccess = false;
+
+//     // First chapter (sequence 1) is always unlocked
+//     if (i === 0) {
+//       chapterStatus = 'Unlocked';
+//       canAccess = true;
+//     } else {
+//       // Check if previous chapter is completed
+//       const previousChapter = sortedChapters[i - 1];
+//       const isPreviousChapterCompleted = await isChapterCompleted(
+//         previousChapter,
+//         userQuizResults
+//       );
+
+//       if (isPreviousChapterCompleted) {
+//         chapterStatus = 'Unlocked';
+//         canAccess = true;
+//       }
+//     }
+
+//     // Check if current chapter is completed
+//     const isCurrentChapterCompleted = await isChapterCompleted(
+//       chapter,
+//       userQuizResults
+//     );
+
+//     if (isCurrentChapterCompleted) {
+//       chapterStatus = 'Completed';
+//     } else if (canAccess && hasChapterProgress(chapter, userEnrollment)) {
+//       chapterStatus = 'In Progress';
+//     }
+
+//     // Process sections within chapter
+//     const processedSections = await processSectionsWithUnlockStatus(
+//       chapter.sections,
+//       userQuizResults,
+//       canAccess
+//     );
+
+//     // Calculate chapter progress
+//     const chapterProgress = calculateChapterProgress(processedSections);
+
+//     processedChapters.push({
+//       _id: chapter._id,
+//       title: chapter.title,
+//       description: chapter.description,
+//       sequence: chapter.sequence,
+//       deadline: chapter.deadline || null,
+//       status: chapterStatus,
+//       canAccess: canAccess,
+//       progress: chapterProgress,
+//       sections: processedSections,
+//       totalSections: chapter.sections.length,
+//       completedSections: processedSections.filter(s => s.status === 'Completed').length
+//     });
+//   }
+
+//   return processedChapters;
+// };
 const processChaptersWithUnlockStatus = async (chapters, userEnrollment, userQuizResults) => {
   const processedChapters = [];
 
-  // Sort chapters by sequence
-  const sortedChapters = chapters.sort((a, b) => a.sequence - b.sequence);
+  // Sort chapters by sequence (just in case)
+  const sortedChapters = [...chapters].sort((a, b) => a.sequence - b.sequence);
 
   for (let i = 0; i < sortedChapters.length; i++) {
     const chapter = sortedChapters[i];
-
-    console.log(`Chapter ${i} deadline:`, chapter.deadline);
-    console.log(`Chapter ${i} full object:`, JSON.stringify(chapter, null, 2));
 
     // Determine chapter unlock status
     let chapterStatus = 'Locked';
     let canAccess = false;
 
-    // First chapter (sequence 1) is always unlocked
+    // First chapter is always unlocked
     if (i === 0) {
       chapterStatus = 'Unlocked';
       canAccess = true;
@@ -1094,7 +1140,8 @@ const processChaptersWithUnlockStatus = async (chapters, userEnrollment, userQui
       const previousChapter = sortedChapters[i - 1];
       const isPreviousChapterCompleted = await isChapterCompleted(
         previousChapter,
-        userQuizResults
+        userQuizResults,
+        userEnrollment
       );
 
       if (isPreviousChapterCompleted) {
@@ -1104,10 +1151,7 @@ const processChaptersWithUnlockStatus = async (chapters, userEnrollment, userQui
     }
 
     // Check if current chapter is completed
-    const isCurrentChapterCompleted = await isChapterCompleted(
-      chapter,
-      userQuizResults
-    );
+    const isCurrentChapterCompleted = await isChapterCompleted(chapter, userQuizResults, userEnrollment);
 
     if (isCurrentChapterCompleted) {
       chapterStatus = 'Completed';
@@ -1115,28 +1159,39 @@ const processChaptersWithUnlockStatus = async (chapters, userEnrollment, userQui
       chapterStatus = 'In Progress';
     }
 
-    // Process sections within chapter
+    // Process sections
     const processedSections = await processSectionsWithUnlockStatus(
       chapter.sections,
       userQuizResults,
-      canAccess
+      canAccess,
+      userEnrollment
     );
 
-    // Calculate chapter progress
-    const chapterProgress = calculateChapterProgress(processedSections);
+    // Calculate progress percentage
+    const totalSections = chapter.sections.length;
+    const completedSections = processedSections.filter(s => s.status === 'Completed').length;
+    const progress = totalSections > 0 
+      ? Math.round((completedSections / totalSections) * 100)
+      : 0;
 
     processedChapters.push({
       _id: chapter._id,
       title: chapter.title,
-      description: chapter.description,
+      description: chapter.description || '',
       sequence: chapter.sequence,
       deadline: chapter.deadline || null,
       status: chapterStatus,
-      canAccess: canAccess,
-      progress: chapterProgress,
+      canAccess,
+      progress,
       sections: processedSections,
       totalSections: chapter.sections.length,
-      completedSections: processedSections.filter(s => s.status === 'Completed').length
+      completedSections,
+
+      // HIGHLIGHTED CHANGE: ADD QUIZ FIELD SO FRONTEND CAN DETECT IT
+      quiz: chapter.quiz || null,  // ← THIS WAS MISSING BEFORE!
+
+      // Optional: Add quiz progress info
+      quizProgress: userQuizResults[chapter._id.toString()] || null
     });
   }
 
@@ -1144,7 +1199,7 @@ const processChaptersWithUnlockStatus = async (chapters, userEnrollment, userQui
 };
 
 // Helper function to process sections with unlock status
-const processSectionsWithUnlockStatus = async (sections, userQuizResults, chapterCanAccess) => {
+const processSectionsWithUnlockStatus = async (sections, userQuizResults, chapterCanAccess, userEnrollment = null) => {
   const processedSections = [];
 
   // Sort sections by sequence
@@ -1155,48 +1210,55 @@ const processSectionsWithUnlockStatus = async (sections, userQuizResults, chapte
 
     let sectionStatus = 'Locked';
     let canAccess = false;
-
-    // if (!chapterCanAccess) {
-    //   // If chapter is locked, all sections are locked
-    //   sectionStatus = 'Locked';
-    //   canAccess = false;
-    // } else {
-    //   // First section in unlocked chapter is always unlocked
-    //   if (i === 0) {
-    //     sectionStatus = 'Unlocked';
-    //     canAccess = true;
-    //   } else {
-    //     // Check if previous section is completed (quiz passed with 70%+)
-    //     const previousSection = sortedSections[i - 1];
-    //     const isPreviousSectionCompleted = isSectionCompleted(
-    //       previousSection,
-    //       userQuizResults
-    //     );
-
-    //     if (isPreviousSectionCompleted) {
-    //       sectionStatus = 'Unlocked';
-    //       canAccess = true;
-    //     }
-    //   }
-    // }
       
     if (!chapterCanAccess) {
       canAccess = false;
       sectionStatus = 'Locked';
     } else {
       if (i === 0) {
+        // First section in unlocked chapter is always accessible
         canAccess = true;
       } else {
+        // Check if previous section is completed
         const prevSection = sortedSections[i - 1];
-        canAccess = isSectionCompleted(prevSection, userQuizResults);
+        const isPrevSectionCompleted = isSectionCompleted(prevSection, userQuizResults, userEnrollment);
+        
+        if (isPrevSectionCompleted) {
+          canAccess = true;
+        } else {
+          canAccess = false;
+        }
       }
 
-      if (isSectionCompleted(section, userQuizResults)) {
+      // Determine section status
+      if (isSectionCompleted(section, userQuizResults, userEnrollment)) {
         sectionStatus = 'Completed';
       } else if (canAccess) {
-        sectionStatus = 'Unlocked';
-      } else if (canAccess && hasSectionProgress(section, userQuizResults)) {
-        sectionStatus = 'In Progress';
+        // Check if section has any progress
+        const chapterProgress = userEnrollment?.chapterProgress?.find(
+          cp => {
+            // Find the chapter that contains this section
+            // We need to check all chapters to find the right one
+            return cp.sectionProgress?.some(
+              sp => sp.sectionId && sp.sectionId.toString() === section._id.toString()
+            );
+          }
+        );
+        
+        const sectionProgress = chapterProgress?.sectionProgress?.find(
+          sp => sp.sectionId && sp.sectionId.toString() === section._id.toString()
+        );
+        
+        // Check if section has any content progress
+        const hasProgress = sectionProgress?.contentProgress && sectionProgress.contentProgress.length > 0;
+        
+        if (hasProgress) {
+          sectionStatus = 'In Progress';
+        } else {
+          sectionStatus = 'Unlocked';
+        }
+      } else {
+        sectionStatus = 'Locked';
       }
     }
 
@@ -1251,9 +1313,9 @@ const processSectionsWithUnlockStatus = async (sections, userQuizResults, chapte
 //   return true;
 // };
 
-const isChapterCompleted = async (chapter, userQuizResults) => {
+const isChapterCompleted = async (chapter, userQuizResults, userEnrollment = null) => {
   for (const section of chapter.sections) {
-    if (!isSectionCompleted(section, userQuizResults)) {
+    if (!isSectionCompleted(section, userQuizResults, userEnrollment)) {
       return false;
     }
   }
@@ -1264,28 +1326,44 @@ const isChapterCompleted = async (chapter, userQuizResults) => {
 
 
 // Helper function to check if section is completed
-const isSectionCompleted = (section, userQuizResults) => {
+const isSectionCompleted = (section, userQuizResults, userEnrollment = null) => {
 
-  // ✅ CASE 1: No content & no quiz → auto completed
-  if (
-    (!section.content || section.content.length === 0) &&
-    !section.quiz
-  ) {
+  // Content completion drives progression (quizzes are grading, not locking)
+  if (!section.content || section.content.length === 0) {
     return true;
   }
 
-  // ✅ CASE 2: Has quiz → quiz must be passed
-  if (section.quiz) {
-    const quizResult = userQuizResults[section._id.toString()];
-    return quizResult && quizResult.passed && quizResult.bestPercentage >= 70;
+  if (!userEnrollment || !userEnrollment.chapterProgress) {
+    return false;
   }
 
-  // ✅ CASE 3: Content exists but no quiz → completed (content progress handled elsewhere)
-  if (section.content && section.content.length > 0 && !section.quiz) {
-    return true;
+  // Find section progress by checking all chapters
+  let sectionProgress = null;
+  for (const chapterProgress of userEnrollment.chapterProgress) {
+    sectionProgress = chapterProgress.sectionProgress?.find(
+      (sp) => sp.sectionId && sp.sectionId.toString() === section._id.toString()
+    );
+    if (sectionProgress) break;
   }
 
-  return false;
+  if (!sectionProgress) return false;
+
+  for (const content of section.content) {
+    const contentProgress = sectionProgress.contentProgress?.find(
+      (cp) => cp.contentId && cp.contentId.toString() === content._id.toString()
+    );
+
+    if (!contentProgress) return false;
+
+    if (content.contentType === 'video') {
+      const minWatchTime = content.minimumWatchTime || 0;
+      if ((contentProgress.watchedDuration || 0) < minWatchTime) return false;
+    } else if (content.contentType === 'text') {
+      if (!contentProgress.completed) return false;
+    }
+  }
+
+  return true;
 };
 
 
@@ -2229,7 +2307,7 @@ const getUserCourseProgress = async (req, res) => {
     // Find all courses where the user is enrolled
     const courses = await Course.find({
       'enrolledUsers.user': userId
-    }).select('name description thumbnail level courseType language approximateHours totalVideos status passingGrade chapters enrolledUsers weightage')
+    }).select('name description thumbnail courseDuration level courseType language approximateHours totalVideos status passingGrade chapters enrolledUsers weightage sequence')
       .populate({
         path: 'enrolledUsers.certificateRequestId',
         model: 'CertificateRequest',
@@ -2257,6 +2335,7 @@ const getUserCourseProgress = async (req, res) => {
     // Process courses to get progress details
     const processedCourses = [];
 
+    // ✅ FIRST PASS: Process all courses to get their status
     for (const course of courses) {
       console.log(`Processing course: ${course.name}`);
 
@@ -2313,6 +2392,12 @@ const getUserCourseProgress = async (req, res) => {
 
         for (const section of chapter.sections) {
           totalSections++;
+
+          // Auto-complete empty sections (no content, no quiz)
+          if ((!section.content || section.content.length === 0) && !section.quiz) {
+            completedSections++;
+            continue;
+          }
 
           // Find section progress
           const sectionProgress = chapterProgress?.sectionProgress?.find(
@@ -2442,35 +2527,84 @@ const getUserCourseProgress = async (req, res) => {
             }
           }
 
-          // Check quiz completion (if quiz exists)
-          if (section.quiz && sectionCompleted) {
-            const quizResult = courseQuizResults.find(quiz =>
-              quiz.sectionId.toString() === section._id.toString()
-            );
-
-            if (quizResult) {
-              const userAttempts = quizResult.attempts.filter(
-                attempt => attempt.userId.toString() === userId
-              );
-
-              if (userAttempts.length > 0) {
-                const bestAttempt = userAttempts.reduce((best, current) =>
-                  current.percentage > best.percentage ? current : best
-                );
-
-                if (!bestAttempt.passed || bestAttempt.percentage < 70) {
-                  sectionCompleted = false;
-                }
-              } else {
-                sectionCompleted = false;
-              }
-            } else {
-              sectionCompleted = false;
-            }
-          }
+          // NOTE: Quiz results do NOT lock progression. Section completion is content-only.
 
           if (sectionCompleted) {
             completedSections++;
+          }
+        }
+
+        // ✅ CHECK CHAPTER-LEVEL QUIZ (after processing all sections in chapter)
+        if (chapter.quiz) {
+          totalQuizzes++;
+
+          // Find actual quiz result from Quiz collection (chapter-level quiz has no sectionId)
+          const quizResult = courseQuizResults.find(quiz =>
+            quiz.chapterId && quiz.chapterId.toString() === chapter._id.toString() &&
+            !quiz.sectionId // Chapter-level quiz has no sectionId
+          );
+
+          if (quizResult) {
+            // Get user's attempts for this quiz
+            const userAttempts = quizResult.attempts.filter(
+              attempt => attempt.userId.toString() === userId
+            );
+
+            if (userAttempts.length > 0) {
+              hasAnyQuizAttempt = true;
+
+              // Get best attempt
+              const bestAttempt = userAttempts.reduce((best, current) =>
+                current.percentage > best.percentage ? current : best
+              );
+
+              // 🆕 ADD QUIZ ATTEMPT DETAILS
+              quizAttempts.push({
+                quizId: quizResult._id,
+                quizTitle: quizResult.title,
+                sectionTitle: null, // Chapter-level quiz has no section
+                chapterTitle: chapter.title,
+                totalAttempts: userAttempts.length,
+                maxAttempts: quizResult.maxAttempts,
+                bestScore: bestAttempt.percentage,
+                bestGrade: bestAttempt.grade,
+                passed: bestAttempt.passed,
+                lastAttemptDate: bestAttempt.attemptDate,
+                timeLimit: quizResult.timeLimit,
+                passingScore: quizResult.passingScore
+              });
+
+              totalPossibleQuizScore += 100;
+              totalQuizScore += bestAttempt.percentage;
+
+              if (bestAttempt.passed && bestAttempt.percentage >= 70) {
+                passedQuizzes++;
+              } else {
+                failedQuizzes++;
+                hasAnyFailedQuiz = true;
+                console.log(`Chapter quiz failed in chapter ${chapter._id}: ${bestAttempt.percentage}%`);
+              }
+            } else {
+              totalPossibleQuizScore += 100;
+
+              // 🆕 ADD QUIZ NOT ATTEMPTED
+              quizAttempts.push({
+                quizId: quizResult._id,
+                quizTitle: quizResult.title,
+                sectionTitle: null, // Chapter-level quiz has no section
+                chapterTitle: chapter.title,
+                totalAttempts: 0,
+                maxAttempts: quizResult.maxAttempts,
+                bestScore: 0,
+                bestGrade: 'Not Attempted',
+                passed: false,
+                lastAttemptDate: null,
+                timeLimit: quizResult.timeLimit,
+                passingScore: quizResult.passingScore
+              });
+            }
+          } else {
+            totalPossibleQuizScore += 100;
           }
         }
       }
@@ -2481,140 +2615,75 @@ const getUserCourseProgress = async (req, res) => {
         overallProgress = Math.round((completedSections / totalSections) * 100);
       }
 
-      // Calculate grade percentage based on quiz results
-      let gradePercentage = 0;
-      if (totalPossibleQuizScore > 0) {
+      // ✅ USE ENROLLMENT.GRADEPERCENTAGE IF AVAILABLE (calculated by quiz controller)
+      // Otherwise calculate from quiz results
+      let gradePercentage = enrollment.gradePercentage || 0;
+      if (gradePercentage === 0 && totalPossibleQuizScore > 0) {
         gradePercentage = Math.round((totalQuizScore / totalPossibleQuizScore) * 100);
       }
 
-      // Determine grade label
-      let gradeLabel = 'Incomplete';
-      if (gradePercentage >= 90) {
-        gradeLabel = 'A';
-      } else if (gradePercentage >= 80) {
-        gradeLabel = 'B';
-      } else if (gradePercentage >= 70) {
-        gradeLabel = 'C';
-      } else if (gradePercentage >= 60) {
-        gradeLabel = 'D';
-      } else if (gradePercentage > 0) {
-        gradeLabel = 'F';
-      }
-
-      // **STATUS DETERMINATION WITH CERTIFICATE LOGIC**
-      let status = 'Not Started';
-      let certificateStatus = 'Not Eligible';
-
-      console.log(`Course ${course.name} status calculation:`, {
-        overallProgress,
-        hasAnyQuizAttempt,
-        hasAnyFailedQuiz,
-        failedQuizzes,
-        passedQuizzes,
-        totalQuizzes,
-        gradePercentage,
-        passingGrade: course.passingGrade,
-        enrollmentStatus: enrollment.status,
-        certificateRequestStatus: enrollment.certificateRequestStatus
-
-      });
-
-      // if (overallProgress === 0 && !hasAnyQuizAttempt) {
-      //   status = 'Not Started';
-      //   certificateStatus = 'Not Eligible';
-      // } 
-      // // If user has failed any quiz
-      // else if (hasAnyFailedQuiz) {
-      //   status = 'Failed';
-      //   gradeLabel = 'F';
-      //   certificateStatus = 'Not Eligible';
-      //   console.log(`Course ${course.name} marked as Failed due to failed quiz(s)`);
-      // }
-      // // If all sections completed and all quizzes passed
-      // else if (overallProgress === 100 && failedQuizzes === 0) {
-      //   if (gradePercentage >= course.passingGrade) {
-      //     status = 'Completed';
-      //     certificateStatus = 'Eligible'; // 🆕 ELIGIBLE FOR CERTIFICATE
-      //   } else {
-      //     status = 'Failed';
-      //     certificateStatus = 'Not Eligible';
-      //   }
-      // }
-      // // Course is in progress
-      // else {
-      //   status = 'In Progress';
-      //   certificateStatus = 'Not Eligible';
-      // }
-
-      // // 🆕 CHECK CERTIFICATE REQUEST STATUS
-      // let certificateInfo = {
-      //   eligible: certificateStatus === 'Eligible',
-      //   requestStatus: enrollment.certificateRequestStatus || 'Not Eligible',
-      //   requestId: enrollment.certificateRequestId || null,
-      //   certificateRequest: null
-      // };
-
-      if (enrollment.status) {
-        // If user has explicit status in database, use that as base
-        status = enrollment.status;
-
-        // Set certificate status based on current status
-        if (status === 'Completed') {
-          certificateStatus = enrollment.certificateRequestStatus || 'Eligible';
-        } else if (status === 'Failed') {
-          certificateStatus = 'Not Eligible';
-        } else if (status === 'In Progress') {
-          certificateStatus = 'Not Eligible';
-        }
-      } else {
-        // Calculate status based on progress if no explicit status
-        if (overallProgress === 0 && !hasAnyQuizAttempt) {
-          status = 'Not Started';
-          certificateStatus = 'Not Eligible';
-        }
-        // If user has failed any quiz
-        else if (hasAnyFailedQuiz) {
-          status = 'Failed';
+      // ✅ USE ENROLLMENT.GRADELABEL IF AVAILABLE
+      // Otherwise determine grade label from percentage
+      let gradeLabel = enrollment.gradeLabel || 'Incomplete';
+      if (gradeLabel === 'Incomplete' && gradePercentage > 0) {
+        if (gradePercentage >= 90) {
+          gradeLabel = 'A';
+        } else if (gradePercentage >= 80) {
+          gradeLabel = 'B';
+        } else if (gradePercentage >= 70) {
+          gradeLabel = 'C';
+        } else if (gradePercentage >= 60) {
+          gradeLabel = 'D';
+        } else {
           gradeLabel = 'F';
-          certificateStatus = 'Not Eligible';
-          console.log(`Course ${course.name} marked as Failed due to failed quiz(s)`);
-        }
-        // If all sections completed and all quizzes passed
-        else if (overallProgress === 100 && failedQuizzes === 0 && totalQuizzes > 0 && passedQuizzes === totalQuizzes) {
-          if (gradePercentage >= course.passingGrade) {
-            status = 'Completed';
-            certificateStatus = 'Eligible';
-          } else {
-            status = 'Failed';
-            certificateStatus = 'Not Eligible';
-          }
-        }
-        // Course is in progress
-        else if (overallProgress > 0 || hasAnyQuizAttempt) {
-          status = 'In Progress';
-          certificateStatus = 'Not Eligible';
         }
       }
 
-      // 🆕 OVERRIDE STATUS BASED ON CERTIFICATE REQUEST STATUS
-      if (enrollment.certificateRequestStatus === 'Requested') {
-        // status = 'Requested'; // 🆕 NEW STATUS
-        certificateStatus = 'Requested';
-      } else if (enrollment.certificateRequestStatus === 'Approved') {
-        status = 'Done'; // 🆕 FINAL STATUS
-        certificateStatus = 'Approved';
-      } else if (enrollment.certificateRequestStatus === 'Rejected') {
-        // status = 'Completed'; // Back to completed, can request again
-        certificateStatus = 'Eligible';
+      // ✅ NO-QUIZ COURSES AUTO-PASS WITH 100%
+      if (totalQuizzes === 0) {
+        gradePercentage = 100;
+        gradeLabel = 'A';
+      }
+      let status = 'Not Started';
+      // ✅ NO-CONTENT/NO-QUIZ COURSES AUTO-COMPLETE WITH 100%
+      const hasAnyContentOrQuiz = totalContent > 0 || totalQuizzes > 0;
+      if (!hasAnyContentOrQuiz) {
+        overallProgress = 100;
+        gradePercentage = 100;
+        gradeLabel = 'A';
+        status = 'Completed';
+        completedSections = totalSections;
+        completedContent = totalContent;
       }
 
-      // 🆕 CHECK CERTIFICATE REQUEST STATUS
+      // ✅ NO-CONTENT/NO-QUIZ COURSES AUTO-COMPLETE WITH 100% AND GRADE A
+      // const hasAnyContentOrQuiz = totalContent > 0 || totalQuizzes > 0;
+      // if (!hasAnyContentOrQuiz) {
+      //   overallProgress = 100;
+      //   gradePercentage = 100;
+      //   gradeLabel = 'A';
+      //   status = 'Completed';
+      //   completedSections = totalSections;
+      //   completedContent = totalContent;
+      // }
+
+      // ✅ STATUS (CONTENT-ONLY PROGRESSION)
+      
+      if (enrollment.certificateRequestStatus === 'Approved') {
+        status = 'Done';
+      } else if (overallProgress === 100) {
+        status = 'Completed';
+      } else if (overallProgress > 0) {
+        status = 'In Progress';
+      }
+
+      // ✅ CERTIFICATE INFO (PROGRAM-LEVEL) - eligibility will be computed after all courses processed
       let certificateInfo = {
-        eligible: certificateStatus === 'Eligible',
+        eligible: false,
         requestStatus: enrollment.certificateRequestStatus || 'Not Eligible',
         requestId: enrollment.certificateRequestId || null,
         certificateRequest: null,
-        canRequest: certificateStatus === 'Eligible' && status === 'Completed'
+        canRequest: false
       };
 
       // If certificate request exists, get details
@@ -2629,17 +2698,30 @@ const getUserCourseProgress = async (req, res) => {
         };
       }
 
-      // Calculate weightage
+      // Calculate weightage (include both section-level and chapter-level quizzes)
       let totalWeightage = 0;
       let quizCount = 0;
 
       if (course.chapters && Array.isArray(course.chapters)) {
         course.chapters.forEach(chapter => {
+          // ✅ CHECK CHAPTER-LEVEL QUIZ
+          if (chapter.quiz) {
+            const chapterQuiz = courseQuizResults.find(q =>
+              q.chapterId && q.chapterId.toString() === chapter._id.toString() &&
+              !q.sectionId // Chapter-level quiz has no sectionId
+            );
+            if (chapterQuiz && chapterQuiz.weightage) {
+              totalWeightage += chapterQuiz.weightage;
+              quizCount++;
+            }
+          }
+
+          // Check section-level quizzes
           if (chapter.sections && Array.isArray(chapter.sections)) {
             chapter.sections.forEach(section => {
               if (section.quiz) {
                 const quiz = courseQuizResults.find(q =>
-                  q.sectionId.toString() === section._id.toString()
+                  q.sectionId && q.sectionId.toString() === section._id.toString()
                 );
                 if (quiz && quiz.weightage) {
                   totalWeightage += quiz.weightage;
@@ -2699,6 +2781,7 @@ const getUserCourseProgress = async (req, res) => {
       processedCourses.push({
         _id: course._id,
         name: course.name,
+        sequence: course.sequence,
         courseDuration: course.courseDuration,
         description: course.description,
         thumbnail: course.thumbnail,
@@ -2752,8 +2835,106 @@ const getUserCourseProgress = async (req, res) => {
       course.courseType === 'Short Course'
     );
 
-    console.log(`Processed ${mainCourses.length} main courses and ${shortCourses.length} short courses`);
+    // Enforce short-course remediation (must repeat until passing score)
+    // const shortCoursePassMark = 70;
+    // shortCourses.forEach(sc => {
+    //   if ((sc.status === 'Completed' || sc.status === 'Done') && (sc.gradePercentage || 0) < shortCoursePassMark) {
+    //     // sc.status = 'Failed';
+    //     sc.statusDisplay = getStatusDisplay('Failed');
+    //     // sc.requiresRetake = true;
+    //     // sc.progress = 0;
+    //     if (sc.contentStats) {
+    //       sc.contentStats.sectionProgress = 0;
+    //       sc.contentStats.contentProgress = 0;
+    //       sc.contentStats.completedSections = 0;
+    //       sc.contentStats.completedContent = 0;
+    //     }
+    //     sc.certificateInfo.eligible = false;
+    //     sc.certificateInfo.canRequest = false;
+    //   }
+    // });
 
+    // ✅ PROGRAM-LEVEL CERTIFICATE RULES (ALL MAIN COURSES VISIBLE TO USER)
+    const allMainCoursesCompleted = mainCourses.length > 0 && mainCourses.every((c) =>
+      c.status === 'Completed' || c.status === 'Done' || c.progress === 100
+    );
+
+    // Track total quizzes across all main courses for zero-quiz edge case
+    const totalQuizzesAcrossMain = mainCourses.reduce(
+      (sum, c) => sum + (c.quizStats?.total || 0),
+      0
+    );
+
+    // Overall percentage across all main courses (simple average of course gradePercentage)
+    let programPercentage = 0;
+    if (mainCourses.length > 0) {
+      const sumGrades = mainCourses.reduce((sum, c) => sum + (c.gradePercentage || 0), 0);
+      programPercentage = Math.round(sumGrades / mainCourses.length);
+    }
+
+    // If there are no quizzes at all but courses are completed, treat program as 100%
+    if (totalQuizzesAcrossMain === 0 && allMainCoursesCompleted) {
+      programPercentage = 100;
+    }
+
+    const passingThreshold = 70;
+    let eligibleForCertificate =
+      allMainCoursesCompleted &&
+      (totalQuizzesAcrossMain === 0 || programPercentage >= passingThreshold);
+    let requiresShortCourses =
+      allMainCoursesCompleted &&
+      totalQuizzesAcrossMain > 0 &&
+      programPercentage < passingThreshold;
+
+    // ✅ SHORT-COURSE REMEDIATION SUCCESS: if short courses exist, all completed, and avg >= 70, allow certificate
+    if (requiresShortCourses && shortCourses.length > 0) {
+      const allShortsCompleted = shortCourses.every(
+        sc => sc.status === 'Completed' || sc.status === 'Done' || sc.progress === 100
+      );
+      if (allShortsCompleted) {
+        const shortAvg = Math.round(
+          shortCourses.reduce((sum, sc) => sum + (sc.gradePercentage || 0), 0) / shortCourses.length
+        );
+        if (shortAvg >= passingThreshold) {
+          eligibleForCertificate = true;
+          requiresShortCourses = false;
+          programPercentage = passingThreshold; // lift to passing
+        }
+      }
+    }
+
+    // Anchor course = last by sequence; only this course can request certificate
+    const sortedMainCourses = [...mainCourses].sort(
+      (a, b) => (a.sequence || 0) - (b.sequence || 0)
+    );
+    const anchorCourseId =
+      sortedMainCourses.length > 0
+        ? sortedMainCourses[sortedMainCourses.length - 1]._id.toString()
+        : null;
+
+    processedCourses.forEach((c) => {
+      if (c.courseType !== 'Course') {
+        c.certificateInfo.eligible = false;
+        c.certificateInfo.canRequest = false;
+        c.certificateInfo.requiresShortCourses = false;
+        return;
+      }
+
+      const isAnchor = anchorCourseId && c._id.toString() === anchorCourseId;
+      const baseEligible = isAnchor && eligibleForCertificate;
+
+      // Only expose remediation flag on anchor course to avoid repeating CTA on every course
+      c.certificateInfo.requiresShortCourses = isAnchor ? requiresShortCourses : false;
+      c.certificateInfo.eligible = baseEligible;
+      c.certificateInfo.canRequest =
+        baseEligible &&
+        !requiresShortCourses &&
+        (c.status === 'Completed' || c.status === 'Done' || c.progress === 100) &&
+        c.certificateInfo.requestStatus !== 'Requested' &&
+        c.certificateInfo.requestStatus !== 'Approved';
+    });
+
+    console.log(`Processed ${mainCourses.length} main courses and ${shortCourses.length} short courses`);
     res.status(200).json({
       success: true,
       message: 'Course progress retrieved successfully',
@@ -2771,7 +2952,19 @@ const getUserCourseProgress = async (req, res) => {
           // 🆕 CERTIFICATE SUMMARY
           certificateEligible: processedCourses.filter(c => c.certificateInfo.eligible).length,
           certificateRequested: processedCourses.filter(c => c.certificateInfo.requestStatus === 'Requested').length,
-          certificateApproved: processedCourses.filter(c => c.certificateInfo.requestStatus === 'Approved').length
+          certificateApproved: processedCourses.filter(c => c.certificateInfo.requestStatus === 'Approved').length,
+
+          // ✅ PROGRAM SUMMARY
+          programStats: {
+            totalMainCourses: mainCourses.length,
+            totalQuizzes: totalQuizzesAcrossMain,
+            allMainCoursesCompleted,
+            percentage: programPercentage,
+            passingThreshold,
+            eligibleForCertificate,
+            requiresShortCourses,
+            anchorCourseId
+          }
         }
       }
     });
@@ -3038,9 +3231,9 @@ const getQuizBySection = async (req, res) => {
       attempt.userId.toString() === userId.toString()
     );
 
-    // Check if user has reached maximum attempts
-    const attemptsRemaining = quiz.maxAttempts - userAttempts.length;
-    const canAttempt = attemptsRemaining > 0;
+    // Attempts are unlimited (maxAttempts is ignored for user flow)
+    const attemptsRemaining = null;
+    const canAttempt = true;
 
     // Get best score from previous attempts
     let bestScore = 0;
@@ -3065,7 +3258,7 @@ const getQuizBySection = async (req, res) => {
       title: quiz.title,
       description: quiz.description,
       timeLimit: quiz.timeLimit,
-      maxAttempts: quiz.maxAttempts,
+      maxAttempts: null,
       passingScore: quiz.passingScore,
       totalQuestions: quiz.questions.length,
       totalPoints: quiz.questions.reduce((sum, q) => sum + q.points, 0),
@@ -3532,8 +3725,8 @@ const getQuizBySection = async (req, res) => {
 
 const updateCourse = async (req, res) => {
   try {
-    console.log('Received request to update course:', req.body);
-    console.log('Received request files:', req.files);
+    // console.log('Received request to update course:', req.body);
+    // console.log('Received request files:', req.files);
 
     const courseId = req.params.id;
     if (!mongoose.Types.ObjectId.isValid(courseId)) {

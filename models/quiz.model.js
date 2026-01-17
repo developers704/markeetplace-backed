@@ -8,12 +8,12 @@ const quizSchema = new mongoose.Schema({
   },
   chapterId: {
     type: mongoose.Schema.Types.ObjectId,
-    required: true
+    required: true,
+    index: true
   },
-  sectionId: {
-    type: mongoose.Schema.Types.ObjectId,
-    required: true
-  },
+  // sectionId: {
+  //   type: mongoose.Schema.Types.ObjectId,
+  // },
   title: {
     type: String,
     required: true

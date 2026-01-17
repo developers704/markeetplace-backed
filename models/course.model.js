@@ -1,195 +1,50 @@
-// const mongoose = require('mongoose');
-
-// const courseSchema = new mongoose.Schema({
-//     name: {
-//         type: String,
-//         required: true,
-//         trim: true
-//     },
-//     description: {
-//         type: String,
-//         required: true,
-//         trim: true
-//     },
-//     thumbnail: {
-//         type: String,
-//         required: true
-//     },
-//     approximateHours: {
-//         type: Number,
-//         required: true
-//     },
-//     totalVideos: {
-//         type: Number,
-//         required: true
-//     },
-//     level:{
-//         type: String,
-//         // required: true,
-//         enum: ["Beginner", "Intermediate", "Advanced"]
-//     },
-//     language:{
-//         type: String
-//     },
-//     videos: [{
-//         title: {
-//             type: String,
-//             required: true
-//         },
-//         videoUrl: {
-//             type: String,
-//             required: true
-//         },
-//         duration: {
-//             type: Number,
-//             required: true
-//         },
-//         description: {
-//             type: String
-//         },
-//         order: {
-//             type: Number,
-//             required: true
-//         },
-//         minimumWatchTime: {
-//             type: Number,
-//             required: true
-//         },
-//         thumbnail: {
-//             type: String
-//         },
-//         likes:{
-//             type: Number,
-//             default: 0
-//         },
-//         dislikes: {
-//         type: Number,
-//         default: 0
-//         },
-//     quizId: {
-//       type: mongoose.Schema.Types.ObjectId,
-//       ref: 'Quiz'
-//     },
-//     certificate: {
-//       type: String
-//     }
-//     }],
-//     // instructor: {
-//     //     type: mongoose.Schema.Types.ObjectId,
-//     //     ref: 'User',
-//     //     required: true
-//     // },
-//     enrolledUsers: [{
-//         user: {
-//             type: mongoose.Schema.Types.ObjectId,
-//             ref: 'User'
-//         },
-//         enrollmentDate: {
-//             type: Date,
-//             default: Date.now
-//         },
-//         progress: {
-//             type: Number,
-//             default: 0
-//         },
-//         completedVideos: [{
-//             videoId:{
-//             type: mongoose.Schema.Types.ObjectId
-//             },
-//             watchedDuration: {
-//                 type: Number,
-//                 default: 0
-//             },
-//             completed:{
-//                 type: Boolean,
-//                 default: false
-//             },
-//             lastWatchedAt: {
-//                 type: Date,
-//             },
-//             currentVideo:{
-//                 type: Number,
-//                 default: 0
-//             },
-//             quizStatus: {
-//         type: String,
-//         enum: ['Not Attempted', 'Passed', 'Failed'],
-//         default: 'Not Attempted'
-//       },
-//       grade: {
-//         type: String,
-//       },
-//       certificateEarned: {
-//         type: Boolean,
-//         default: false
-//       }
-//         }]
-//     }],
-//     isActive: {
-//         type: Boolean,
-//         default: true
-//     }
-// }, {
-//     timestamps: true
-// });
-
-// const Course = mongoose.model('Course', courseSchema);
-// module.exports = Course;
-
-
-
-
-
 const mongoose = require('mongoose');
 
 const courseSchema = new mongoose.Schema({
     name: {
         type: String,
-        required: true,
         trim: true
     },
     courseDuration: {
         type: String,
-        // required: true
     },
     description: {
         type: String,
-        // required: true,
         trim: true
     },
     thumbnail: {
         type: String,
-        required: true
+        
     },
     approximateHours: {
         type: Number,
-        required: true
+        
     },
     level: {
         type: String,
         // enum: ["Beginner", "Intermediate", "Advanced"],
-        required: true
+       
     },
     courseType: {
     type: String,
     enum: ["Course", "Short Course", "Task"],
-    required: true,
+    
     default: "Course"
     },
     language: {
         type: String,
-        required: true
+       
     },
     // Course sequence in curriculum
     sequence: {
         type: Number,
-        required: true
+    
     },
     // Passing grade for the entire course
     passingGrade: {
         type: Number,
         default: 70,
-        required: true
+        
     },
     // Access control for roles and stores
     accessControl: {
@@ -206,31 +61,36 @@ const courseSchema = new mongoose.Schema({
     chapters: [{
         title: {
             type: String,
-            required: true
+       
         },
         description: {
             type: String
         },
         sequence: {
             type: Number,
-            required: true
+           
         },
         deadline: {
             type: Date
         },
+        quiz: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Quiz',
+        default: null   
+    },
         // Sections within chapters
         sections: [{
             title: {
                 type: String,
-                required: true
+                
             },
             sequence: {
                 type: Number,
-                required: true
+                
             },
             introduction: {
                 type: String,
-                required: true
+                
             },
             objective: {
                 type: String
@@ -240,18 +100,18 @@ const courseSchema = new mongoose.Schema({
                 contentType: {
                     type: String,
                     enum: ['video', 'text'],
-                    required: true
+                    
                 },
                 title: {
                     type: String,
-                    required: true
+                    
                 },
                 description: {
                     type: String
                 },
                 sequence: {
                     type: Number,
-                    required: true
+                    
                 },
                 // For video content
                 videoUrl: {
@@ -297,7 +157,7 @@ const courseSchema = new mongoose.Schema({
     }],
     totalVideos: {
         type: Number,
-        required: true
+        
     },
     enrolledUsers: [{
         user: {
@@ -340,6 +200,28 @@ const courseSchema = new mongoose.Schema({
             completed: {
                 type: Boolean,
                 default: false
+            },
+            // Quiz progress for chapter-level quiz
+            quizProgress: {
+                quizId: {
+                    type: mongoose.Schema.Types.ObjectId,
+                    ref: 'Quiz'
+                },
+                attempts: {
+                    type: Number,
+                    default: 0
+                },
+                bestScore: {
+                    type: Number,
+                    default: 0
+                },
+                passed: {
+                    type: Boolean,
+                    default: false
+                },
+                lastAttemptDate: {
+                    type: Date
+                }
             },
             sectionProgress: [{
                 sectionId: {
@@ -405,7 +287,7 @@ const courseSchema = new mongoose.Schema({
         },
         gradeLabel: {
             type: String,
-            enum: ['A', 'B', 'C', 'D', 'F', 'Incomplete'],
+            enum: ['A', 'B', 'C', 'D', 'F', 'Incomplete','Completed'],
             default: 'Incomplete'
         },
 

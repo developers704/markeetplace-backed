@@ -114,7 +114,7 @@ const customerLogin = async (req, res) => {
      if (!warehouseId) {
       return res.status(400).json({ message: "Warehouse ID is required for login" });
     }
-    console.log("Selected warehouseId:", warehouseId);
+    
 
     // comment code 
     let clientIP = req.headers['x-real-ip'] 
@@ -146,8 +146,7 @@ const customerLogin = async (req, res) => {
         clientIP = localIP.address;
       }
     }
-    console.log('Headers:', req.headers);
-    console.log('Client IP:', clientIP);
+  
                     const ipAccess = await IPAccess.findOne({
                       $or: [
                         { address: clientIP },

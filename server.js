@@ -64,7 +64,7 @@ const testEmailController = async (req, res) => {
       });
     }
 
-    console.log('Controller received:', { to, subject, message });
+   
 
     // Light subject sanitization to avoid common spam triggers
     const improvedSubject = String(subject)
@@ -101,11 +101,11 @@ const testEmailController = async (req, res) => {
       text: String(message)
     };
 
-    console.log('Calling sendEmail function...');
+    
 
     const result = await sendEmail(mailOptions);
 
-    console.log('sendEmail result:', result);
+   
 
     const ok = !!result?.success;
     return res.status(ok ? 200 : 502).json({
@@ -135,8 +135,7 @@ app.use('/api', allRoutes); // Use the route manager with a common API endpoint
 app.set('trust proxy', true);
 
 app.use((req, res, next) => {
-  console.log('Detected IP:', req.ip);
-  console.log('Headers:', req.headers);
+
   next();
 });
 
@@ -145,7 +144,7 @@ cron.schedule('0 0 * * *', async () => {
   try {
       const now = new Date();
       await BlacklistedToken.deleteMany({ expiresAt: { $lt: now } });
-      console.log('Expired tokens cleaned up');
+     
   } catch (error) {
       console.error('Error cleaning up expired tokens:', error);
   }
@@ -173,44 +172,27 @@ mailchimp.setConfig({
 
 const checkAccountDetails = async () => {
   try {
-    console.log('🔍 Checking Mailchimp Account Details...\n');
+   
     
     // Correct method - ping API to check connection
     const pingResponse = await mailchimp.ping.get();
-    console.log('API Connection:', pingResponse);
+   
     
     // Get account info using root endpoint
     const accountInfo = await mailchimp.root.getRoot();
-    
-    console.log('📊 ACCOUNT INFORMATION:');
-    console.log('========================');
-    console.log(`Account Name: ${accountInfo.account_name || 'N/A'}`);
-    console.log(`Account ID: ${accountInfo.account_id || 'N/A'}`);
-    console.log(`Username: ${accountInfo.username || 'N/A'}`);
-    console.log(`Email: ${accountInfo.email || 'N/A'}`);
-    console.log(`Role: ${accountInfo.role || 'N/A'}`);
+   
     
     // Check lists to determine account status
     const listsResponse = await mailchimp.lists.getAllLists();
     const totalContacts = listsResponse.lists.reduce((sum, list) => sum + list.stats.member_count, 0);
     
-    console.log(`\n👥 CONTACT INFORMATION:`);
-    console.log(`Total Lists: ${listsResponse.lists.length}`);
-    console.log(`Total Contacts: ${totalContacts}`);
-    
+   
     // Determine if free account (basic heuristic)
     const isFreeAccount = totalContacts <= 2000 && listsResponse.lists.length <= 1;
     
-    console.log(`\n🎯 ACCOUNT STATUS:`);
-    console.log(`Likely Free Account: ${isFreeAccount ? 'YES ✅' : 'NO ❌'}`);
+   
     
-    if (isFreeAccount) {
-      console.log(`\n⚠️  FREE ACCOUNT LIMITATIONS:`);
-      console.log(`- Maximum 2,000 contacts`);
-      console.log(`- 10,000 emails per month`);
-      console.log(`- Limited API access`);
-      console.log(`- Mailchimp branding in emails`);
-    }
+    
     
     return {
       isFree: isFreeAccount,
@@ -221,13 +203,10 @@ const checkAccountDetails = async () => {
     };
     
   } catch (error) {
-    console.error('❌ Error checking account:', error.message);
+   
     
     if (error.status === 403) {
-      console.log('\n🚫 PERMISSION ERROR:');
-      console.log('- API key has limited permissions');
-      console.log('- Free account with restricted API access');
-      console.log('- Account might be suspended');
+     
       
       return {
         isFree: true,
@@ -245,7 +224,7 @@ const checkAccountDetails = async () => {
 app.get('/test/:quizId', async (req, res) => {
   try {
     const { quizId } = req.params;
-    console.log('Test route - Quiz ID:', quizId);
+   
     
     const Quiz = require('./models/quiz.model');
     const quiz = await Quiz.findById(quizId);
@@ -266,13 +245,5 @@ app.get('/test/:quizId', async (req, res) => {
   }
 });
 
-// Call function
-// checkAccountDetails()
-//   .then(result => {
-//     console.log('\n✅ Account check completed');
-//     console.log('Result:', result);
-//   })
-//   .catch(error => {
-//     console.error('❌ Account check failed:', error.message);
-//   });
+
 
