@@ -1,5 +1,7 @@
 const Review = require('../models/review.model');
 const Product = require('../models/product.model');
+const VendorProduct = require('../models/vendorProduct.model');
+const Sku = require('../models/sku.model');
 const mongoose = require('mongoose');
 const { deleteFile } = require('../config/fileOperations');
 const fs = require('fs').promises; // To handle file saving
@@ -31,27 +33,89 @@ const createReview = async (req, res) => {
     let savedImages = []; // Declare here for access in catch
 
     try {
-        const { product, rating, content } = req.body;
+        const { product, rating, content, productModel = 'Product', sku } = req.body;
         const customer = req.user._id;
 
-        // Validate: check if the product exists
-        const productExists = await Product.findById(product).session(session);
-        if (!productExists) {
-            return res.status(404).json({ message: 'Product not found' });
+        // Validate productModel
+        if (!['Product', 'VendorProduct'].includes(productModel)) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ message: 'Invalid productModel. Must be "Product" or "VendorProduct"' });
         }
 
-        // Validate: check if the user has already reviewed the product
-        const existingReview = await Review.findOne({ product, customer }).session(session);
+        // For VendorProduct, SKU is required
+        if (productModel === 'VendorProduct' && !sku) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ message: 'SKU is required for VendorProduct reviews' });
+        }
+
+        // Validate: check if the product exists (either Product or VendorProduct)
+        let productExists = null;
+        if (productModel === 'Product') {
+            productExists = await Product.findById(product).session(session);
+        } else if (productModel === 'VendorProduct') {
+            productExists = await VendorProduct.findById(product).session(session);
+        }
+
+        if (!productExists) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(404).json({ 
+                message: `${productModel} not found`,
+                productId: product,
+                productModel: productModel
+            });
+        }
+
+        // Validate SKU if provided
+        if (sku) {
+            const skuExists = await Sku.findById(sku).session(session);
+            if (!skuExists) {
+                await session.abortTransaction();
+                session.endSession();
+                return res.status(404).json({ message: 'SKU not found' });
+            }
+            
+            // Verify SKU belongs to the product
+            if (productModel === 'VendorProduct' && String(skuExists.productId) !== String(product)) {
+                await session.abortTransaction();
+                session.endSession();
+                return res.status(400).json({ message: 'SKU does not belong to this VendorProduct' });
+            }
+        }
+
+        // Validate: check if the user has already reviewed this SKU (for VendorProduct) or product
+        const existingReviewQuery = sku 
+            ? { sku, customer }
+            : { product, customer, productModel };
+            
+        const existingReview = await Review.findOne(existingReviewQuery).session(session);
+        
         if (existingReview) {
-            return res.status(400).json({ message: 'You have already reviewed this product' });
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ message: sku ? 'You have already reviewed this SKU' : 'You have already reviewed this product' });
         }
 
         // Check if the user has purchased the product with the "Delivered" status
-        const hasPurchased = await Order.exists({
-            customer,
-            items: { $elemMatch: { product } },
-            orderStatus: 'Delivered' // Direct string comparison with the orderStatus field
-        }).session(session);
+        // For VendorProduct, we need to check B2B orders or regular orders
+        let hasPurchased = false;
+        if (productModel === 'Product') {
+            hasPurchased = await Order.exists({
+                customer,
+                items: { $elemMatch: { product } },
+                orderStatus: 'Delivered'
+            }).session(session);
+        } else if (productModel === 'VendorProduct') {
+            // For vendor products, check B2B purchase requests or orders
+            // You may need to adjust this based on your B2B order model
+            hasPurchased = await Order.exists({
+                customer,
+                'items.vendorProductId': product,
+                orderStatus: 'Delivered'
+            }).session(session);
+        }
 
         // Save images and get filenames and full paths
         savedImages = req.files ? await saveImagesToDisk(req.files) : [];
@@ -59,26 +123,33 @@ const createReview = async (req, res) => {
         // Create the review after validations
         const review = new Review({
             product,
+            productModel,
+            sku: sku || undefined, // Only include if provided
             customer,
             rating,
             content,
             images: savedImages.map(img => img.filename), // Store only filenames
-            isVerifiedPurchase: !!hasPurchased
+            isVerifiedPurchase: !!hasPurchased,
+            isApproved: false // Reviews need admin approval
         });
 
         await review.save({ session });
 
-        // Update product's review stats
-        await Product.findByIdAndUpdate(product, {
-            $inc: { totalReviews: 1, totalRating: rating }
-        }, { session });
+        // Note: VendorProduct model doesn't have totalReviews/totalRating fields
+        // If you want to track reviews for VendorProducts, you'd need to add these fields
+        // For now, we'll only update Product stats
+        if (productModel === 'Product') {
+            await Product.findByIdAndUpdate(product, {
+                $inc: { totalReviews: 1, totalRating: rating }
+            }, { session });
+        }
 
         await session.commitTransaction();
         session.endSession();
 
         res.status(201).json({
             message: 'Review created successfully',
-            review: await Review.findById(review._id).populate('customer', 'name')
+            review: await Review.findById(review._id).populate('customer', 'username profileImage')
         });
     } catch (error) {
         await session.abortTransaction();
@@ -98,14 +169,54 @@ const createReview = async (req, res) => {
 const getProductReviews = async (req, res) => {
     try {
         const { productId } = req.params;
-        const { sort = 'createdAt' } = req.query;
+        const { sort = 'createdAt', productModel, skuId, includeUnapproved = false } = req.query;
         const sortOptions = {
             createdAt: { createdAt: -1 },
             rating: { rating: -1 },
             helpful: { 'votes.isHelpful': -1 }
         };
 
-        const reviews = await Review.find({ product: new mongoose.Types.ObjectId(productId) })
+        // Build query - for SKU-based reviews or product-based
+        let query = {};
+        
+        // If SKU ID is provided, get reviews for that SKU
+        if (skuId) {
+            query.sku = new mongoose.Types.ObjectId(skuId);
+            // Also verify the SKU belongs to the product
+            const sku = await Sku.findById(skuId).lean();
+            if (!sku) {
+                return res.status(404).json({ message: 'SKU not found' });
+            }
+            query.product = new mongoose.Types.ObjectId(productId);
+            query.productModel = productModel || 'VendorProduct';
+        } else {
+            // Product-based reviews
+            query.product = new mongoose.Types.ObjectId(productId);
+            
+            // If productModel is specified, filter by it
+            if (productModel && ['Product', 'VendorProduct'].includes(productModel)) {
+                query.productModel = productModel;
+            } else {
+                // If not specified, try to auto-detect by checking which exists
+                const [productExists, vendorProductExists] = await Promise.all([
+                    Product.findById(productId).lean(),
+                    VendorProduct.findById(productId).lean()
+                ]);
+                
+                if (vendorProductExists && !productExists) {
+                    query.productModel = 'VendorProduct';
+                } else if (productExists && !vendorProductExists) {
+                    query.productModel = 'Product';
+                }
+            }
+        }
+
+        // Only show approved reviews by default (unless admin requests all)
+        if (includeUnapproved !== 'true') {
+            query.isApproved = true;
+        }
+
+        const reviews = await Review.find(query)
             .populate({
                 path: 'customer',
                 select: 'username profileImage' // Add any other customer fields you need
@@ -115,8 +226,8 @@ const getProductReviews = async (req, res) => {
 
         const reviewsWithVotes = reviews.map(review => ({
             ...review,
-            totalHelpfulVotes: review.votes.filter(vote => vote.isHelpful).length,
-            totalNonHelpfulVotes: review.votes.filter(vote => !vote.isHelpful).length
+            totalHelpfulVotes: review.votes ? review.votes.filter(vote => vote.isHelpful).length : 0,
+            totalNonHelpfulVotes: review.votes ? review.votes.filter(vote => !vote.isHelpful).length : 0
         }));
 
         const averageRating = reviews.length > 0
@@ -232,10 +343,59 @@ const deleteReview = async (req, res) => {
         // Delete the review
         await Review.findByIdAndDelete(id, { session });
 
-        // Update product's review stats
-        await Product.findByIdAndUpdate(review.product, {
-            $inc: { totalReviews: -1, totalRating: -review.rating }
-        }, { session });
+        // Update product's review stats (only for Product model, not VendorProduct)
+        if (review.productModel === 'Product') {
+            await Product.findByIdAndUpdate(review.product, {
+                $inc: { totalReviews: -1, totalRating: -review.rating }
+            }, { session });
+        }
+
+        await session.commitTransaction();
+        session.endSession();
+
+        res.status(200).json({ message: 'Review deleted successfully' });
+    } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+
+        res.status(500).json({ message: 'Error deleting review', error: error.message });
+    }
+};
+
+// Admin delete review (no ownership check required)
+const deleteReviewByAdmin = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const { id } = req.params;
+
+        // Find the review by ID
+        const review = await Review.findById(id).session(session);
+
+        if (!review) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(404).json({ message: 'Review not found' });
+        }
+
+        // Delete associated images if they exist
+        if (review.images && review.images.length > 0) {
+            await Promise.all(review.images.map(image => {
+                const filePath = path.join('uploads/images/reviews', image);
+                return deleteFile(filePath);
+            }));
+        }
+
+        // Delete the review
+        await Review.findByIdAndDelete(id, { session });
+
+        // Update product's review stats (only for Product model, not VendorProduct)
+        if (review.productModel === 'Product') {
+            await Product.findByIdAndUpdate(review.product, {
+                $inc: { totalReviews: -1, totalRating: -review.rating }
+            }, { session });
+        }
 
         await session.commitTransaction();
         session.endSession();
@@ -364,7 +524,8 @@ const respondToReview = async (req, res) => {
   const getTopProductReviews = async (req, res) => {
     try {
         const reviews = await Review.find({
-            rating: { $gte: 4 }  // Get reviews with rating 4 or 5
+            rating: { $gte: 4 },  // Get reviews with rating 4 or 5
+            isApproved: true // Only show approved reviews
         })
         .populate('product', 'name images urlName')
         .populate('customer', 'username profileImage')
@@ -385,16 +546,19 @@ const getAllReviews = async (req, res) => {
             order = 'desc',
             rating,
             productId,
-            customerId
+            customerId,
+            isApproved // Admin can filter by approval status
         } = req.query;
 
         const query = {};
         if (rating) query.rating = rating;
         if (productId) query.product = productId;
         if (customerId) query.customer = customerId;
+        if (isApproved !== undefined) query.isApproved = isApproved === 'true';
 
         const reviews = await Review.find(query)
-            .populate('product', 'name image sku')
+            .populate('product', 'name image sku vendorModel')
+            .populate('sku', 'sku metalColor metalType size attributes')
             .populate('customer', 'username profileImage email')
             .sort({ [sort]: order === 'desc' ? -1 : 1 });
 
@@ -432,15 +596,17 @@ const bulkDeleteReviews = async (req, res) => {
         // Delete reviews from database
         await Review.deleteMany({ _id: { $in: reviewIds } }, { session });
 
-        // Update product stats for each affected product
-        const productUpdates = reviews.map(review => 
-            Product.findByIdAndUpdate(review.product, {
-                $inc: { 
-                    totalReviews: -1,
-                    totalRating: -review.rating 
-                }
-            }, { session })
-        );
+        // Update product stats for each affected product (only for Product model)
+        const productUpdates = reviews
+            .filter(review => review.productModel === 'Product')
+            .map(review => 
+                Product.findByIdAndUpdate(review.product, {
+                    $inc: { 
+                        totalReviews: -1,
+                        totalRating: -review.rating 
+                    }
+                }, { session })
+            );
 
         await Promise.all(productUpdates);
         await session.commitTransaction();
@@ -457,6 +623,33 @@ const bulkDeleteReviews = async (req, res) => {
         res.status(500).json({ message: error.message });
     } finally {
         session.endSession();
+    }
+};
+
+const approveReview = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { isApproved } = req.body;
+
+        const review = await Review.findById(id);
+        if (!review) {
+            return res.status(404).json({ message: 'Review not found' });
+        }
+
+        review.isApproved = isApproved !== undefined ? isApproved : true;
+        await review.save();
+
+        // Create notification for customer
+        if (isApproved) {
+            await createNotification(review.customer, 'Your review has been approved and is now visible to others', review._id);
+        }
+
+        res.json({
+            message: `Review ${isApproved ? 'approved' : 'rejected'} successfully`,
+            review: await Review.findById(id).populate('customer', 'username profileImage')
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Error approving review', error: error.message });
     }
 };
 
@@ -542,6 +735,7 @@ module.exports = {
     getProductReviews,
     updateReview,
     deleteReview,
+    deleteReviewByAdmin,
     voteReview,
     getReviewSummary,
     getUserReviews ,
@@ -549,5 +743,6 @@ module.exports = {
     getTopProductReviews,
     getAllReviews,
     bulkDeleteReviews,
-    updateReviewByAdmin
+    updateReviewByAdmin,
+    approveReview
 };

@@ -66,10 +66,16 @@ const adminProgressRoutes = require('../routes/adminProgress.routes.js');
 const presedentroutes = require('../routes/presidentSignature.routes.js');
 const bulkProductImportRoutes = require('../routes/bulkProductImport.route');
 const bulkOtherProductImportRoutes = require('../routes/bulkOtherProductImport.route');
+const v2CatalogRoutes = require('../routes/v2Catalog.route');
+const v2B2BRoutes = require('../routes/v2B2B.route');
+const v2B2BCartRoutes = require('../routes/v2B2BCart.route');
 
 const router = express.Router();
 
 router.use('/president', presedentroutes);
+router.use('/v2', v2CatalogRoutes);
+router.use('/v2/b2b', v2B2BRoutes);
+router.use('/v2/b2b/cart', v2B2BCartRoutes);
 router.use('/bulk-products', bulkProductImportRoutes);
 router.use('/bulk-other-products', bulkOtherProductImportRoutes);
 router.use('/adminProgress', adminProgressRoutes);

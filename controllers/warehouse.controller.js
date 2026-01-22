@@ -236,6 +236,8 @@ const updateWarehouse = async (req, res) => {
       initialSuppliesBalance,
       districtManager,
       corporateManager,
+      requireDMApproval,
+      requireCMApproval,
     } = req.body;
 
     // 🔹 Check for duplicate name
@@ -256,10 +258,15 @@ const updateWarehouse = async (req, res) => {
     if (!oldWarehouse)
       return res.status(404).json({ message: 'Warehouse not found' });
 
-    // 🔹 Update warehouse data
+    // 🔹 Update warehouse data (including B2B approval flags v2)
+    const updateData = {
+      ...req.body,
+      requireDMApproval: requireDMApproval !== undefined ? requireDMApproval : true, // Default true
+      requireCMApproval: requireCMApproval !== undefined ? requireCMApproval : true, // Default true
+    };
     const warehouse = await Warehouse.findByIdAndUpdate(
       req.params.id,
-      req.body,
+      updateData,
       { new: true }
     );
 

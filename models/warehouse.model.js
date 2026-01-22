@@ -16,7 +16,10 @@ const warehouseSchema = new mongoose.Schema({
     capacity: { type: Number },
     isActive: { type: Boolean, default: true },
     description: { type: String },
-    isMain: { type: Boolean, default: false }
+    isMain: { type: Boolean, default: false },
+    // B2B Approval Permission Flags (v2)
+    requireDMApproval: { type: Boolean, default: true },
+    requireCMApproval: { type: Boolean, default: true },
 }, { timestamps: true });
 
 const Warehouse = mongoose.model('Warehouse', warehouseSchema);
