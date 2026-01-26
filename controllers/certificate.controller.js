@@ -257,12 +257,12 @@ const sendCertificateRequestNotifications = async (certificateRequest) => {
 
 const requestCertificate = async (req, res) => {
   try {
-    console.log('Certificate request received:', req.body);
-    console.log('Files received:', req.files);
+    // console.log('Certificate request received:', req.body);
+    // console.log('Files received:', req.files);
 
     const { courseId } = req.body;
     const userId = req.user.id;
-    console.log('User ID:', userId);
+    // console.log('User ID:', userId);
 
     // Validate required fields
     if (!courseId) {
@@ -290,7 +290,7 @@ const requestCertificate = async (req, res) => {
       });
     }
 
-    console.log('Fetching course and enrollment details..., ', user);
+    // console.log('Fetching course and enrollment details..., ', user);
 
     // Find the course and user's enrollment
     const course = await Course.findById(courseId);
@@ -300,7 +300,7 @@ const requestCertificate = async (req, res) => {
         message: 'Course not found'
       });
     }
-     console.log('Fetching course details..., ', course);
+    //  console.log('Fetching course details..., ', course);
 
     // Find user's enrollment in the course
     const userEnrollment = course.enrolledUsers.find(
@@ -318,23 +318,59 @@ const requestCertificate = async (req, res) => {
     // ✅ PROGRAM-LEVEL CERTIFICATE RULES
     // =============================
     // Certificate is NOT per course. It can be requested ONLY from the last assigned main course
-    // after ALL main courses are completed and ALL program quizzes are passed.
+    // after ALL assigned main courses (based on role/warehouse) are completed and ALL program quizzes are passed.
 
-    const mainCourses = await Course.find({
+    /* ======================================================
+       1️⃣ GET CUSTOMER (ROLE + WAREHOUSE)
+    ====================================================== */
+    const customer = await Customer.findById(userId)
+      .populate('role')
+      .populate('warehouse');
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer not found'
+      });
+    }
+
+    // Handle warehouse - it can be an array or single value
+    const warehouseID = Array.isArray(customer.warehouse) && customer.warehouse.length > 0
+      ? customer.warehouse[0]._id
+      : customer.warehouse?._id || customer.warehouse;
+
+    /* ======================================================
+       2️⃣ ASSIGNED / ACCESSIBLE MAIN COURSES (SYLLABUS)
+    ====================================================== */
+    const assignedMainCourses = await Course.find({
+      isActive: true,
       courseType: 'Course',
-      'enrolledUsers.user': userId
+      $and: [
+        {
+          $or: [
+            { 'accessControl.roles': customer.role._id },
+            { 'accessControl.roles': { $size: 0 } }
+          ]
+        },
+        {
+          $or: [
+            { 'accessControl.stores': warehouseID },
+            { 'accessControl.stores': { $size: 0 } }
+          ]
+        }
+      ]
     })
-      .select('sequence chapters enrolledUsers')
+      .select('_id name sequence chapters enrolledUsers')
       .sort({ sequence: 1 });
 
-    if (!mainCourses || mainCourses.length === 0) {
+    if (!assignedMainCourses || assignedMainCourses.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'No assigned main courses found for certificate program',
       });
     }
 
-    const anchorCourse = mainCourses[mainCourses.length - 1];
+    const anchorCourse = assignedMainCourses[assignedMainCourses.length - 1];
     const anchorCourseId = anchorCourse._id.toString();
 
     if (courseId.toString() !== anchorCourseId) {
@@ -345,19 +381,103 @@ const requestCertificate = async (req, res) => {
       });
     }
 
-    // Ensure all main courses are completed (content completion; grade handled by program/remediation)
-    const allMainCoursesCompleted = mainCourses.every((c) => {
-      const enr = c.enrolledUsers.find((e) => e.user.toString() === userId.toString());
-      return enr && (enr.progress === 100 || enr.status === 'Completed' || enr.status === 'Done');
+    /* ======================================================
+       3️⃣ CHECK COMPLETION OF ALL ASSIGNED MAIN COURSES
+       (Calculate progress same way as getUserCourseProgress)
+    ====================================================== */
+    const allAssignedMainCoursesCompleted = assignedMainCourses.every((course) => {
+      const enrollment = course.enrolledUsers.find(
+        e => e && e.user && e.user.toString() === userId.toString()
+      );
+
+      if (!enrollment) {
+        console.log(`User not enrolled in assigned course ${course._id}`);
+        return false;
+      }
+
+      // Calculate completion the same way as getUserCourseProgress
+      if (!course.chapters || !Array.isArray(course.chapters)) {
+        // No chapters = auto-complete
+        return true;
+      }
+
+      let totalSections = 0;
+      let completedSections = 0;
+
+      for (const chapter of course.chapters) {
+        if (!chapter.sections || !Array.isArray(chapter.sections)) {
+          continue;
+        }
+
+        const chapterProgress = enrollment.chapterProgress?.find(
+          cp => cp && cp.chapterId && cp.chapterId.toString() === chapter._id.toString()
+        );
+
+        for (const section of chapter.sections) {
+          totalSections++;
+
+          // Auto-complete empty sections (no content, no quiz)
+          if ((!section.content || section.content.length === 0) && !section.quiz) {
+            completedSections++;
+            continue;
+          }
+
+          const sectionProgress = chapterProgress?.sectionProgress?.find(
+            sp => sp && sp.sectionId && sp.sectionId.toString() === section._id.toString()
+          );
+
+          // Check content completion
+          let sectionCompleted = true;
+          if (section.content && section.content.length > 0) {
+            const sectionContentCount = section.content.length;
+            const sectionCompletedContent = section.content.filter(content => {
+              const contentProgress = sectionProgress?.contentProgress?.find(
+                cp => cp && cp.contentId && cp.contentId.toString() === content._id.toString()
+              );
+
+              if (!contentProgress) return false;
+
+              if (content.contentType === 'video') {
+                return contentProgress.watchedDuration >= content.minimumWatchTime;
+              } else if (content.contentType === 'text') {
+                return contentProgress.completed;
+              }
+              return false;
+            }).length;
+
+            if (sectionCompletedContent < sectionContentCount) {
+              sectionCompleted = false;
+            }
+          }
+
+          // Quiz results do NOT lock progression. Section completion is content-only.
+          if (sectionCompleted) {
+            completedSections++;
+          }
+        }
+      }
+
+      // Course is completed if all sections are completed (or no sections)
+      const overallProgress = totalSections > 0 ? (completedSections / totalSections) * 100 : 100;
+      const isCompleted = overallProgress === 100;
+
+      if (!isCompleted) {
+        console.log(`Assigned course ${course._id} (${course.name}) not completed: ${completedSections}/${totalSections} sections`);
+      }
+
+      return isCompleted;
     });
 
-    if (!allMainCoursesCompleted) {
+    if (!allAssignedMainCoursesCompleted) {
       return res.status(400).json({
         success: false,
         message: 'Please complete all assigned main courses before requesting certificate.',
-        data: { anchorCourseId, allMainCoursesCompleted: false }
+        data: { anchorCourseId, allAssignedMainCoursesCompleted: false }
       });
     }
+
+    // Use assigned courses for quiz calculation
+    const mainCourses = assignedMainCourses;
     
     // Compute program quiz status (weighted) across ALL main courses
     const mainCourseIds = mainCourses.map((c) => c._id);
@@ -399,12 +519,12 @@ const requestCertificate = async (req, res) => {
     let programPercentage = totalWeight > 0 ? Math.round(weightedScore / totalWeight) : 0;
 
     // If there are no quizzes at all, treat the program as 100% when courses are completed
-    if (totalQuizzes === 0 && allMainCoursesCompleted) {
+    if (totalQuizzes === 0 && allAssignedMainCoursesCompleted) {
       programPercentage = 100;
     }
 
     let programGradeLabel = 'Incomplete';
-    if (hasAnyAttempt || (totalQuizzes === 0 && allMainCoursesCompleted)) {
+    if (hasAnyAttempt || (totalQuizzes === 0 && allAssignedMainCoursesCompleted)) {
       if (programPercentage >= 90) programGradeLabel = 'A';
       else if (programPercentage >= 80) programGradeLabel = 'B';
       else if (programPercentage >= 70) programGradeLabel = 'C';
@@ -480,14 +600,14 @@ const requestCertificate = async (req, res) => {
 
     // If short-course remediation passed, certificate is allowed even if main program % is low (or 0)
     const eligibleForCertificate =
-      allMainCoursesCompleted &&
+      allAssignedMainCoursesCompleted &&
       allAttempted &&
       (totalQuizzes === 0 || programPercentage >= passingThreshold || remediationPassed);
 
       console.log('Certificate eligibility check:', eligibleForCertificate)
 
     const requiresShortCourses =
-      allMainCoursesCompleted &&
+      allAssignedMainCoursesCompleted &&
       allAttempted &&
       totalQuizzes > 0 &&
       programPercentage < passingThreshold &&

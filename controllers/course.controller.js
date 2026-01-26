@@ -2304,6 +2304,52 @@ const getUserCourseProgress = async (req, res) => {
     const userId = req.user.id;
     console.log("Getting course progress for user:", userId);
 
+    /* ======================================================
+       1️⃣ GET CUSTOMER (ROLE + WAREHOUSE)
+    ====================================================== */
+    const customer = await Customer.findById(userId)
+      .populate('role')
+      .populate('warehouse');
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer not found'
+      });
+    }
+
+    // Handle warehouse - it can be an array or single value
+    const warehouseID = Array.isArray(customer.warehouse) && customer.warehouse.length > 0
+      ? customer.warehouse[0]._id
+      : customer.warehouse?._id || customer.warehouse;
+
+    /* ======================================================
+       2️⃣ ASSIGNED / ACCESSIBLE MAIN COURSES (SYLLABUS)
+    ====================================================== */
+    const assignedMainCourses = await Course.find({
+      isActive: true,
+      courseType: 'Course',
+      $and: [
+        {
+          $or: [
+            { 'accessControl.roles': customer.role._id },
+            { 'accessControl.roles': { $size: 0 } }
+          ]
+        },
+        {
+          $or: [
+            { 'accessControl.stores': warehouseID },
+            { 'accessControl.stores': { $size: 0 } }
+          ]
+        }
+      ]
+    }).select('_id name sequence enrolledUsers');
+
+    console.log(`Found ${assignedMainCourses.length} assigned main courses for user`);
+
+    /* ======================================================
+       3️⃣ USER ENROLLED COURSES (FOR PROGRESS DETAILS)
+    ====================================================== */
     // Find all courses where the user is enrolled
     const courses = await Course.find({
       'enrolledUsers.user': userId
@@ -2854,10 +2900,41 @@ const getUserCourseProgress = async (req, res) => {
     //   }
     // });
 
-    // ✅ PROGRAM-LEVEL CERTIFICATE RULES (ALL MAIN COURSES VISIBLE TO USER)
-    const allMainCoursesCompleted = mainCourses.length > 0 && mainCourses.every((c) =>
-      c.status === 'Completed' || c.status === 'Done' || c.progress === 100
+    // ✅ PROGRAM-LEVEL CERTIFICATE RULES (ALL ASSIGNED MAIN COURSES MUST BE COMPLETED)
+    // Check if all assigned main courses (based on role/warehouse) are completed
+    const assignedMainCourseIds = assignedMainCourses.map(c => c._id.toString());
+    const enrolledMainCoursesMap = new Map(
+      mainCourses.map(c => [c._id.toString(), c])
     );
+
+    // Check if all assigned courses are enrolled and completed
+    const allAssignedMainCoursesCompleted = assignedMainCourseIds.length > 0 && assignedMainCourseIds.every((assignedCourseId) => {
+      const enrolledCourse = enrolledMainCoursesMap.get(assignedCourseId);
+      if (!enrolledCourse) {
+        // console.log(`Assigned course ${assignedCourseId} is not enrolled`);
+        return false;
+      }
+      const isCompleted = enrolledCourse.status === 'Completed' || enrolledCourse.status === 'Done';
+      const hasFullProgress = enrolledCourse.progress === 100;
+      const result = isCompleted || hasFullProgress;
+      if (!result) {
+        // console.log(`Assigned course ${assignedCourseId} (${enrolledCourse.name}) not completed: status=${enrolledCourse.status}, progress=${enrolledCourse.progress}`);
+      }
+      return result;
+    });
+    // console.log(`allAssignedMainCoursesCompleted: ${allAssignedMainCoursesCompleted} (${assignedMainCourseIds.length} assigned, ${mainCourses.length} enrolled main courses)`);
+
+    // Also check all enrolled main courses for backward compatibility (used for short course logic)
+    const allMainCoursesCompleted = mainCourses.length > 0 && mainCourses.every((c) => {
+      const isCompleted = c.status === 'Completed' || c.status === 'Done';
+      const hasFullProgress = c.progress === 100;
+      const result = isCompleted || hasFullProgress;
+      if (!result) {
+        console.log(`Course ${c._id} (${c.name}) not completed: status=${c.status}, progress=${c.progress}`);
+      }
+      return result;
+    });
+    // console.log(`allMainCoursesCompleted: ${allMainCoursesCompleted} (${mainCourses.length} main courses)`);
 
     // Track total quizzes across all main courses for zero-quiz edge case
     const totalQuizzesAcrossMain = mainCourses.reduce(
@@ -2878,11 +2955,12 @@ const getUserCourseProgress = async (req, res) => {
     }
 
     const passingThreshold = 70;
+    // ✅ CERTIFICATE ELIGIBILITY: Must complete ALL ASSIGNED main courses (not just enrolled ones)
     let eligibleForCertificate =
-      allMainCoursesCompleted &&
+      allAssignedMainCoursesCompleted &&
       (totalQuizzesAcrossMain === 0 || programPercentage >= passingThreshold);
     let requiresShortCourses =
-      allMainCoursesCompleted &&
+      allAssignedMainCoursesCompleted &&
       totalQuizzesAcrossMain > 0 &&
       programPercentage < passingThreshold;
 
@@ -2903,7 +2981,51 @@ const getUserCourseProgress = async (req, res) => {
       }
     }
 
-    // Anchor course = last by sequence; only this course can request certificate
+    // ✅ PROCESS SHORT COURSES: Add lock/unlock logic based on assigned main course completion and program percentage
+    // console.log(`Short course unlock check: allAssignedMainCoursesCompleted=${allAssignedMainCoursesCompleted}, programPercentage=${programPercentage}, passingThreshold=${passingThreshold}`);
+    shortCourses.forEach((sc) => {
+      // Short course is locked by default
+      sc.isLocked = true;
+      sc.lockReason = 'Complete all main courses first';
+      
+      // Short course unlocks ONLY if:
+      // 1. All assigned main courses are completed
+      // 2. Program percentage < 70 (needs remediation)
+      // 3. Short course is not already completed/passed (grade < 70% AND progress < 100%)
+      if (allAssignedMainCoursesCompleted) {
+        if (programPercentage < passingThreshold) {
+          // Check if short course is already completed or passed
+          const isShortCourseCompleted = sc.status === 'Completed' || sc.status === 'Done' || sc.progress === 100;
+          const isShortCoursePassed = (sc.gradePercentage || 0) >= passingThreshold;
+          
+          // Unlock ONLY if short course is NOT completed AND NOT passed
+          // This means the short course needs remediation
+          if (!isShortCourseCompleted && !isShortCoursePassed) {
+            // Short course is unlocked for remediation
+            sc.isLocked = false;
+            sc.lockReason = null;
+            console.log(`Short course ${sc._id} unlocked for remediation (progress: ${sc.progress}%, grade: ${sc.gradePercentage}%)`);
+          } else {
+            // Short course is already completed/passed, so it's accessible but show as completed
+            sc.isLocked = false;
+            sc.lockReason = 'Already completed';
+            console.log(`Short course ${sc._id} already completed/passed (progress: ${sc.progress}%, grade: ${sc.gradePercentage}%)`);
+          }
+        } else {
+          // Program percentage >= 70, short courses not needed
+          sc.isLocked = true;
+          sc.lockReason = 'Program percentage is 70% or above. Short courses not required.';
+          console.log(`Short course ${sc._id} locked: Program percentage (${programPercentage}%) >= ${passingThreshold}%`);
+        }
+      } else {
+        // Not all main courses completed yet
+        sc.isLocked = true;
+        sc.lockReason = 'Complete all main courses first';
+        console.log(`Short course ${sc._id} locked: Not all main courses completed`);
+      }
+    });
+
+      // Anchor course = last by sequence; only this course can request certificate
     const sortedMainCourses = [...mainCourses].sort(
       (a, b) => (a.sequence || 0) - (b.sequence || 0)
     );
@@ -2912,6 +3034,7 @@ const getUserCourseProgress = async (req, res) => {
         ? sortedMainCourses[sortedMainCourses.length - 1]._id.toString()
         : null;
 
+    // Process main courses for certificate eligibility
     processedCourses.forEach((c) => {
       if (c.courseType !== 'Course') {
         c.certificateInfo.eligible = false;
@@ -2957,8 +3080,10 @@ const getUserCourseProgress = async (req, res) => {
           // ✅ PROGRAM SUMMARY
           programStats: {
             totalMainCourses: mainCourses.length,
+            totalAssignedMainCourses: assignedMainCourseIds.length,
             totalQuizzes: totalQuizzesAcrossMain,
             allMainCoursesCompleted,
+            allAssignedMainCoursesCompleted,
             percentage: programPercentage,
             passingThreshold,
             eligibleForCertificate,
@@ -4813,14 +4938,76 @@ const getAvailableCoursesForUser = async (req, res) => {
       return courseObj;
     });
 
-    // Process short courses (all short courses are unlocked)
+    // Process short courses with lock/unlock logic
+    // Short courses unlock ONLY if:
+    // 1. All main courses are completed
+    // 2. Program percentage < 70 (needs remediation)
+    // 3. Short course is not already completed/passed (>= 70%)
+
     const processedShortCourses = shortCourses.map(course => {
       const courseObj = course.toObject();
 
       // Check if user is enrolled
       const isEnrolled = enrollmentMap.hasOwnProperty(course._id.toString());
       courseObj.isEnrolled = isEnrolled;
-      courseObj.unlockStatus = 'Unlocked'; // Short courses are always unlocked
+      
+      // Default: Short course is locked
+      let unlockStatus = 'Locked';
+      let lockReason = 'Complete all main courses first';
+      
+      // Check if all main courses are completed
+      const allMainCoursesCompleted = mainCourses.length > 0 && mainCourses.every((c) => {
+        const enrollment = enrollmentMap[c._id.toString()];
+        return enrollment && (
+          enrollment.progress === 100 ||
+          enrollment.status === 'Completed' ||
+          enrollment.status === 'Done'
+        );
+      });
+      
+      if (allMainCoursesCompleted) {
+        // Calculate program percentage from main courses
+        const programPercentage = mainCourses.length > 0
+          ? Math.round(mainCourses.reduce((sum, c) => {
+              const enrollment = enrollmentMap[c._id.toString()];
+              return sum + (enrollment?.gradePercentage || 0);
+            }, 0) / mainCourses.length)
+          : 0;
+        
+        const passingThreshold = 70;
+        
+        if (programPercentage < passingThreshold) {
+          // Check if short course is already completed or passed
+          const enrollment = enrollmentMap[course._id.toString()];
+          const isShortCourseCompleted = enrollment && (
+            enrollment.progress === 100 ||
+            enrollment.status === 'Completed' ||
+            enrollment.status === 'Done'
+          );
+          const isShortCoursePassed = enrollment && enrollment.gradePercentage >= passingThreshold;
+          
+          if (!isShortCourseCompleted && !isShortCoursePassed) {
+            // Short course is unlocked for remediation
+            unlockStatus = 'Unlocked';
+            lockReason = null;
+          } else if (isShortCourseCompleted || isShortCoursePassed) {
+            // Short course is completed/passed, so it's accessible
+            unlockStatus = 'Unlocked';
+            lockReason = 'Already completed';
+          }
+        } else {
+          // Program percentage >= 70, short courses not needed
+          unlockStatus = 'Locked';
+          lockReason = 'Program percentage is 70% or above. Short courses not required.';
+        }
+      } else {
+        // Not all main courses completed yet
+        unlockStatus = 'Locked';
+        lockReason = 'Complete all main courses first';
+      }
+      
+      courseObj.unlockStatus = unlockStatus;
+      courseObj.lockReason = lockReason;
 
       // If enrolled, set status based on progress
       if (isEnrolled) {
@@ -7050,7 +7237,37 @@ const getDashboardSummary = async (req, res) => {
 
 
 
+// Upload image from React Quill editor
+const uploadQuillImage = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No image file provided'
+      });
+    }
+
+    // Get the file path and convert backslashes to forward slashes
+    const imagePath = req.file.path.replace(/\\/g, '/');
+    
+    // Return the URL that can be used in React Quill
+    // The frontend will need to prepend the BASE_API
+    res.status(200).json({
+      success: true,
+      url: `/${imagePath}` // Return relative path, frontend will prepend BASE_API
+    });
+  } catch (error) {
+    console.error('Error uploading Quill image:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to upload image',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
+  uploadQuillImage,
   createCourse,
   updateVideoLikeDislike,
   getUserCourseProgress,

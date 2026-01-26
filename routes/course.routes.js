@@ -3,7 +3,11 @@ const router = express.Router();
 const controller = require('../controllers/course.controller');
 const authMiddleware = require('../middlewares/authMiddleware.js');
 const handleUpload = require('../config/courseMulter');
+const handleQuillImageUpload = require('../config/quillImageMulter');
 const checkSuperuserOrPermission = require('../middlewares/checkSuperuserOrPermission');
+
+// React Quill image upload endpoint
+router.post('/upload-quill-image', [authMiddleware, handleQuillImageUpload], controller.uploadQuillImage);
 
 router.post('/', [authMiddleware, handleUpload], controller.createCourse);
 // Toggle like/dislike content
