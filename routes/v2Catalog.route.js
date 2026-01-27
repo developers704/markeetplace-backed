@@ -17,6 +17,11 @@ const {
   deleteAllVendorData,
   downloadVendorCatalogTemplate,
   downloadSkuInventoryTemplate,
+  // Category management
+  getV2Categories,
+  getV2SubcategoriesByCategory,
+  getV2SubSubcategoriesBySubCategory,
+  getV2CategoriesWithSubcategories,
 } = require('../controllers/v2Catalog.controller');
 
 /**
@@ -31,6 +36,12 @@ const {
 router.get('/products', listVendorProducts);
 router.get('/products/:id', getVendorProductById);
 router.get('/skus/:skuId', getSkuById);
+
+// Category management routes (public)
+router.get('/categories', getV2Categories);
+router.get('/categories/with-subcategories', getV2CategoriesWithSubcategories);
+router.get('/categories/:categoryId/subcategories', getV2SubcategoriesByCategory);
+router.get('/subcategories/:subCategoryId/subsubcategories', getV2SubSubcategoriesBySubCategory);
 
 // Template downloads (public)
 router.get('/templates/vendor-catalog', downloadVendorCatalogTemplate);

@@ -7,6 +7,7 @@ const Sku = require('../models/sku.model');
 const SkuInventory = require('../models/skuInventory.model');
 const City = require('../models/city.model');
 const Warehouse = require('../models/warehouse.model');
+const { Category, SubCategory, SubSubCategory } = require('../models/productCategory.model');
 const { deleteFile } = require('../config/fileOperations');
 
 const normalizeKey = (value) => String(value || '').trim().toUpperCase();
@@ -118,6 +119,8 @@ const importVendorCatalog = async (req, res) => {
 
           const brand = String(pick(row, ['brand','branddesign'])).trim();
           const category = String(pick(row, ['category'])).trim();
+          const subcategory = String(pick(row, ['subcategory', 'subcategorydepartment'])).trim();
+          const subsubcategory = String(pick(row, ['subsubcategory'])).trim();
           const description = String(pick(row, ['description', 'desc'])).trim();
 
           const metalColor = String(pick(row, ['metalcolor', 'color'])).trim();
@@ -153,6 +156,9 @@ const importVendorCatalog = async (req, res) => {
             'price',
             'tag',
             'category',
+            'subcategory',
+            'subcategorydepartment',
+            'subsubcategory',
             'brand',
             'images',
             'image',
@@ -179,6 +185,8 @@ const importVendorCatalog = async (req, res) => {
               title,
               brand,
               category,
+              subcategory,
+              subsubcategory,
               description,
               rows: [],
             });
@@ -188,6 +196,8 @@ const importVendorCatalog = async (req, res) => {
             if (!g.title && title) g.title = title;
             if (!g.brand && brand) g.brand = brand;
             if (!g.category && category) g.category = category;
+            if (!g.subcategory && subcategory) g.subcategory = subcategory;
+            if (!g.subsubcategory && subsubcategory) g.subsubcategory = subsubcategory;
             if (!g.description && description) g.description = description;
           }
 
@@ -233,6 +243,113 @@ const importVendorCatalog = async (req, res) => {
       });
     }
 
+    // Helper function to create or find category
+    const getOrCreateCategory = async (categoryName) => {
+      if (!categoryName) return null;
+      const formattedName = categoryName
+        .trim()
+        .split(' ')
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+        .join(' ');
+      
+      let category = await Category.findOne({ name: formattedName });
+      if (!category) {
+        category = new Category({ name: formattedName });
+        await category.save();
+      }
+      return category._id;
+    };
+
+    // Helper function to create or find subcategory
+    const getOrCreateSubCategory = async (subcategoryName, parentCategoryId) => {
+      if (!subcategoryName || !parentCategoryId) return null;
+      const formattedName = subcategoryName
+        .trim()
+        .split(' ')
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+        .join(' ');
+      
+      let subcategory = await SubCategory.findOne({ 
+        name: formattedName, 
+        parentCategory: parentCategoryId 
+      });
+      if (!subcategory) {
+        subcategory = new SubCategory({ 
+          name: formattedName, 
+          parentCategory: parentCategoryId 
+        });
+        await subcategory.save();
+      }
+      return subcategory._id;
+    };
+
+    // Helper function to create or find sub-subcategory
+    const getOrCreateSubSubCategory = async (subsubcategoryName, parentSubCategoryId) => {
+      if (!subsubcategoryName || !parentSubCategoryId) return null;
+      const formattedName = subsubcategoryName
+        .trim()
+        .split(' ')
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+        .join(' ');
+      
+      let subsubcategory = await SubSubCategory.findOne({ 
+        name: formattedName, 
+        parentSubCategory: parentSubCategoryId 
+      });
+      if (!subsubcategory) {
+        subsubcategory = new SubSubCategory({ 
+          name: formattedName, 
+          parentSubCategory: parentSubCategoryId 
+        });
+        await subsubcategory.save();
+      }
+      return subsubcategory._id;
+    };
+
+    // Process categories for all groups
+    const categoryMap = new Map(); // categoryName -> categoryId
+    const subcategoryMap = new Map(); // "parentCategoryId_subcategoryName" -> subcategoryId
+    const subsubcategoryMap = new Map(); // "parentSubCategoryId_subsubcategoryName" -> subsubcategoryId
+
+    for (const [k, g] of groups.entries()) {
+      if (g.category) {
+        let categoryId = categoryMap.get(g.category);
+        if (!categoryId) {
+          categoryId = await getOrCreateCategory(g.category);
+          if (categoryId) {
+            categoryMap.set(g.category, categoryId);
+          }
+        }
+        g.categoryId = categoryId;
+
+        // Process subcategory if exists
+        if (g.subcategory && categoryId) {
+          const subcategoryKey = `${categoryId}_${g.subcategory}`;
+          let subcategoryId = subcategoryMap.get(subcategoryKey);
+          if (!subcategoryId) {
+            subcategoryId = await getOrCreateSubCategory(g.subcategory, categoryId);
+            if (subcategoryId) {
+              subcategoryMap.set(subcategoryKey, subcategoryId);
+            }
+          }
+          g.subcategoryId = subcategoryId;
+
+          // Process sub-subcategory if exists
+          if (g.subsubcategory && subcategoryId) {
+            const subsubcategoryKey = `${subcategoryId}_${g.subsubcategory}`;
+            let subsubcategoryId = subsubcategoryMap.get(subsubcategoryKey);
+            if (!subsubcategoryId) {
+              subsubcategoryId = await getOrCreateSubSubCategory(g.subsubcategory, subcategoryId);
+              if (subsubcategoryId) {
+                subsubcategoryMap.set(subsubcategoryKey, subsubcategoryId);
+              }
+            }
+            g.subsubcategoryId = subsubcategoryId;
+          }
+        }
+      }
+    }
+
     const vendorOps = vendorKeys.map((vendorModelKey) => {
       const g = groups.get(vendorModelKey);
       const set = {
@@ -240,7 +357,9 @@ const importVendorCatalog = async (req, res) => {
         vendorModelKey: g.vendorModelKey,
         title: g.title,
         brand: g.brand,
-        category: g.category,
+        category: g.categoryId || g.category, // Use ObjectId if available, fallback to string
+        subcategory: g.subcategoryId || null,
+        subsubcategory: g.subsubcategoryId || null,
         description: g.description,
         updatedAt: now,
       };

@@ -17,7 +17,22 @@ const vendorProductSchema = new mongoose.Schema(
 
     title: { type: String, required: true, trim: true },
     brand: { type: String, required: true, trim: true },
-    category: { type: String, required: true, trim: true },
+    // Support both string (legacy) and ObjectId (new) for backward compatibility
+    category: { 
+      type: mongoose.Schema.Types.Mixed, 
+      required: true,
+      // Can be String or ObjectId reference
+    },
+    subcategory: { 
+      type: mongoose.Schema.Types.ObjectId, 
+      ref: 'SubCategory',
+      default: null 
+    },
+    subsubcategory: { 
+      type: mongoose.Schema.Types.ObjectId, 
+      ref: 'SubSubCategory',
+      default: null 
+    },
     description: { type: String, default: '', trim: true },
 
     // Default SKU (variant) for listing card selection
@@ -40,6 +55,8 @@ vendorProductSchema.pre('validate', function setVendorModelKey(next) {
 vendorProductSchema.index({ vendorModelKey: 1 }, { unique: true });
 vendorProductSchema.index({ brand: 1 });
 vendorProductSchema.index({ category: 1 });
+vendorProductSchema.index({ subcategory: 1 });
+vendorProductSchema.index({ subsubcategory: 1 });
 
 const VendorProduct = mongoose.model('VendorProduct', vendorProductSchema);
 

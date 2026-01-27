@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const VendorProduct = require('../models/vendorProduct.model');
 const Sku = require('../models/sku.model');
 const SkuInventory = require('../models/skuInventory.model');
+const { Category, SubCategory, SubSubCategory } = require('../models/productCategory.model');
 
 const escapeRegex = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const parseMulti = (value) =>
@@ -47,6 +48,8 @@ const listVendorProducts = async (req, res) => {
     const search = String(req.query.search || '').trim();
     const brandRaw = req.query.brand;
     const categoryRaw = req.query.category;
+    const subcategoryRaw = req.query.subcategory;
+    const subsubcategoryRaw = req.query.subsubcategory;
     const minPrice = parseFloat(req.query.minPrice) || null;
     const maxPrice = parseFloat(req.query.maxPrice) || null;
 
@@ -54,16 +57,61 @@ const listVendorProducts = async (req, res) => {
     const brandValues = parseMulti(brandRaw);
     const categoryValues = parseMulti(categoryRaw);
 
+    // Brand filtering (string-based)
     if (brandValues.length === 1) {
       match.brand = toLooseEqualsRegex(brandValues[0]);
     } else if (brandValues.length > 1) {
       match.brand = { $in: brandValues.map(toLooseEqualsRegex).filter(Boolean) };
     }
 
-    if (categoryValues.length === 1) {
-      match.category = toLooseEqualsRegex(categoryValues[0]);
-    } else if (categoryValues.length > 1) {
-      match.category = { $in: categoryValues.map(toLooseEqualsRegex).filter(Boolean) };
+    // Category filtering - support both ObjectId and string
+    if (categoryRaw) {
+      if (mongoose.Types.ObjectId.isValid(categoryRaw)) {
+        // If it's a valid ObjectId, search by ObjectId or category name
+        const category = await Category.findById(categoryRaw);
+        if (category) {
+          // Use $or only if not already set
+          if (!match.$or) {
+            match.$or = [];
+          }
+          // Add category matching conditions
+          const categoryConditions = [
+            { category: category._id },
+            { category: category.name }
+          ];
+          // If there are existing $or conditions, combine them
+          if (match.$or.length > 0) {
+            match.$and = [
+              { $or: match.$or },
+              { $or: categoryConditions }
+            ];
+            delete match.$or;
+          } else {
+            match.$or = categoryConditions;
+          }
+        }
+      } else {
+        // String-based category search (legacy)
+        if (categoryValues.length === 1) {
+          match.category = toLooseEqualsRegex(categoryValues[0]);
+        } else if (categoryValues.length > 1) {
+          match.category = { $in: categoryValues.map(toLooseEqualsRegex).filter(Boolean) };
+        }
+      }
+    }
+
+    // Subcategory filtering (ObjectId only)
+    if (subcategoryRaw) {
+      if (mongoose.Types.ObjectId.isValid(subcategoryRaw)) {
+        match.subcategory = new mongoose.Types.ObjectId(subcategoryRaw);
+      }
+    }
+
+    // Sub-subcategory filtering (ObjectId only)
+    if (subsubcategoryRaw) {
+      if (mongoose.Types.ObjectId.isValid(subsubcategoryRaw)) {
+        match.subsubcategory = new mongoose.Types.ObjectId(subsubcategoryRaw);
+      }
     }
 
     // Price range filter - will be applied after calculating minPrice/maxPrice
@@ -78,7 +126,7 @@ const listVendorProducts = async (req, res) => {
     // Search: vendorModel, title, brand, category, and SKU
     if (search) {
       const searchRegex = new RegExp(escapeRegex(search), 'i');
-      match.$or = [
+      const searchConditions = [
         { vendorModel: searchRegex },
         { title: searchRegex },
         { brand: searchRegex },
@@ -90,10 +138,24 @@ const listVendorProducts = async (req, res) => {
       if (matchingSkus.length > 0) {
         const productIds = matchingSkus.map((s) => s.productId).filter(Boolean);
         if (productIds.length > 0) {
-          // Add productIds to $or array
-          if (!match.$or) match.$or = [];
-          match.$or.push({ _id: { $in: productIds } });
+          searchConditions.push({ _id: { $in: productIds } });
         }
+      }
+
+      // Combine search with existing $or if present
+      if (match.$or) {
+        // If $or already exists (from category filter), use $and
+        if (match.$and) {
+          match.$and.push({ $or: searchConditions });
+        } else {
+          match.$and = [
+            { $or: match.$or },
+            { $or: searchConditions }
+          ];
+          delete match.$or;
+        }
+      } else {
+        match.$or = searchConditions;
       }
     }
 
@@ -173,11 +235,29 @@ const listVendorProducts = async (req, res) => {
                 ]
               : []),
             {
+              $lookup: {
+                from: 'subcategories',
+                localField: 'subcategory',
+                foreignField: '_id',
+                as: 'subcategoryDoc'
+              }
+            },
+            {
+              $lookup: {
+                from: 'subsubcategories',
+                localField: 'subsubcategory',
+                foreignField: '_id',
+                as: 'subsubcategoryDoc'
+              }
+            },
+            {
               $project: {
                 vendorModel: 1,
                 title: 1,
                 brand: 1,
-                category: 1,
+                category: 1, // Will be populated in post-processing
+                subcategory: { $ifNull: [{ $first: '$subcategoryDoc' }, null] },
+                subsubcategory: { $ifNull: [{ $first: '$subsubcategoryDoc' }, null] },
                 description: 1,
                 createdAt: 1,
                 updatedAt: 1,
@@ -195,7 +275,7 @@ const listVendorProducts = async (req, res) => {
                   metalColor: '$defaultSkuDoc.metalColor',
                   metalType: '$defaultSkuDoc.metalType',
                   size: '$defaultSkuDoc.size',
-                   attributes: '$defaultSkuDoc.attributes',
+                  attributes: '$defaultSkuDoc.attributes',
                 },
                 // skus: '$skuDocs',
               },
@@ -267,9 +347,32 @@ const getVendorProductById = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid product id' });
     }
 
-    const vendorProduct = await VendorProduct.findById(id).lean();
+    const vendorProduct = await VendorProduct.findById(id)
+      .populate('subcategory', 'name _id image description')
+      .populate('subsubcategory', 'name _id image description')
+      .lean();
+    
     if (!vendorProduct) {
       return res.status(404).json({ success: false, message: 'Vendor product not found' });
+    }
+
+    // Populate category (can be ObjectId or string)
+    if (vendorProduct.category) {
+      if (mongoose.Types.ObjectId.isValid(vendorProduct.category)) {
+        const category = await Category.findById(vendorProduct.category)
+          .select('_id name image description')
+          .lean();
+        if (category) {
+          vendorProduct.category = category;
+        }
+      } else if (typeof vendorProduct.category === 'string') {
+        const category = await Category.findOne({ name: vendorProduct.category })
+          .select('_id name image description')
+          .lean();
+        if (category) {
+          vendorProduct.category = category;
+        }
+      }
     }
 
     const skus = await Sku.find({ productId: vendorProduct._id, isActive: true })
@@ -592,6 +695,218 @@ const downloadSkuInventoryTemplate = async (req, res) => {
   }
 };
 
+/**
+ * ======================================================
+ * CATEGORY MANAGEMENT FOR V2 CATALOG
+ * ======================================================
+ */
+
+/**
+ * GET /api/v2/categories
+ * Get all categories with product counts
+ */
+const getV2Categories = async (req, res) => {
+  try {
+    const categories = await Category.find({ isNotShowed: false })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const categoriesWithCount = await Promise.all(
+      categories.map(async (category) => {
+        const productCount = await VendorProduct.countDocuments({
+          $or: [
+            { category: category._id.toString() },
+            { category: category.name }
+          ]
+        });
+        return {
+          ...category,
+          productCount
+        };
+      })
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Categories retrieved successfully',
+      data: categoriesWithCount
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch categories',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * GET /api/v2/categories/:categoryId/subcategories
+ * Get subcategories by category ID
+ */
+const getV2SubcategoriesByCategory = async (req, res) => {
+  try {
+    const { categoryId } = req.params;
+
+    if (!mongoose.isValidObjectId(categoryId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid category ID'
+      });
+    }
+
+    const subcategories = await SubCategory.find({ parentCategory: categoryId })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const subcategoriesWithCount = await Promise.all(
+      subcategories.map(async (subcategory) => {
+        const productCount = await VendorProduct.countDocuments({
+          subcategory: subcategory._id
+        });
+        return {
+          ...subcategory,
+          productCount
+        };
+      })
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Subcategories retrieved successfully',
+      data: subcategoriesWithCount
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch subcategories',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * GET /api/v2/subcategories/:subCategoryId/subsubcategories
+ * Get sub-subcategories by subcategory ID
+ */
+const getV2SubSubcategoriesBySubCategory = async (req, res) => {
+  try {
+    const { subCategoryId } = req.params;
+
+    if (!mongoose.isValidObjectId(subCategoryId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid subcategory ID'
+      });
+    }
+
+    const subSubcategories = await SubSubCategory.find({ parentSubCategory: subCategoryId })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const subSubcategoriesWithCount = await Promise.all(
+      subSubcategories.map(async (subSubcategory) => {
+        const productCount = await VendorProduct.countDocuments({
+          subsubcategory: subSubcategory._id
+        });
+        return {
+          ...subSubcategory,
+          productCount
+        };
+      })
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Sub-subcategories retrieved successfully',
+      data: subSubcategoriesWithCount
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch sub-subcategories',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * GET /api/v2/categories/with-subcategories
+ * Get categories with nested subcategories and sub-subcategories
+ */
+const getV2CategoriesWithSubcategories = async (req, res) => {
+  try {
+    const categories = await Category.find({ isNotShowed: false })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const categoriesWithSubs = await Promise.all(
+      categories.map(async (category) => {
+        const subcategories = await SubCategory.find({ parentCategory: category._id })
+          .sort({ createdAt: 1 })
+          .lean();
+
+        const subcategoriesWithSubSubs = await Promise.all(
+          subcategories.map(async (subcategory) => {
+            const subSubcategories = await SubSubCategory.find({
+              parentSubCategory: subcategory._id
+            })
+              .sort({ createdAt: 1 })
+              .lean();
+
+            const subSubcategoriesWithCount = await Promise.all(
+              subSubcategories.map(async (subSubcategory) => {
+                const productCount = await VendorProduct.countDocuments({
+                  subsubcategory: subSubcategory._id
+                });
+                return {
+                  ...subSubcategory,
+                  productCount
+                };
+              })
+            );
+
+            const productCount = await VendorProduct.countDocuments({
+              subcategory: subcategory._id
+            });
+
+            return {
+              ...subcategory,
+              productCount,
+              subSubcategories: subSubcategoriesWithCount
+            };
+          })
+        );
+
+        const productCount = await VendorProduct.countDocuments({
+          $or: [
+            { category: category._id.toString() },
+            { category: category.name }
+          ]
+        });
+
+        return {
+          ...category,
+          productCount,
+          subcategories: subcategoriesWithSubSubs
+        };
+      })
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Categories with subcategories retrieved successfully',
+      data: categoriesWithSubs
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch categories with subcategories',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   listVendorProducts,
   getVendorProductById,
@@ -602,6 +917,11 @@ module.exports = {
   deleteAllVendorData,
   downloadVendorCatalogTemplate,
   downloadSkuInventoryTemplate,
+  // Category management
+  getV2Categories,
+  getV2SubcategoriesByCategory,
+  getV2SubSubcategoriesBySubCategory,
+  getV2CategoriesWithSubcategories,
 };
 
 
