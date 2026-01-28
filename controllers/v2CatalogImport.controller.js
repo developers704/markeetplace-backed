@@ -678,13 +678,13 @@ const importSkuInventory = async (req, res) => {
         ? (isObjectIdLike(r.cityRaw) ? cityMap.get(String(r.cityRaw)) : cityMap.get(r.cityRaw))
         : null;
       // If cityRaw was provided but not found, log warning but continue with null
-      if (r.cityRaw && !cityDoc) {
-        errors.push({
-          row: r.rowNumber,
-          error: `City not found: ${r.cityRaw} (using null)`,
-          data: r,
-        });
-      }
+      // if (r.cityRaw && !cityDoc) {
+      //   errors.push({
+      //     row: r.rowNumber,
+      //     error: `City not found: ${r.cityRaw} (using null)`,
+      //     data: r,
+      //   });
+      // }
 
       const cityId = cityDoc?._id || null;
       const mergeKey = `${skuDoc._id}_${warehouseDoc._id}_${cityId || 'null'}`;
