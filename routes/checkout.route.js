@@ -18,6 +18,7 @@ const {
     approveOrder,
     getPendingApprovals,
     warehouseToWarehouseTransfer,
+    specialProductCheckout,
     approveNormalWarehouseOrder
 } = require('../controllers/checkout.controller');
 const guestOrAuthMiddleware = require('../middlewares/guestOrAuthMiddleware');
@@ -31,6 +32,8 @@ router.post('/calculate-total', guestOrAuthMiddleware, checkAccountStatus, calcu
 router.post('/process', guestOrAuthMiddleware, checkAccountStatus, placeOrder);
 // warehouse to warehouse request order 
 router.post('/store-request-order', guestOrAuthMiddleware, checkAccountStatus, warehouseToWarehouseTransfer);
+// special products checkout (supplies) - direct admin request, no warehouse stock check
+router.post('/special-product-checkout', guestOrAuthMiddleware, checkAccountStatus, specialProductCheckout);
 router.post(
     '/wallet/update',
     authMiddleware,

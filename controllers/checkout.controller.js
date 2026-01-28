@@ -1246,6 +1246,272 @@ await sendEmail(mailOptionsAdmin);
   }
 };
 
+// Special Products Checkout - Direct Admin Request (No Warehouse Stock Check)
+// For supplies products that will be ordered from external platforms (Amazon, eBay, etc.)
+const specialProductCheckout = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const {
+      cartId,
+      shippingMethodId,
+      paymentMethod,
+      specialInstructions,
+      couponCode,
+      cityId,
+      warehouse,
+    } = req.body;
+
+    const items = Array.isArray(req.body) ? req.body : req.body.items || [];
+    if (!items || items.length === 0) throw new Error("No items to process");
+
+    // Validate all items are SpecialProducts
+    const nonSpecialProducts = items.filter(item => item.itemType !== 'SpecialProduct');
+    if (nonSpecialProducts.length > 0) {
+      throw new Error("This checkout is only for Special Products (Supplies). Please use regular checkout for other products.");
+    }
+
+    // Buyer info
+    const customer = await Customer.findById(req.user.id).populate("warehouse");
+    if (!customer) throw new Error("Customer not found");
+
+    // Cart
+    const cart = await Cart.findById(cartId).populate("items.item");
+    if (!cart) throw new Error("Cart not found");
+
+    // Validate buyer warehouse
+    const buyerWarehouseId = warehouse?._id || warehouse;
+    const buyerWarehouse = await Warehouse.findById(buyerWarehouseId);
+    if (!buyerWarehouse) throw new Error("Buyer warehouse not found");
+
+    // Calculate totals
+    const totals = await calculateOrderTotalsHelper(items, couponCode);
+
+    // Create Order for Admin Approval
+    const order = new Order({
+      orderId: generateOrderNumber(),
+      customer: customer._id,
+      warehouse: buyerWarehouseId,
+      createdBy: req.user.id,
+      approvalStatus: "PENDING",
+      // Mark in specialInstructions that this is a special product order
+      specialInstructions: (specialInstructions || "") + " [SPECIAL_PRODUCT_ORDER - To be fulfilled from external platforms: Amazon, eBay, etc.]",
+
+      items: items.map((item) => ({
+        itemType: item.itemType,
+        product: item.item._id,
+        quantity: item.quantity,
+        price: item.price,
+        color: item.color ?? null,
+        // No sellerWarehouseId for special products - will be ordered externally
+        isMain: false
+      })),
+
+      shippingMethod: shippingMethodId || null,
+      city: cityId || null,
+      subtotal: totals.subtotal,
+      shippingCost: 0, // No shipping cost for special products (external fulfillment)
+      grandTotal: totals.grandTotal,
+      couponUsed: couponCode || null,
+      paymentMethod: paymentMethod || "pending",
+      paymentStatus: "Pending",
+      orderStatus: "Pending",
+    });
+
+    // No stock deduction - these products are ordered externally
+    // No wallet deduction - payment handled externally
+
+    // Save order
+    await order.save({ session });
+
+    // Create Admin Notification for Approval
+    const adminNotification = new AdminNotification({
+      user: "66c5bc4b3c1526016eeac109", // Admin user ID
+      type: "ORDER",
+      content: `New Special Product Order #${order.orderId} from ${customer.username || customer.email}. Total: $${order.grandTotal}. These products will be ordered from external platforms (Amazon, eBay, etc.).`,
+      resourceId: order._id,
+      resourceModel: "Order",
+      priority: "high",
+    });
+
+    await adminNotification.save({ session });
+
+    // Customer Notification
+    await new Notification({
+      user: customer._id,
+      content: `Your special product order #${order.orderId} has been submitted and is awaiting admin approval.`,
+      url: `/orders/${order._id}`,
+      type: "ORDER"
+    }).save({ session });
+
+    // Email Templates
+    const customerOrderEmail = (order) => `
+    <table width="100%" cellpadding="0" cellspacing="0" style="font-family:Arial, sans-serif; background:#f7f7f7; padding:20px;">
+    <tr>
+    <td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:white; border-radius:8px; padding:20px;">
+        <tr>
+          <td style="text-align:center; padding-bottom:20px;">
+            <h2 style="color:#333; margin:0;">Special Product Order Submitted</h2>
+            <p style="color:#666; margin:0;">Thank you for your order!</p>
+          </td>
+        </tr>
+        
+        <tr>
+          <td>
+            <p style="color:#333; font-size:15px;">
+              Hello <strong>${order?.customerName}</strong>,
+            </p>
+            <p style="color:#555;">
+              Your special product order <strong>#${order?.orderId}</strong> has been submitted and is now 
+              <strong>pending admin approval</strong>. These products will be ordered from external platforms.
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:15px; background:#fafafa; border-radius:6px;">
+            <h3 style="margin:0 0 10px 0; color:#333;">Order Summary</h3>
+            <p style="margin:0; color:#555;">
+              <strong>Total Items:</strong> ${order?.items?.length} <br>
+              <strong>Amount:</strong> $${order?.totalAmount} <br>
+              <strong>Warehouse:</strong> ${order?.warehouseName}
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center" style="padding:25px 0;">
+            <a href="https://vallianimarketplace.com/en/profile-details?option=My%20Order" 
+               style="padding:12px 22px; background:#4f46e5; color:white; 
+               text-decoration:none; border-radius:6px;">
+               View Order
+            </a>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="color:#999; font-size:12px; text-align:center;">
+            This is an automated message — please do not reply.
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+    </table>
+    `;
+
+    const adminOrderEmail = (order) => `
+    <table width="100%" cellpadding="0" cellspacing="0" style="font-family:Arial, sans-serif; background:#f7f7f7; padding:20px;">
+    <tr>
+    <td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:white; border-radius:8px; padding:20px;">
+        <tr>
+          <td style="text-align:center; padding-bottom:20px;">
+            <h2 style="color:#333; margin:0;">New Special Product Order Requires Approval</h2>
+            <p style="color:#666; margin:0;">Order #${order?.orderId}</p>
+          </td>
+        </tr>
+        
+        <tr>
+          <td>
+            <p style="color:#333; font-size:15px;">
+              Hello <strong>Admin</strong>,
+            </p>
+            <p style="color:#555;">
+              A new special product order has been submitted. These products need to be ordered from external platforms (Amazon, eBay, etc.).
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:15px; background:#fafafa; border-radius:6px;">
+            <h3 style="margin:0 0 10px 0; color:#333;">Order Details</h3>
+            <p style="margin:0; color:#555;">
+              <strong>Order ID:</strong> ${order?.orderId} <br>
+              <strong>Customer:</strong> ${order?.customerName} <br>
+              <strong>Total Items:</strong> ${order?.items.length} <br>
+              <strong>Amount:</strong> $${order?.totalAmount} <br>
+              <strong>Warehouse:</strong> ${order?.warehouseName}
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="center" style="padding:25px 0;">
+            <a href="https://portal.vallianimarketplace.com/#/orders/requested-orders" 
+               style="padding:12px 22px; background:#16a34a; color:white; 
+               text-decoration:none; border-radius:6px;">
+               Review & Approve Order
+            </a>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="color:#999; font-size:12px; text-align:center;">
+            This is an automated message — please do not reply.
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  </table>
+  `;
+
+    // Send Customer Email
+    if (customer?.email) {
+      const mailOptions = {
+        to: customer.email,
+        subject: `Special Product Order #${order.orderId} Submitted`,
+        html: customerOrderEmail({
+          customerName: customer?.username || customer?.email,
+          orderId: order.orderId,
+          items: order.items,
+          totalAmount: order.grandTotal,
+          warehouseName: buyerWarehouse?.name,
+          _id: order._id
+        })
+      };
+      await sendEmail(mailOptions);
+    }
+
+    // Send Admin Email
+    const mailOptionsAdmin = {
+      to: "developer@arrakconsulting.com",
+      subject: `Special Product Order #${order.orderId} Requires Approval`,
+      html: adminOrderEmail({
+        customerName: customer?.username || customer?.email,
+        orderId: order.orderId,
+        items: order.items,
+        totalAmount: order.grandTotal,
+        warehouseName: buyerWarehouse?.name,
+        _id: order._id
+      })
+    };
+    await sendEmail(mailOptionsAdmin);
+
+    // Clear Cart
+    cart.items = [];
+    cart.total = 0;
+    await cart.save({ session });
+
+    await session.commitTransaction();
+
+    res.status(201).json({
+      message: "Special product order placed successfully and awaiting admin approval",
+      order,
+      note: "This order will be fulfilled from external platforms (Amazon, eBay, etc.)"
+    });
+
+  } catch (error) {
+    await session.abortTransaction();
+    res.status(400).json({ message: error.message });
+  } finally {
+    session.endSession();
+  }
+};
+
 async function handleOrderRejectionNormal(order, session) {
   const customerWarehouse = order.warehouse;
   if (!customerWarehouse || !customerWarehouse._id) {
@@ -2778,6 +3044,7 @@ module.exports = {
     calculateOrderTotals,
     placeOrder,
     warehouseToWarehouseTransfer,
+    specialProductCheckout,
     approveNormalWarehouseOrder,
     approveOrder,
     getPendingApprovals,

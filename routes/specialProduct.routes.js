@@ -3,6 +3,7 @@ const router = express.Router();
 const upload = require('../config/specialProductMulter.js');
 const controller = require('../controllers/specialProduct.controller.js');
 const authMiddleware = require('../middlewares/authMiddleware.js');
+const { uploadBulkSpecialProductCSV } = require('../middlewares/bulkSpecialProductUploadMiddleware');
 
 const uploadFields = upload.fields([
     {name:  'image', maxCount: 1},
@@ -14,6 +15,10 @@ router.post('/', [authMiddleware,uploadFields], controller.createProduct);
 router.post('/bulk-delete', authMiddleware , controller.bulkDeleteProducts)
 router.get('/', authMiddleware,controller.getAllProducts);
 router.get('/search', authMiddleware,controller.searchSpecialProducts);
+
+// Bulk import routes
+router.get('/bulk-import/template', authMiddleware, controller.getCSVTemplate);
+router.post('/bulk-import', authMiddleware, uploadBulkSpecialProductCSV, controller.bulkImportSpecialProducts);
 
 router.get('/type/:type', controller.specialProductController.getProductsByType);
 router.get('/filters/:categoryId', controller.getCategoryFiltersAndProducts)

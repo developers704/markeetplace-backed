@@ -45,6 +45,11 @@ const specialProductSchema = new mongoose.Schema({
     link: {
         type: String
     },
+    links: [{
+        siteName: { type: String, required: true },
+        link: { type: String, required: true },
+        price: { type: Number }
+    }],
     stock: {
         type: Number,
         default: 0
