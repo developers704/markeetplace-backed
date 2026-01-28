@@ -54,8 +54,8 @@ router.post('/bulk/sku-inventory/import', authMiddleware, uploadSkuInventoryCSV,
 // Admin/CRUD routes (protected)
 router.put('/products/:id', authMiddleware, updateVendorProduct);
 router.delete('/skus/:skuId', authMiddleware, deleteSku);
-router.delete('/products/:id', authMiddleware, deleteVendorProduct);
 router.delete('/products/all', authMiddleware, deleteAllVendorData);
+router.delete('/products/:id', authMiddleware, deleteVendorProduct);
 
 module.exports = router;
 
