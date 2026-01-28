@@ -224,7 +224,7 @@ const importVendorCatalog = async (req, res) => {
     // Upsert VendorProducts
     // Enforce required VendorProduct fields at group-level (brand + category)
     for (const [k, g] of groups.entries()) {
-      if (!g.brand || !g.category) {
+      if (!g.category) {
         errors.push({
           row: null,
           error: `Vendor-Model "${g.vendorModel}" is missing required Brand/Category (group skipped)`,
@@ -356,7 +356,7 @@ const importVendorCatalog = async (req, res) => {
         vendorModel: g.vendorModel,
         vendorModelKey: g.vendorModelKey,
         title: g.title,
-        brand: g.brand,
+        brand: g.brand || 'Unknown',
         category: g.categoryId || g.category, // Use ObjectId if available, fallback to string
         subcategory: g.subcategoryId || null,
         subsubcategory: g.subsubcategoryId || null,
@@ -507,23 +507,37 @@ const importVendorCatalog = async (req, res) => {
 };
 
 /**
- * Bulk SKU Inventory Import (CSV)
+ * Normalize warehouse/city name for matching
+ * - Trim whitespace
+ * - Convert to lowercase for case-insensitive matching
+ */
+const normalizeName = (name) => {
+  if (!name) return '';
+  return String(name).trim().toLowerCase();
+};
+
+/**
+ * Bulk SKU Inventory Import (CSV) - Production-Ready with Cursor-Based Processing
  *
  * Expected columns (case-insensitive; symbols ignored):
- * - sku
- * - warehouse (name or id)
- * - city (name or id)
- * - quantity
+ * - sku (required)
+ * - warehouse (required - name or id)
+ * - city (optional - name or id, defaults to null)
+ * - quantity (required)
  *
  * Query params:
- * - mode=replace|increment (default: replace)
+ * - mode=replace|increment|merge (default: merge)
+ *   - replace: Replace quantity with CSV value
+ *   - increment: Add CSV quantity to existing
+ *   - merge: Sum quantities for duplicate (skuId, warehouse, city) combinations
  */
 const importSkuInventory = async (req, res) => {
   const startedAt = Date.now();
   const now = new Date();
 
-  const modeRaw = String(req.query.mode || 'replace').toLowerCase();
-  const mode = modeRaw === 'increment' ? 'increment' : 'replace';
+  const modeRaw = String(req.query.mode || 'merge').toLowerCase();
+  const mode = ['replace', 'increment', 'merge'].includes(modeRaw) ? modeRaw : 'merge';
+  const BATCH_SIZE = 100;
 
   try {
     if (!req.file?.path) {
@@ -535,6 +549,7 @@ const importSkuInventory = async (req, res) => {
     const errors = [];
     let totalRows = 0;
 
+    // Parse CSV
     await new Promise((resolve, reject) => {
       fs.createReadStream(csvFilePath)
         .pipe(csv())
@@ -544,14 +559,15 @@ const importSkuInventory = async (req, res) => {
           const row = toNormalizedRow(raw);
 
           const sku = String(pick(row, ['sku', 'skuid'])).trim();
-          const warehouseRaw = String(pick(row, ['warehouse', 'warehousename', 'warehouseid'])).trim();
-          const cityRaw = String(pick(row, ['city', 'cityname', 'cityid'])).trim();
+          const warehouseRaw = String(pick(row, ['warehouse', 'warehousename', 'warehouseid']) || '').trim();
+          const cityRaw = String(pick(row, ['city', 'cityname', 'cityid']) || '').trim(); // Optional
           const quantityVal = parseNumber(pick(row, ['quantity', 'qty']));
 
-          if (!sku || !warehouseRaw || !cityRaw || quantityVal === null) {
+          // Validate required fields (city is optional)
+          if (!sku || !warehouseRaw || quantityVal === null) {
             errors.push({
               row: rowNumber,
-              error: 'Missing required fields: sku, warehouse, city, quantity',
+              error: 'Missing required fields: sku, warehouse, quantity (city is optional)',
               data: raw,
             });
             return;
@@ -566,8 +582,8 @@ const importSkuInventory = async (req, res) => {
             rowNumber,
             sku,
             skuKey: normalizeKey(sku),
-            warehouseRaw,
-            cityRaw,
+            warehouseRaw: normalizeName(warehouseRaw), // Normalize for matching
+            cityRaw: cityRaw ? normalizeName(cityRaw) : null, // Normalize or null
             quantity: Math.floor(quantityVal),
           });
         })
@@ -575,41 +591,72 @@ const importSkuInventory = async (req, res) => {
         .on('error', reject);
     });
 
+    if (rows.length === 0) {
+      await deleteFile(csvFilePath).catch(() => {});
+      return res.status(400).json({
+        success: false,
+        message: 'No valid rows found in CSV',
+        errors: errors.slice(0, 100),
+      });
+    }
+
+    // Resolve SKUs
     const skuKeys = [...new Set(rows.map((r) => r.skuKey))];
     const skuDocs = await Sku.find({ skuKey: { $in: skuKeys } }).select('_id skuKey').lean();
     const skuMap = new Map(skuDocs.map((s) => [s.skuKey, s]));
 
-    const warehouseNames = [...new Set(rows.filter((r) => !isObjectIdLike(r.warehouseRaw)).map((r) => r.warehouseRaw))];
+    // Separate warehouse/city by ID vs name
+    const warehouseNames = [...new Set(rows.filter((r) => !isObjectIdLike(r.warehouseRaw) && r.warehouseRaw).map((r) => r.warehouseRaw))];
     const warehouseIds = [...new Set(rows.filter((r) => isObjectIdLike(r.warehouseRaw)).map((r) => r.warehouseRaw))];
-    const cityNames = [...new Set(rows.filter((r) => !isObjectIdLike(r.cityRaw)).map((r) => r.cityRaw))];
-    const cityIds = [...new Set(rows.filter((r) => isObjectIdLike(r.cityRaw)).map((r) => r.cityRaw))];
+    const cityNames = [...new Set(rows.filter((r) => r.cityRaw && !isObjectIdLike(r.cityRaw)).map((r) => r.cityRaw))];
+    const cityIds = [...new Set(rows.filter((r) => r.cityRaw && isObjectIdLike(r.cityRaw)).map((r) => r.cityRaw))];
 
+    // Build warehouse lookup map (normalized name -> doc)
     const warehouseMap = new Map();
     if (warehouseIds.length > 0) {
       const ws = await Warehouse.find({ _id: { $in: warehouseIds } }).select('_id name').lean();
-      ws.forEach((w) => warehouseMap.set(String(w._id), w));
+      ws.forEach((w) => {
+        warehouseMap.set(String(w._id), w);
+        warehouseMap.set(normalizeName(w.name), w); // Also index by normalized name
+      });
     }
     for (const name of warehouseNames) {
-      const w = await Warehouse.findOne({ name: new RegExp(`^${escapeRegex(name)}$`, 'i') })
-        .select('_id name')
-        .lean();
-      if (w) warehouseMap.set(name, w);
+      if (!warehouseMap.has(name)) {
+        const w = await Warehouse.findOne({ name: new RegExp(`^${escapeRegex(name)}$`, 'i') })
+          .select('_id name')
+          .lean();
+        if (w) {
+          warehouseMap.set(name, w);
+          warehouseMap.set(normalizeName(w.name), w); // Index by normalized name
+        }
+      }
     }
 
+    // Build city lookup map (normalized name -> doc, null -> null)
     const cityMap = new Map();
+    cityMap.set(null, null); // Explicit null mapping
     if (cityIds.length > 0) {
       const cs = await City.find({ _id: { $in: cityIds } }).select('_id name').lean();
-      cs.forEach((c) => cityMap.set(String(c._id), c));
+      cs.forEach((c) => {
+        cityMap.set(String(c._id), c);
+        cityMap.set(normalizeName(c.name), c); // Also index by normalized name
+      });
     }
     for (const name of cityNames) {
-      const c = await City.findOne({ name: new RegExp(`^${escapeRegex(name)}$`, 'i') })
-        .select('_id name')
-        .lean();
-      if (c) cityMap.set(name, c);
+      if (!cityMap.has(name)) {
+        const c = await City.findOne({ name: new RegExp(`^${escapeRegex(name)}$`, 'i') })
+          .select('_id name')
+          .lean();
+        if (c) {
+          cityMap.set(name, c);
+          cityMap.set(normalizeName(c.name), c); // Index by normalized name
+        }
+      }
     }
 
-    const ops = [];
-    let resolvedRows = 0;
+    // Resolve rows and merge duplicates
+    const resolvedRows = [];
+    const quantityMap = new Map(); // Key: "skuId_warehouseId_cityId" -> total quantity
 
     for (const r of rows) {
       const skuDoc = skuMap.get(r.skuKey);
@@ -626,51 +673,161 @@ const importSkuInventory = async (req, res) => {
         continue;
       }
 
-      const cityDoc = isObjectIdLike(r.cityRaw) ? cityMap.get(String(r.cityRaw)) : cityMap.get(r.cityRaw);
-      if (!cityDoc?._id) {
-        errors.push({ row: r.rowNumber, error: `City not found: ${r.cityRaw}`, data: r });
-        continue;
+      // City is optional - use null if not provided or not found
+      const cityDoc = r.cityRaw
+        ? (isObjectIdLike(r.cityRaw) ? cityMap.get(String(r.cityRaw)) : cityMap.get(r.cityRaw))
+        : null;
+      // If cityRaw was provided but not found, log warning but continue with null
+      if (r.cityRaw && !cityDoc) {
+        errors.push({
+          row: r.rowNumber,
+          error: `City not found: ${r.cityRaw} (using null)`,
+          data: r,
+        });
       }
 
-      resolvedRows += 1;
+      const cityId = cityDoc?._id || null;
+      const mergeKey = `${skuDoc._id}_${warehouseDoc._id}_${cityId || 'null'}`;
 
-      const update =
-        mode === 'increment'
-          ? {
-              $inc: { quantity: r.quantity },
-              $set: { updatedAt: now, lastRestocked: now },
-              $setOnInsert: {
-                skuId: skuDoc._id,
-                warehouse: warehouseDoc._id,
-                city: cityDoc._id,
-                createdAt: now,
-                stockAlertThreshold: 10,
-              },
-            }
-          : {
-              $set: {
-                skuId: skuDoc._id,
-                warehouse: warehouseDoc._id,
-                city: cityDoc._id,
-                quantity: r.quantity,
-                updatedAt: now,
-                lastRestocked: now,
-              },
-              $setOnInsert: { createdAt: now, stockAlertThreshold: 10 },
-            };
+      // Merge quantities for duplicate combinations
+      if (quantityMap.has(mergeKey)) {
+        if (mode === 'merge') {
+          quantityMap.set(mergeKey, quantityMap.get(mergeKey) + r.quantity);
+        } else if (mode === 'replace') {
+          quantityMap.set(mergeKey, r.quantity);
+        } else if (mode === 'increment') {
+          quantityMap.set(mergeKey, quantityMap.get(mergeKey) + r.quantity);
+        }
+      } else {
+        quantityMap.set(mergeKey, r.quantity);
+      }
 
-      ops.push({
-        updateOne: {
-          filter: { skuId: skuDoc._id, warehouse: warehouseDoc._id, city: cityDoc._id },
-          update,
-          upsert: true,
-        },
+      resolvedRows.push({
+        skuId: skuDoc._id,
+        warehouseId: warehouseDoc._id,
+        cityId: cityId,
+        quantity: quantityMap.get(mergeKey),
+        mergeKey,
       });
     }
 
-    let writeResult = null;
-    if (ops.length > 0) {
-      writeResult = await SkuInventory.bulkWrite(ops, { ordered: false });
+    // Remove duplicates (keep last merged quantity)
+    const uniqueRows = [];
+    const seenKeys = new Set();
+    for (let i = resolvedRows.length - 1; i >= 0; i--) {
+      const r = resolvedRows[i];
+      if (!seenKeys.has(r.mergeKey)) {
+        uniqueRows.unshift(r);
+        seenKeys.add(r.mergeKey);
+      }
+    }
+
+    // Cursor-based batch processing
+    let createdCount = 0;
+    let updatedCount = 0;
+    let mergedCount = 0;
+
+    // Fetch existing inventory records in batches to check for merges
+    const existingInventoryMap = new Map();
+    const skuIds = [...new Set(uniqueRows.map((r) => r.skuId))];
+    const warehouseIdsForQuery = [...new Set(uniqueRows.map((r) => r.warehouseId))];
+    const cityIdsForQuery = [...new Set(uniqueRows.map((r) => r.cityId).filter(Boolean))];
+
+    // Fetch existing records in batches
+    for (let i = 0; i < skuIds.length; i += BATCH_SIZE) {
+      const skuBatch = skuIds.slice(i, i + BATCH_SIZE);
+      const existing = await SkuInventory.find({
+        skuId: { $in: skuBatch },
+        warehouse: { $in: warehouseIdsForQuery },
+        $or: [
+          { city: { $in: cityIdsForQuery } },
+          { city: null },
+        ],
+      })
+        .select('skuId warehouse city quantity')
+        .lean();
+
+      existing.forEach((inv) => {
+        const key = `${inv.skuId}_${inv.warehouse}_${inv.city || 'null'}`;
+        existingInventoryMap.set(key, inv);
+      });
+    }
+
+    // Process in batches
+    for (let i = 0; i < uniqueRows.length; i += BATCH_SIZE) {
+      const batch = uniqueRows.slice(i, i + BATCH_SIZE);
+      const ops = [];
+
+      for (const r of batch) {
+        const existingKey = `${r.skuId}_${r.warehouseId}_${r.cityId || 'null'}`;
+        const existing = existingInventoryMap.get(existingKey);
+
+        if (existing) {
+          // Update existing record
+          let newQuantity = r.quantity;
+          if (mode === 'increment' || mode === 'merge') {
+            newQuantity = existing.quantity + r.quantity;
+          }
+
+          ops.push({
+            updateOne: {
+              filter: {
+                skuId: r.skuId,
+                warehouse: r.warehouseId,
+                city: r.cityId || null,
+              },
+              update: {
+                $set: {
+                  quantity: newQuantity,
+                  updatedAt: now,
+                  lastRestocked: now,
+                },
+              },
+            },
+          });
+          updatedCount++;
+          if (mode === 'merge') mergedCount++;
+        } else {
+          // Create new record
+          ops.push({
+            updateOne: {
+              filter: {
+                skuId: r.skuId,
+                warehouse: r.warehouseId,
+                city: r.cityId || null,
+              },
+              update: {
+                $set: {
+                  skuId: r.skuId,
+                  warehouse: r.warehouseId,
+                  city: r.cityId || null,
+                  quantity: r.quantity,
+                  updatedAt: now,
+                  lastRestocked: now,
+                  stockAlertThreshold: 10,
+                },
+                $setOnInsert: {
+                  createdAt: now,
+                },
+              },
+              upsert: true,
+            },
+          });
+          createdCount++;
+        }
+      }
+
+      if (ops.length > 0) {
+        try {
+          await SkuInventory.bulkWrite(ops, { ordered: false });
+        } catch (bulkError) {
+          // Log bulk write errors but continue
+          errors.push({
+            row: null,
+            error: `Bulk write error in batch ${Math.floor(i / BATCH_SIZE) + 1}: ${bulkError.message}`,
+          });
+        }
+      }
     }
 
     await deleteFile(csvFilePath).catch(() => {});
@@ -680,11 +837,13 @@ const importSkuInventory = async (req, res) => {
       message: 'SKU inventory imported successfully',
       meta: {
         totalRows,
-        resolvedRows,
+        resolvedRows: uniqueRows.length,
+        createdCount,
+        updatedCount,
+        mergedCount,
         mode,
         durationMs: Date.now() - startedAt,
       },
-      results: writeResult,
       errors: errors.slice(0, 100),
     });
   } catch (error) {
@@ -695,6 +854,7 @@ const importSkuInventory = async (req, res) => {
       success: false,
       message: 'Failed to import SKU inventory',
       error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 };

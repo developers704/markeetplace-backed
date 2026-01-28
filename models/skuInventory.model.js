@@ -24,7 +24,8 @@ const skuInventorySchema = new mongoose.Schema(
     city: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'City',
-      required: true,
+      required: false,
+      default: null,
       index: true,
     },
     quantity: { type: Number, required: true, min: 0 },

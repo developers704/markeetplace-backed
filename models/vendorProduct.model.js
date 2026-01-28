@@ -16,7 +16,7 @@ const vendorProductSchema = new mongoose.Schema(
     vendorModelKey: { type: String, required: true, trim: true, unique: true, index: true },
 
     title: { type: String, required: true, trim: true },
-    brand: { type: String, required: true, trim: true },
+    brand: { type: String, required: false, trim: true },
     // Support both string (legacy) and ObjectId (new) for backward compatibility
     category: { 
       type: mongoose.Schema.Types.Mixed, 
