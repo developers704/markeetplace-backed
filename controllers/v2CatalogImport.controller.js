@@ -1,6 +1,8 @@
 const csv = require('csv-parser');
 const fs = require('fs');
 const mongoose = require('mongoose');
+const path = require('path');
+const { stringify } = require('csv-stringify/sync');
 
 const VendorProduct = require('../models/vendorProduct.model');
 const Sku = require('../models/sku.model');
@@ -19,6 +21,50 @@ const normalizeHeader = (value) =>
 
 const escapeRegex = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const isObjectIdLike = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || '').trim());
+
+const ERROR_REPORT_DIR = path.join('uploads', 'csv', 'error-reports');
+
+const ensureDirSync = (dirPath) => {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
+};
+
+const toSafeFilenamePart = (s) =>
+  String(s || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+
+const writeErrorReportCsv = async ({ prefix, errorRows }) => {
+  if (!Array.isArray(errorRows) || errorRows.length === 0) return null;
+
+  ensureDirSync(ERROR_REPORT_DIR);
+
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const safePrefix = toSafeFilenamePart(prefix || 'import');
+  const filename = `${safePrefix}-errors-${ts}.csv`;
+  const relativePath = path.join(ERROR_REPORT_DIR, filename);
+
+  // Build headers union, make sure errorReason is last
+  const headerSet = new Set();
+  for (const r of errorRows) {
+    Object.keys(r || {}).forEach((k) => headerSet.add(k));
+  }
+  headerSet.delete('errorReason');
+  const headers = [...headerSet, 'errorReason'];
+
+  const rows = errorRows.map((r) => headers.map((h) => (r && r[h] !== undefined && r[h] !== null ? String(r[h]) : '')));
+  const csvContent = stringify([headers, ...rows], { quoted: true });
+
+  fs.writeFileSync(relativePath, csvContent, 'utf8');
+
+  // Express typically serves /uploads as static; return a URL-like path
+  const urlPath = `/${relativePath.split(path.sep).join('/')}`;
+  return { filename, path: relativePath, url: urlPath, count: errorRows.length };
+};
 
 const parseCsvList = (value) => {
   if (!value) return [];
@@ -90,6 +136,7 @@ const importVendorCatalog = async (req, res) => {
 
     const groups = new Map(); // vendorModelKey -> { vendorModel, title, brand, category, description, rows: [] }
     const errors = [];
+    const errorRowsForCsv = []; // full error report rows (same data + errorReason)
     let totalRows = 0;
 
     await new Promise((resolve, reject) => {
@@ -109,6 +156,7 @@ const importVendorCatalog = async (req, res) => {
               error: 'Missing required fields: Vendor-Model and Sku',
               data: raw,
             });
+            errorRowsForCsv.push({ rowNumber, ...raw, errorReason: 'Missing required fields: Vendor-Model and Sku' });
             return;
           }
 
@@ -134,6 +182,7 @@ const importVendorCatalog = async (req, res) => {
               error: 'Invalid Tag Price (must be a non-negative number)',
               data: raw,
             });
+            errorRowsForCsv.push({ rowNumber, ...raw, errorReason: 'Invalid Tag Price (must be a non-negative number)' });
             return;
           }
 
@@ -225,6 +274,25 @@ const importVendorCatalog = async (req, res) => {
     // Enforce required VendorProduct fields at group-level (brand + category)
     for (const [k, g] of groups.entries()) {
       if (!g.category) {
+        // Add ALL rows in this group to error CSV so admin can fix and re-upload
+        for (const r of g.rows || []) {
+          errorRowsForCsv.push({
+            rowNumber: r.rowNumber,
+            vendorModel: r.vendorModel,
+            sku: r.sku,
+            brand: g.brand || 'Unknown',
+            category: g.category || '',
+            subcategory: g.subcategory || '',
+            subsubcategory: g.subsubcategory || '',
+            tagPrice: r.price,
+            metalColor: r.metalColor,
+            metalType: r.metalType,
+            size: r.size,
+            images: Array.isArray(r.images) ? r.images.join(',') : '',
+            gallery: Array.isArray(r.gallery) ? r.gallery.join(',') : '',
+            errorReason: `Missing required Category for Vendor-Model "${g.vendorModel}"`,
+          });
+        }
         errors.push({
           row: null,
           error: `Vendor-Model "${g.vendorModel}" is missing required Brand/Category (group skipped)`,
@@ -235,11 +303,13 @@ const importVendorCatalog = async (req, res) => {
 
     const vendorKeys = Array.from(groups.keys());
     if (vendorKeys.length === 0) {
+      const errorReport = await writeErrorReportCsv({ prefix: 'vendor-catalog', errorRows: errorRowsForCsv });
       await deleteFile(csvFilePath).catch(() => {});
       return res.status(400).json({
         success: false,
         message: 'No valid rows found to import (check Vendor-Model and Sku columns).',
         errors: errors.slice(0, 100),
+        errorReport,
       });
     }
 
@@ -480,6 +550,8 @@ const importVendorCatalog = async (req, res) => {
 
     await deleteFile(csvFilePath).catch(() => {});
 
+    const errorReport = await writeErrorReportCsv({ prefix: 'vendor-catalog', errorRows: errorRowsForCsv });
+
     return res.status(200).json({
       success: true,
       message: 'Vendor catalog imported successfully',
@@ -493,6 +565,7 @@ const importVendorCatalog = async (req, res) => {
         skus: skuWrite,
       },
       errors: errors.slice(0, 100),
+      errorReport,
     });
   } catch (error) {
     if (req.file?.path) {
@@ -547,6 +620,7 @@ const importSkuInventory = async (req, res) => {
     const csvFilePath = req.file.path;
     const rows = [];
     const errors = [];
+    const errorRowsForCsv = [];
     let totalRows = 0;
 
     // Parse CSV
@@ -559,22 +633,24 @@ const importSkuInventory = async (req, res) => {
           const row = toNormalizedRow(raw);
 
           const sku = String(pick(row, ['sku', 'skuid'])).trim();
-          const warehouseRaw = String(pick(row, ['warehouse', 'warehousename', 'warehouseid']) || '').trim();
-          const cityRaw = String(pick(row, ['city', 'cityname', 'cityid']) || '').trim(); // Optional
+          const warehouseInput = String(pick(row, ['warehouse', 'warehousename', 'warehouseid']) || '').trim();
+          const cityInput = String(pick(row, ['city', 'cityname', 'cityid']) || '').trim(); // Optional
           const quantityVal = parseNumber(pick(row, ['quantity', 'qty']));
 
           // Validate required fields (city is optional)
-          if (!sku || !warehouseRaw || quantityVal === null) {
+          if (!sku || !warehouseInput || quantityVal === null) {
             errors.push({
               row: rowNumber,
               error: 'Missing required fields: sku, warehouse, quantity (city is optional)',
               data: raw,
             });
+            errorRowsForCsv.push({ rowNumber, ...raw, errorReason: 'Missing required fields: sku, warehouse, quantity (city is optional)' });
             return;
           }
 
           if (quantityVal < 0) {
             errors.push({ row: rowNumber, error: 'Quantity must be >= 0', data: raw });
+            errorRowsForCsv.push({ rowNumber, ...raw, errorReason: 'Quantity must be >= 0' });
             return;
           }
 
@@ -582,8 +658,10 @@ const importSkuInventory = async (req, res) => {
             rowNumber,
             sku,
             skuKey: normalizeKey(sku),
-            warehouseRaw: normalizeName(warehouseRaw), // Normalize for matching
-            cityRaw: cityRaw ? normalizeName(cityRaw) : null, // Normalize or null
+            warehouseInput,
+            cityInput,
+            warehouseRaw: normalizeName(warehouseInput), // Normalize for matching
+            cityRaw: cityInput ? normalizeName(cityInput) : null, // Normalize or null
             quantity: Math.floor(quantityVal),
           });
         })
@@ -592,11 +670,13 @@ const importSkuInventory = async (req, res) => {
     });
 
     if (rows.length === 0) {
+      const errorReport = await writeErrorReportCsv({ prefix: 'sku-inventory', errorRows: errorRowsForCsv });
       await deleteFile(csvFilePath).catch(() => {});
       return res.status(400).json({
         success: false,
         message: 'No valid rows found in CSV',
         errors: errors.slice(0, 100),
+        errorReport,
       });
     }
 
@@ -662,6 +742,14 @@ const importSkuInventory = async (req, res) => {
       const skuDoc = skuMap.get(r.skuKey);
       if (!skuDoc?._id) {
         errors.push({ row: r.rowNumber, error: `SKU not found: ${r.sku}`, data: r });
+        errorRowsForCsv.push({
+          rowNumber: r.rowNumber,
+          sku: r.sku,
+          warehouse: r.warehouseInput || r.warehouseRaw,
+          city: r.cityInput || '',
+          quantity: r.quantity,
+          errorReason: `SKU not found: ${r.sku}`,
+        });
         continue;
       }
 
@@ -670,6 +758,14 @@ const importSkuInventory = async (req, res) => {
         : warehouseMap.get(r.warehouseRaw);
       if (!warehouseDoc?._id) {
         errors.push({ row: r.rowNumber, error: `Warehouse not found: ${r.warehouseRaw}`, data: r });
+        errorRowsForCsv.push({
+          rowNumber: r.rowNumber,
+          sku: r.sku,
+          warehouse: r.warehouseInput || r.warehouseRaw,
+          city: r.cityInput || '',
+          quantity: r.quantity,
+          errorReason: `Warehouse not found: ${r.warehouseInput || r.warehouseRaw}`,
+        });
         continue;
       }
 
@@ -677,6 +773,17 @@ const importSkuInventory = async (req, res) => {
       const cityDoc = r.cityRaw
         ? (isObjectIdLike(r.cityRaw) ? cityMap.get(String(r.cityRaw)) : cityMap.get(r.cityRaw))
         : null;
+      // if (r.cityRaw && !cityDoc) {
+      //   // Still proceed with null, but include in error CSV so user can fix spelling / mapping
+      //   errorRowsForCsv.push({
+      //     rowNumber: r.rowNumber,
+      //     sku: r.sku,
+      //     warehouse: r.warehouseInput || r.warehouseRaw,
+      //     city: r.cityInput || '',
+      //     quantity: r.quantity,
+      //     errorReason: `City not found: ${r.cityInput || r.cityRaw} (using null)`,
+      //   });
+      // }
       // If cityRaw was provided but not found, log warning but continue with null
       // if (r.cityRaw && !cityDoc) {
       //   errors.push({
@@ -832,6 +939,8 @@ const importSkuInventory = async (req, res) => {
 
     await deleteFile(csvFilePath).catch(() => {});
 
+    const errorReport = await writeErrorReportCsv({ prefix: 'sku-inventory', errorRows: errorRowsForCsv });
+
     return res.status(200).json({
       success: true,
       message: 'SKU inventory imported successfully',
@@ -845,6 +954,7 @@ const importSkuInventory = async (req, res) => {
         durationMs: Date.now() - startedAt,
       },
       errors: errors.slice(0, 100),
+      errorReport,
     });
   } catch (error) {
     if (req.file?.path) {
