@@ -30,8 +30,8 @@ const b2bPurchaseRequestSchema = new mongoose.Schema(
     storeWarehouseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Warehouse', required: true, index: true },
 
     // Snapshot the expected approvers at request creation for fast filtering + audit
-    dmUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true, index: true },
-    cmUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true, index: true },
+    dmUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: false, index: true },
+    cmUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: false, index: true },
 
     status: {
       type: String,
