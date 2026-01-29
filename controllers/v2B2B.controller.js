@@ -470,13 +470,25 @@ const createPurchaseRequest = async (req, res) => {
 
       const requireDM = storeWarehouse.requireDMApproval !== false;
       const requireCM = storeWarehouse.requireCMApproval !== false;
-      let initialStatus = 'PENDING_ADMIN';
-      if (requireDM && requireCM) {
+      // let initialStatus = 'PENDING_ADMIN';
+      // if (requireDM && requireCM) {
+      //   initialStatus = 'PENDING_DM';
+      // } else if (requireDM && !requireCM) {
+      //   initialStatus = 'PENDING_DM';
+      // } else if (!requireDM && requireCM) {
+      //   initialStatus = 'PENDING_CM';
+      // }
+
+      let initialStatus = 'PENDING_ADMIN'; // default
+
+      if (requireDM && dmUserId && requireCM && cmUserId) {
         initialStatus = 'PENDING_DM';
-      } else if (requireDM && !requireCM) {
+      } else if (requireDM && dmUserId && (!requireCM || !cmUserId)) {
         initialStatus = 'PENDING_DM';
-      } else if (!requireDM && requireCM) {
+      } else if ((!requireDM || !dmUserId) && requireCM && cmUserId) {
         initialStatus = 'PENDING_CM';
+      } else {
+        initialStatus = 'PENDING_ADMIN';
       }
 
       // Validate inventory for all items
@@ -594,8 +606,8 @@ const createPurchaseRequest = async (req, res) => {
       });
     }
 
-    const dmUserId = storeWarehouse.districtManager;
-    const cmUserId = storeWarehouse.corporateManager;
+    const dmUserId = storeWarehouse.districtManager || null;
+    const cmUserId = storeWarehouse.corporateManager || null;
     // if (!dmUserId || !cmUserId) {
     //   return res.status(400).json({ success: false, message: 'Store is missing DM/CM assignment' });
     // }
@@ -604,14 +616,26 @@ const createPurchaseRequest = async (req, res) => {
     const requireDM = storeWarehouse.requireDMApproval !== false; // Default true if not set
     const requireCM = storeWarehouse.requireCMApproval !== false; // Default true if not set
 
-    let initialStatus = 'PENDING_ADMIN'; // Default: skip to admin if both flags off
-    if (requireDM && requireCM) {
-      initialStatus = 'PENDING_DM'; // Full flow: DM → CM → Admin
-    } else if (requireDM && !requireCM) {
-      initialStatus = 'PENDING_DM'; // DM → Admin (CM skipped)
-    } else if (!requireDM && requireCM) {
-      initialStatus = 'PENDING_CM'; // CM → Admin (DM skipped)
-    }
+    // let initialStatus = 'PENDING_ADMIN'; // Default: skip to admin if both flags off
+    // if (requireDM && requireCM) {
+    //   initialStatus = 'PENDING_DM'; // Full flow: DM → CM → Admin
+    // } else if (requireDM && !requireCM) {
+    //   initialStatus = 'PENDING_DM'; // DM → Admin (CM skipped)
+    // } else if (!requireDM && requireCM) {
+    //   initialStatus = 'PENDING_CM'; // CM → Admin (DM skipped)
+    // }
+    let initialStatus = 'PENDING_ADMIN'; // default if no DM/CM exists
+
+      if (requireDM && dmUserId && requireCM && cmUserId) {
+        initialStatus = 'PENDING_DM'; // DM -> CM -> Admin
+      } else if (requireDM && dmUserId && (!requireCM || !cmUserId)) {
+        initialStatus = 'PENDING_DM'; // DM -> Admin
+      } else if ((!requireDM || !dmUserId) && requireCM && cmUserId) {
+        initialStatus = 'PENDING_CM'; // CM -> Admin
+      } 
+
+
+
 
     const created = await B2BPurchaseRequest.create({
       vendorProductId: vendorProduct._id,
