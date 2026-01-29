@@ -431,12 +431,12 @@ const updateUser = async (req, res) => {
 
         // await user.save();
 
-        if (warehouseId) {
-            const warehouse = await Warehouse.findById(warehouseId);
-            if (!warehouse) {
-                return res.status(400).json({ message: 'Invalid warehouse ID' });
-            }
-        }
+        // if (warehouseId) {
+        //     const warehouse = await Warehouse.findById(warehouseId);
+        //     if (!warehouse) {
+        //         return res.status(400).json({ message: 'Invalid warehouse ID' });
+        //     }
+        // }
 
         const updates = {};
         if (username) updates.username = username;

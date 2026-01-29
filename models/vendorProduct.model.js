@@ -19,7 +19,7 @@ const vendorProductSchema = new mongoose.Schema(
     brand: { type: String, required: false, trim: true },
     // Support both string (legacy) and ObjectId (new) for backward compatibility
     category: { 
-      type: mongoose.Schema.Types.Mixed, 
+      type: mongoose.Schema.Types.Mixed,
       required: true,
       // Can be String or ObjectId reference
     },

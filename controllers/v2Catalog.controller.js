@@ -234,6 +234,15 @@ const listVendorProducts = async (req, res) => {
                   },
                 ]
               : []),
+                  {
+              $lookup: {
+                from: 'categories',
+                localField: 'category',
+                foreignField: '_id',
+                as: 'categoryDoc',
+              },
+            },
+
             {
               $lookup: {
                 from: 'subcategories',
@@ -255,7 +264,8 @@ const listVendorProducts = async (req, res) => {
                 vendorModel: 1,
                 title: 1,
                 brand: 1,
-                category: 1, // Will be populated in post-processing
+                // category: 1, // Will be populated in post-processing
+                category: { $ifNull: [{ $first: '$categoryDoc' }, null] },
                 subcategory: { $ifNull: [{ $first: '$subcategoryDoc' }, null] },
                 subsubcategory: { $ifNull: [{ $first: '$subsubcategoryDoc' }, null] },
                 description: 1,

@@ -464,9 +464,9 @@ const createPurchaseRequest = async (req, res) => {
 
       const dmUserId = storeWarehouse.districtManager;
       const cmUserId = storeWarehouse.corporateManager;
-      if (!dmUserId || !cmUserId) {
-        return res.status(400).json({ success: false, message: 'Store is missing DM/CM assignment' });
-      }
+      // if (!dmUserId || !cmUserId) {
+      //   return res.status(400).json({ success: false, message: 'Store is missing DM/CM assignment' });
+      // }
 
       const requireDM = storeWarehouse.requireDMApproval !== false;
       const requireCM = storeWarehouse.requireCMApproval !== false;
@@ -514,15 +514,15 @@ const createPurchaseRequest = async (req, res) => {
           quantity: item.quantity,
           storeId: storeWarehouse._id,
           storeWarehouseId: storeWarehouse._id,
-          dmUserId,
-          cmUserId,
+          dmUserId : dmUserId || null,
+          cmUserId : cmUserId || null,
           status: initialStatus,
           requestedBy: actor.id,
           requestedByModel: actor.model,
           approvals: {},
           cartId: cart._id, // Track which cart this came from
           cartItemPrice: item.price, // Store price at time of request
-          cartItemCurrency: item.currency,
+          cartItemCurrency: item.currency || 'USD',
         });
         createdRequests.push(request);
 
@@ -596,9 +596,9 @@ const createPurchaseRequest = async (req, res) => {
 
     const dmUserId = storeWarehouse.districtManager;
     const cmUserId = storeWarehouse.corporateManager;
-    if (!dmUserId || !cmUserId) {
-      return res.status(400).json({ success: false, message: 'Store is missing DM/CM assignment' });
-    }
+    // if (!dmUserId || !cmUserId) {
+    //   return res.status(400).json({ success: false, message: 'Store is missing DM/CM assignment' });
+    // }
 
     // Determine initial status based on store-level approval flags (v2)
     const requireDM = storeWarehouse.requireDMApproval !== false; // Default true if not set

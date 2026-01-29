@@ -314,63 +314,89 @@ const importVendorCatalog = async (req, res) => {
     }
 
     // Helper function to create or find category
+    // Normalizes to UPPERCASE for database consistency
     const getOrCreateCategory = async (categoryName) => {
       if (!categoryName) return null;
-      const formattedName = categoryName
-        .trim()
-        .split(' ')
-        .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-        .join(' ');
+      // Trim and convert to UPPERCASE for database lookup and storage
+      const formattedName = String(categoryName).trim().toUpperCase();
       
-      let category = await Category.findOne({ name: formattedName });
+      // Check in database (case-insensitive search first, then exact match)
+      let category = await Category.findOne({ 
+        $or: [
+          { name: formattedName },
+          { name: new RegExp(`^${escapeRegex(formattedName)}$`, 'i') }
+        ]
+      });
+      
       if (!category) {
+        // Create new category in UPPERCASE
         category = new Category({ name: formattedName });
+        await category.save();
+      } else if (category.name !== formattedName) {
+        // Update existing category to UPPERCASE if it's in different case
+        category.name = formattedName;
         await category.save();
       }
       return category._id;
     };
 
     // Helper function to create or find subcategory
+    // Normalizes to UPPERCASE for database consistency
     const getOrCreateSubCategory = async (subcategoryName, parentCategoryId) => {
       if (!subcategoryName || !parentCategoryId) return null;
-      const formattedName = subcategoryName
-        .trim()
-        .split(' ')
-        .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-        .join(' ');
+      // Trim and convert to UPPERCASE for database lookup and storage
+      const formattedName = String(subcategoryName).trim().toUpperCase();
       
+      // Check in database (case-insensitive search first, then exact match)
       let subcategory = await SubCategory.findOne({ 
-        name: formattedName, 
-        parentCategory: parentCategoryId 
+        parentCategory: parentCategoryId,
+        $or: [
+          { name: formattedName },
+          { name: new RegExp(`^${escapeRegex(formattedName)}$`, 'i') }
+        ]
       });
+      
       if (!subcategory) {
+        // Create new subcategory in UPPERCASE
         subcategory = new SubCategory({ 
           name: formattedName, 
           parentCategory: parentCategoryId 
         });
+        await subcategory.save();
+      } else if (subcategory.name !== formattedName) {
+        // Update existing subcategory to UPPERCASE if it's in different case
+        subcategory.name = formattedName;
         await subcategory.save();
       }
       return subcategory._id;
     };
 
     // Helper function to create or find sub-subcategory
+    // Normalizes to UPPERCASE for database consistency
     const getOrCreateSubSubCategory = async (subsubcategoryName, parentSubCategoryId) => {
       if (!subsubcategoryName || !parentSubCategoryId) return null;
-      const formattedName = subsubcategoryName
-        .trim()
-        .split(' ')
-        .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-        .join(' ');
+      // Trim and convert to UPPERCASE for database lookup and storage
+      const formattedName = String(subsubcategoryName).trim().toUpperCase();
       
+      // Check in database (case-insensitive search first, then exact match)
       let subsubcategory = await SubSubCategory.findOne({ 
-        name: formattedName, 
-        parentSubCategory: parentSubCategoryId 
+        parentSubCategory: parentSubCategoryId,
+        $or: [
+          { name: formattedName },
+          { name: new RegExp(`^${escapeRegex(formattedName)}$`, 'i') }
+        ]
       });
+      
       if (!subsubcategory) {
+        // Create new sub-subcategory in UPPERCASE
         subsubcategory = new SubSubCategory({ 
           name: formattedName, 
           parentSubCategory: parentSubCategoryId 
         });
+        await subsubcategory.save();
+      } else if (subsubcategory.name !== formattedName) {
+        // Update existing sub-subcategory to UPPERCASE if it's in different case
+        subsubcategory.name = formattedName;
         await subsubcategory.save();
       }
       return subsubcategory._id;
