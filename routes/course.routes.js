@@ -9,6 +9,9 @@ const checkSuperuserOrPermission = require('../middlewares/checkSuperuserOrPermi
 // React Quill image upload endpoint
 router.post('/upload-quill-image', [authMiddleware, handleQuillImageUpload], controller.uploadQuillImage);
 
+// Video proxy endpoint to handle CORS for Bunny.net videos
+router.get('/video-proxy', controller.streamVideo);
+
 router.post('/', [authMiddleware, handleUpload], controller.createCourse);
 // Toggle like/dislike content
 router.post("/:courseId/chapters/:chapterId/sections/:sectionId/content/:contentId/toggle-reaction", authMiddleware, controller.toggleContentReaction);

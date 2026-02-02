@@ -275,6 +275,7 @@ const getQuizById = async (req, res) => {
         questionNumber: i + 1,
         question: q.question,
         options: q.options,
+        correctAnswer: q.correctAnswer,
         points: q.points,
       })),
 

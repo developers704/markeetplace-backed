@@ -95,6 +95,11 @@ const courseSchema = new mongoose.Schema({
             objective: {
                 type: String
             },
+            // Required time in seconds before videos/content are shown (optional)
+            requiredTime: {
+                type: Number,
+                default: null
+            },
             // Content items (videos or text)
             content: [{
                 contentType: {

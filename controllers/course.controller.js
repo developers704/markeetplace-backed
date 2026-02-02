@@ -4,6 +4,536 @@ const Customer = require('../models/customer.model');
 const Quiz = require('../models/quiz.model');
 const { sendCourseAssignmentEmails } = require('../helpers/courseAssignmentHelper.js');
 const Warehouse = require('../models/warehouse.model.js');
+const axios = require('axios');
+const FormData = require('form-data');
+const fs = require('fs');
+
+// ============================================================================
+// Bunny Stream Video Library Configuration
+// ============================================================================
+const BUNNY_LIBRARY_ID = '589566';
+const BUNNY_API_KEY = '258531ca-27bd-46bc-a91ff5bea140-9be6-4d9f';
+const BUNNY_CDN_HOSTNAME = 'vz-95f84657-308.b-cdn.net'; // CDN hostname from Bunny Stream dashboard
+const BUNNY_API_BASE_URL = `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}`;
+
+/**
+ * Poll Bunny Stream API until video processing is complete
+ * 
+ * @param {string} videoGuid - Bunny Stream video GUID
+ * @param {number} maxAttempts - Maximum polling attempts (default: 30 = 60 seconds)
+ * @param {number} pollInterval - Polling interval in milliseconds (default: 2000 = 2 seconds)
+ * @returns {Promise<Object>} - Video details object with HLS URL
+ * @throws {Error} - If video doesn't process within maxAttempts
+ */
+
+
+/**
+ * Extract HLS URL from Bunny Stream video details
+ * 
+ * @param {Object} videoDetails - Video details object from Bunny Stream API
+ * @param {string} videoGuid - Video GUID for error messages
+ * @returns {string} - HLS streaming URL (.m3u8)
+ * @throws {Error} - If HLS URL is not found
+ */
+
+/**
+ * Upload video file to Bunny Stream and return HLS URL
+ * 
+ * This function:
+ * 1. Creates a video entry in Bunny Stream to get a GUID
+ * 2. Uploads the actual video file to that entry
+ * 3. Waits for Bunny Stream to process the video (polls until ready)
+ * 4. Extracts HLS URL from video details
+ * 5. Returns ONLY HLS URL (never MP4 fallback)
+ * 
+ * @param {string} filePath - Local file path of the video
+ * @param {string} fileName - Original filename
+ * @returns {Promise<string>} - HLS streaming URL (.m3u8)
+ * @throws {Error} - If upload fails or HLS URL is not available
+ */
+async function uploadVideoToBunny(filePath, fileName) {
+  let videoGuid;
+
+  try {
+    // 1️⃣ Create video
+    const createRes = await axios.post(
+      `${BUNNY_API_BASE_URL}/videos`,
+      { title: fileName },
+      { headers: { AccessKey: BUNNY_API_KEY } }
+    );
+
+    videoGuid = createRes.data.guid;
+    if (!videoGuid) throw new Error('GUID not returned');
+
+    // 2️⃣ Upload binary
+    const stream = fs.createReadStream(filePath);
+    const { size } = fs.statSync(filePath);
+
+    await axios.put(
+      `${BUNNY_API_BASE_URL}/videos/${videoGuid}`,
+      stream,
+      {
+        headers: {
+          AccessKey: BUNNY_API_KEY,
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': size
+        },
+        maxBodyLength: Infinity
+      }
+    );
+
+    // 3️⃣ WAIT FOR HLS
+    const { hlsUrl } = await pollBunnyStreamUntilHlsReady(videoGuid);
+
+    return hlsUrl;
+
+  } catch (err) {
+    throw new Error(
+      `Bunny upload failed (${videoGuid || 'no-guid'}): ${err.message}`
+    );
+  }
+}
+
+
+/**
+ * Poll Bunny Stream API until video processing is complete
+ * 
+ * @param {string} videoGuid - Bunny Stream video GUID
+ * @param {number} maxAttempts - Maximum polling attempts (default: 30 = 60 seconds)
+ * @param {number} pollInterval - Polling interval in milliseconds (default: 2000 = 2 seconds)
+ * @returns {Promise<Object>} - Video details object with HLS URL
+ * @throws {Error} - If video doesn't process within maxAttempts
+ */
+
+async function pollBunnyStreamUntilHlsReady(
+  videoGuid,
+  maxAttempts = 30,     // 60 seconds (30 * 2 seconds)
+  pollInterval = 2000   // 2 seconds
+) {
+  let lastStatus = null;
+  let lastData = null;
+
+  for (let i = 1; i <= maxAttempts; i++) {
+    await new Promise(r => setTimeout(r, pollInterval));
+
+    const { data } = await axios.get(
+      `${BUNNY_API_BASE_URL}/videos/${videoGuid}`,
+      { headers: { AccessKey: BUNNY_API_KEY } }
+    );
+
+    lastStatus = data.status;
+    lastData = data;
+
+    // Try multiple ways to get HLS URL
+    let hls = data.playbackUrls?.hls || 
+              data.hlsUrl || 
+              data.hls ||
+              data.playbackUrls?.hlsUrl;
+
+    console.log(`[Bunny Stream Polling] Attempt ${i}/${maxAttempts} - Status: ${data.status}, HLS URL: ${hls || 'not found'}`);
+
+    // Check if video is processed (status 4 = Complete, status 3 = Finished but might still be processing)
+    const isProcessed = data.status === 4 || data.status === 'Finished' || data.status === 'Complete';
+    
+    // If HLS URL is available, return it (even if status is 3, sometimes HLS is ready)
+    if (hls && (hls.includes('.m3u8') || hls.includes('playlist.m3u8'))) {
+      console.log(`✅ HLS URL found after ${i} attempts (status: ${data.status})`);
+      return { videoDetails: data, hlsUrl: hls };
+    }
+
+    // If status is 4 (Complete) but HLS URL not in response, try to construct it
+    if (data.status === 4 && !hls) {
+      // Construct HLS URL from video GUID using the correct CDN hostname
+      // Bunny Stream format: https://{cdnHostname}/{videoGuid}/playlist.m3u8
+      const constructedHls = `https://${BUNNY_CDN_HOSTNAME}/${videoGuid}/playlist.m3u8`;
+      console.log(`[Bunny Stream] Status 4 but HLS not in response, constructing: ${constructedHls}`);
+      return { videoDetails: data, hlsUrl: constructedHls };
+    }
+
+    // Continue polling if not ready
+    if (i < maxAttempts) {
+      console.log(`[Bunny Stream Polling] Video still processing... (status: ${data.status}, encodeProgress: ${data.encodeProgress || 'N/A'}%)`);
+    }
+  }
+
+  // If we get here, video didn't process in time
+  // Try to construct HLS URL as fallback if status is 3 or 4
+  // Status 3 = Finished/Encoded, Status 4 = Complete
+  // Even if HLS URL is not in response, we can construct it
+  if (lastStatus === 3 || lastStatus === 4) {
+    // Construct HLS URL from video GUID using the correct CDN hostname
+    // Bunny Stream format: https://{cdnHostname}/{videoGuid}/playlist.m3u8
+    const constructedHls = `https://${BUNNY_CDN_HOSTNAME}/${videoGuid}/playlist.m3u8`;
+    console.log(`[Bunny Stream] Status ${lastStatus} reached but HLS not in response, constructing URL: ${constructedHls}`);
+    return { videoDetails: lastData, hlsUrl: constructedHls };
+  }
+
+  // If status is 2 (Processing) with high progress, try constructing URL
+  // Some videos have HLS available even during processing
+  if (lastStatus === 2 && lastData?.encodeProgress && lastData.encodeProgress > 50) {
+    const constructedHls = `https://${BUNNY_CDN_HOSTNAME}/${videoGuid}/playlist.m3u8`;
+    console.log(`[Bunny Stream] Status 2 with ${lastData.encodeProgress}% progress, trying constructed URL: ${constructedHls}`);
+    return { videoDetails: lastData, hlsUrl: constructedHls };
+  }
+
+  throw new Error(
+    `HLS not ready after ${maxAttempts} attempts. Last status=${lastStatus}, encodeProgress=${lastData?.encodeProgress || 'N/A'}%`
+  );
+}
+
+
+/**
+ * Extract HLS URL from Bunny Stream video details
+ * 
+ * @param {Object} videoDetails - Video details object from Bunny Stream API
+ * @param {string} videoGuid - Video GUID for error messages
+ * @returns {string} - HLS streaming URL (.m3u8)
+ * @throws {Error} - If HLS URL is not found
+ */
+
+
+
+/**
+ * Update MongoDB Course document with HLS URLs for specific content items
+ * 
+ * @param {string} courseId - MongoDB Course document ID
+ * @param {Array} videoUpdates - Array of update objects: [{ chapterIndex, sectionIndex, contentIndex, hlsUrl }]
+ * @returns {Promise<Object>} - Updated Course document
+ * @throws {Error} - If course not found or update fails
+ */
+async function updateCourseVideoUrls(courseId, videoUpdates) {
+  console.log(`[MongoDB Update] Updating course ${courseId} with ${videoUpdates.length} video URL(s)...`);
+  
+  if (!mongoose.Types.ObjectId.isValid(courseId)) {
+    throw new Error('Invalid course ID');
+  }
+
+  const course = await Course.findById(courseId);
+  if (!course) {
+    throw new Error('Course not found');
+  }
+
+  // Build MongoDB update query using dot notation
+  const updateQuery = {};
+  let updateCount = 0;
+
+  for (const update of videoUpdates) {
+    const { chapterIndex, sectionIndex, contentIndex, hlsUrl } = update;
+    
+    // Validate indices
+    if (chapterIndex < 0 || sectionIndex < 0 || contentIndex < 0) {
+      console.warn(`[MongoDB Update] Skipping invalid indices: chapter=${chapterIndex}, section=${sectionIndex}, content=${contentIndex}`);
+      continue;
+    }
+
+    // Check if indices are within bounds
+    if (chapterIndex >= course.chapters.length) {
+      console.warn(`[MongoDB Update] Chapter index ${chapterIndex} out of bounds (course has ${course.chapters.length} chapters)`);
+      continue;
+    }
+
+    const chapter = course.chapters[chapterIndex];
+    if (sectionIndex >= chapter.sections.length) {
+      console.warn(`[MongoDB Update] Section index ${sectionIndex} out of bounds (chapter has ${chapter.sections.length} sections)`);
+      continue;
+    }
+
+    const section = chapter.sections[sectionIndex];
+    if (contentIndex >= section.content.length) {
+      console.warn(`[MongoDB Update] Content index ${contentIndex} out of bounds (section has ${section.content.length} content items)`);
+      continue;
+    }
+
+    // Build dot notation path for MongoDB update
+    const path = `chapters.${chapterIndex}.sections.${sectionIndex}.content.${contentIndex}.videoUrl`;
+    updateQuery[path] = hlsUrl;
+    updateCount++;
+
+    console.log(`[MongoDB Update] Setting ${path} = ${hlsUrl}`);
+  }
+
+  if (updateCount === 0) {
+    console.warn('[MongoDB Update] No valid video URLs to update');
+    return course;
+  }
+
+  // Perform bulk update
+  const updatedCourse = await Course.findByIdAndUpdate(
+    courseId,
+    { $set: updateQuery },
+    { new: true, runValidators: true }
+  );
+
+  if (!updatedCourse) {
+    throw new Error('Failed to update course in MongoDB');
+  }
+
+  console.log(`[MongoDB Update] ✅ Successfully updated ${updateCount} video URL(s) in course ${courseId}`);
+  return updatedCourse;
+}
+
+/**
+ * Process and upload multiple videos from req.files to Bunny Stream
+ * Maps video files to course content items and updates MongoDB with HLS URLs
+ * 
+ * This function:
+ * 1. Extracts video files from req.files based on fieldname pattern
+ * 2. Maps files to course content items (chapter → section → content)
+ * 3. Uploads each video to Bunny Stream
+ * 4. Polls until HLS URL is available for each video
+ * 5. Updates MongoDB Course document with HLS URLs (if courseId provided)
+ * 6. Returns updated chapters with HLS URLs
+ * 
+ * @param {Object} req - Express request object with req.files and req.body
+ * @param {string} courseId - MongoDB Course document ID (for updates) or null (for creates)
+ * @param {Array} chapters - Parsed chapters array from req.body
+ * @returns {Promise<Object>} - Object with updated chapters and upload results
+ * @throws {Error} - If upload fails or HLS URL is missing
+ */
+async function processAndUploadCourseVideos(req, courseId, chapters) {
+  console.log('[Video Processing] ========================================');
+  console.log('[Video Processing] Starting video upload process...');
+  console.log(`[Video Processing] Course ID: ${courseId || 'NEW'}, Chapters: ${chapters?.length || 0}`);
+
+  if (!req.files || req.files.length === 0) {
+    console.log('[Video Processing] No files uploaded, skipping video processing');
+    return {
+      chapters: chapters,
+      uploadResults: [],
+      errors: [],
+      totalVideos: 0,
+      successCount: 0,
+      errorCount: 0
+    };
+  }
+
+  if (!chapters || !Array.isArray(chapters) || chapters.length === 0) {
+    console.log('[Video Processing] No chapters provided, skipping video processing');
+    return {
+      chapters: chapters,
+      uploadResults: [],
+      errors: [],
+      totalVideos: 0,
+      successCount: 0,
+      errorCount: 0
+    };
+  }
+
+  // ========================================================================
+  // STEP 1: Map uploaded files to content items
+  // ========================================================================
+  console.log('[Video Processing] Step 1: Mapping uploaded files to content items...');
+  
+  const fileMap = {};
+  req.files.forEach(file => {
+    // Handle both exact match and with trailing space
+    fileMap[file.fieldname] = file;
+    fileMap[`${file.fieldname} `] = file;
+  });
+
+  const videoUploadTasks = [];
+  const videoUpdates = [];
+
+  // ========================================================================
+  // STEP 2: Identify all video content items that need uploads
+  // ========================================================================
+  console.log('[Video Processing] Step 2: Identifying video content items...');
+  
+  for (let chapterIndex = 0; chapterIndex < chapters.length; chapterIndex++) {
+    const chapter = chapters[chapterIndex];
+    
+    if (!chapter.sections || !Array.isArray(chapter.sections)) {
+      continue;
+    }
+
+    for (let sectionIndex = 0; sectionIndex < chapter.sections.length; sectionIndex++) {
+      const section = chapter.sections[sectionIndex];
+      
+      if (!section.content || !Array.isArray(section.content)) {
+        continue;
+      }
+
+      for (let contentIndex = 0; contentIndex < section.content.length; contentIndex++) {
+        const content = section.content[contentIndex];
+        
+        // Only process video content
+        if (content.contentType !== 'video') {
+          continue;
+        }
+
+        // Check if a video file was uploaded for this content item
+        const videoFieldName = `chapter_video_${chapterIndex}_section_${sectionIndex}_content_${contentIndex}`;
+        const videoFile = fileMap[videoFieldName] || fileMap[`${videoFieldName} `];
+
+        if (!videoFile) {
+          // No file uploaded for this content item, skip
+          // Keep existing videoUrl if present
+          continue;
+        }
+
+        console.log(`[Video Processing] Found video file for Chapter ${chapterIndex + 1}, Section ${sectionIndex + 1}, Content ${contentIndex + 1}: ${videoFile.originalname}`);
+
+        // Create upload task
+        const uploadTask = {
+          chapterIndex,
+          sectionIndex,
+          contentIndex,
+          videoFile,
+          contentTitle: content.title || 'Untitled Video'
+        };
+
+        videoUploadTasks.push(uploadTask);
+      }
+    }
+  }
+
+  if (videoUploadTasks.length === 0) {
+    console.log('[Video Processing] No video files found in request, skipping uploads');
+    
+    // Count existing videos
+    let totalVideos = 0;
+    chapters.forEach(chapter => {
+      if (chapter.sections) {
+        chapter.sections.forEach(section => {
+          if (section.content) {
+            section.content.forEach(content => {
+              if (content.contentType === 'video' && content.videoUrl) {
+                totalVideos++;
+              }
+            });
+          }
+        });
+      }
+    });
+    
+    return {
+      chapters: chapters,
+      uploadResults: [],
+      errors: [],
+      totalVideos: totalVideos,
+      successCount: 0,
+      errorCount: 0
+    };
+  }
+
+  console.log(`[Video Processing] Step 2 Complete: Found ${videoUploadTasks.length} video file(s) to upload`);
+
+  // ========================================================================
+  // STEP 3: Upload videos to Bunny Stream (sequential to avoid rate limits)
+  // ========================================================================
+  console.log('[Video Processing] Step 3: Uploading videos to Bunny Stream...');
+  const uploadResults = [];
+  const errors = [];
+
+  for (let i = 0; i < videoUploadTasks.length; i++) {
+    const task = videoUploadTasks[i];
+    const { chapterIndex, sectionIndex, contentIndex, videoFile, contentTitle } = task;
+
+    console.log(`[Video Processing] [${i + 1}/${videoUploadTasks.length}] Uploading: "${contentTitle}" (${videoFile.originalname})`);
+
+    try {
+      // Upload video to Bunny Stream and get HLS URL
+      const hlsUrl = await uploadVideoToBunny(videoFile.path, videoFile.originalname);
+
+      console.log(`[Video Processing] [${i + 1}/${videoUploadTasks.length}] ✅ Upload successful. HLS URL: ${hlsUrl}`);
+
+      // Update the content item in memory
+      chapters[chapterIndex].sections[sectionIndex].content[contentIndex].videoUrl = hlsUrl;
+
+      // Store update for MongoDB
+      videoUpdates.push({
+        chapterIndex,
+        sectionIndex,
+        contentIndex,
+        hlsUrl
+      });
+
+      uploadResults.push({
+        success: true,
+        chapterIndex,
+        sectionIndex,
+        contentIndex,
+        contentTitle,
+        hlsUrl,
+        fileName: videoFile.originalname
+      });
+
+    } catch (uploadError) {
+      console.error(`[Video Processing] [${i + 1}/${videoUploadTasks.length}] ❌ Upload failed:`, uploadError.message);
+
+      errors.push({
+        chapterIndex,
+        sectionIndex,
+        contentIndex,
+        contentTitle,
+        fileName: videoFile.originalname,
+        error: uploadError.message
+      });
+
+      // Continue with other videos even if one fails
+      // But we'll return errors at the end
+    }
+  }
+
+  console.log(`[Video Processing] Step 3 Complete: ${uploadResults.length} successful, ${errors.length} failed`);
+
+  // ========================================================================
+  // STEP 4: Update MongoDB if courseId is provided (for updates)
+  // ========================================================================
+  if (courseId && videoUpdates.length > 0) {
+    try {
+      console.log(`[Video Processing] Step 4: Updating MongoDB course ${courseId} with ${videoUpdates.length} HLS URL(s)...`);
+      await updateCourseVideoUrls(courseId, videoUpdates);
+      console.log(`[Video Processing] Step 4 Complete: ✅ MongoDB updated successfully`);
+    } catch (mongoError) {
+      console.error(`[Video Processing] Step 4 Failed: ❌ MongoDB update error:`, mongoError.message);
+      // Don't fail the entire request if MongoDB update fails
+      // The HLS URLs are already in the chapters array, so they'll be saved on the main update
+    }
+  } else if (!courseId) {
+    console.log(`[Video Processing] Step 4: Skipping MongoDB update (new course, will be saved after creation)`);
+  }
+
+  // ========================================================================
+  // STEP 5: Count total videos (including existing ones)
+  // ========================================================================
+  let totalVideos = 0;
+  chapters.forEach(chapter => {
+    if (chapter.sections) {
+      chapter.sections.forEach(section => {
+        if (section.content) {
+          section.content.forEach(content => {
+            if (content.contentType === 'video' && content.videoUrl) {
+              totalVideos++;
+            }
+          });
+        }
+      });
+    }
+  });
+
+  console.log(`[Video Processing] Step 5: Total videos in course: ${totalVideos}`);
+
+  // ========================================================================
+  // STEP 6: Return results
+  // ========================================================================
+  if (errors.length > 0) {
+    console.warn(`[Video Processing] ⚠️ Completed with ${errors.length} error(s)`);
+  } else {
+    console.log(`[Video Processing] ✅ All videos processed successfully`);
+  }
+  
+  console.log('[Video Processing] ========================================');
+
+  return {
+    chapters: chapters,
+    uploadResults: uploadResults,
+    errors: errors,
+    totalVideos: totalVideos,
+    successCount: uploadResults.length,
+    errorCount: errors.length
+  };
+}
 
 const createCourse = async (req, res) => {
   try {
@@ -104,29 +634,10 @@ const createCourse = async (req, res) => {
             };
 
             // Process video content
+            // Note: Video uploads are handled by processAndUploadCourseVideos function
+            // This section only processes thumbnails
             if (content.contentType === 'video') {
-              const videoFieldName = `chapter_video_${i}_section_${j}_content_${k}`;
               const thumbnailFieldName = `content_thumbnail_${i}_section_${j}_content_${k}`;
-
-              console.log(`Looking for video file with fieldname: ${videoFieldName}`);
-              console.log(`Available file fieldnames:`, req.files.map(f => f.fieldname));
-
-              // Find the video file in the files array - handle potential spaces in fieldname
-              const videoFile = req.files.find(file =>
-                file.fieldname === videoFieldName ||
-                file.fieldname === `${videoFieldName} `
-              );
-
-              if (videoFile) {
-                processedContentItem.videoUrl = videoFile.path.replace(/\\/g, '/');
-                totalVideos++;
-              } else {
-                return res.status(400).json({
-                  message: `Video file missing for content item ${k + 1} in Section ${j + 1}, Chapter ${i + 1}`,
-                  expectedFieldName: videoFieldName,
-                  availableFieldNames: req.files.map(f => f.fieldname)
-                });
-              }
 
               // Find the thumbnail file in the files array (optional) - handle potential spaces in fieldname
               const thumbnailFile = req.files.find(file =>
@@ -136,6 +647,11 @@ const createCourse = async (req, res) => {
 
               if (thumbnailFile) {
                 processedContentItem.thumbnail = thumbnailFile.path.replace(/\\/g, '/');
+              }
+
+              // Keep existing videoUrl if present (for updates)
+              if (content.videoUrl) {
+                processedContentItem.videoUrl = content.videoUrl;
               }
             }
 
@@ -162,6 +678,38 @@ const createCourse = async (req, res) => {
         deadline: chapter.deadline
       });
     }
+
+    // ========================================================================
+    // STEP: Process and upload videos to Bunny Stream
+    // ========================================================================
+    console.log('[Course Creation] Processing video uploads to Bunny Stream...');
+    const videoProcessingResult = await processAndUploadCourseVideos(
+      req,
+      null, // courseId is null for new courses (will be created after)
+      processedChapters
+    );
+
+    // Update processedChapters with HLS URLs from video processing
+    // Note: processedChapters is const, so we use the result directly
+    const finalChapters = videoProcessingResult.chapters;
+    const finalTotalVideos = videoProcessingResult.totalVideos;
+
+    // Check for upload errors
+    if (videoProcessingResult.errors && videoProcessingResult.errors.length > 0) {
+      const firstError = videoProcessingResult.errors[0];
+      return res.status(500).json({
+        success: false,
+        message: `Failed to upload video: ${firstError.contentTitle}`,
+        error: firstError.error,
+        contentTitle: firstError.contentTitle,
+        chapterIndex: firstError.chapterIndex + 1,
+        sectionIndex: firstError.sectionIndex + 1,
+        contentIndex: firstError.contentIndex + 1,
+        allErrors: videoProcessingResult.errors
+      });
+    }
+
+    console.log(`[Course Creation] ✅ Video processing complete. ${videoProcessingResult.successCount || 0} video(s) uploaded, ${finalTotalVideos} total videos in course`);
 
     // Parse access control
     // Parse access control
@@ -207,8 +755,8 @@ const createCourse = async (req, res) => {
       sequence,
       passingGrade: passingGrade || 70,
       accessControl: parsedAccessControl,
-      chapters: processedChapters,
-      totalVideos,
+      chapters: finalChapters,
+      totalVideos: finalTotalVideos,
       isActive: true
     });
 
@@ -357,11 +905,13 @@ const getCustomerCourses = async (req, res) => {
           // Course is completed if:
           // 1) Progress is 100% OR
           // 2) Status is 'Completed' / 'Done'
-          const isPreviousCourseCompleted = previousEnrollment && (
-            previousEnrollment.progress === 100 ||
-            previousEnrollment.status === 'Completed' ||
-            previousEnrollment.status === 'Done'
-          );
+          // const isPreviousCourseCompleted = previousEnrollment && (
+          //   previousEnrollment.progress === 100 ||
+          //   previousEnrollment.status === 'Completed' ||
+          //   previousEnrollment.status === 'Done'
+          // );
+
+          const isPreviousCourseCompleted = previousEnrollment && isCourseActuallyCompleted(previousCourse, previousEnrollment);
 
           if (isPreviousCourseCompleted) {
             canAccess = true;
@@ -415,6 +965,38 @@ const getCustomerCourses = async (req, res) => {
     });
   }
 };
+
+const isCourseActuallyCompleted = (course, userEnrollment) => {
+  if (!userEnrollment) return false;
+
+  // Overall progress
+  if (userEnrollment.progress < 100) return false;
+
+  // Last chapter
+  const lastChapter = course.chapters?.[course.chapters.length - 1];
+  if (!lastChapter) return false;
+
+  // Enrollment for last chapter
+  const chapterEnrollment = userEnrollment.chapterProgress?.find(
+    ch => ch.chapterId.toString() === lastChapter._id.toString()
+  );
+  if (!chapterEnrollment) return false;
+
+  // Check all sections completed
+  // const allSectionsCompleted = chapterEnrollment.sectionProgress?.every(
+  //   sec => sec.completed === true
+  // );
+  // if (!allSectionsCompleted) return false;
+
+  // Check quiz attempted
+  const quizAttempted = lastChapter.quiz
+    ? chapterEnrollment.quizProgress?.attempts >= 1
+    : true;
+  if (!quizAttempted) return false;
+
+  return true;
+};
+
 
 
 
@@ -630,7 +1212,8 @@ const getSectionDetails = async (req, res) => {
 
         if (isQuizOnlyAccess) {
           // For quiz-only access: require all content in the chapter to be completed
-          allContentCompleted = await isChapterCompleted(parentChapter, {}, userEnrollment);
+          const userQuizResults = await getUserQuizResults(courseId, customerId);
+          allContentCompleted = await isChapterCompleted(parentChapter, userQuizResults, userEnrollment);
         } else {
           // Normal section: require all content in the section to be completed
           allContentCompleted = isSectionCompleted(targetSection, {}, userEnrollment);
@@ -730,10 +1313,25 @@ const getSectionDetails = async (req, res) => {
     if (!processedSection || !processedSection.canAccess) {
       return res.status(403).json({
         success: false,
-        message: 'You cannot access this section. Please complete previous sections first.',
+        message: 'You cannot access this section. Please complete previous sections first. ',
         canAccess: false
       });
     }
+
+    // 🧠 BLOCK ACCESS IF CHAPTER QUIZ EXISTS BUT NOT ATTEMPTED
+      // if (parentChapter.quiz) {
+      //   const quizResult = userQuizResults[parentChapter._id.toString()];
+
+      //   if (!quizResult || quizResult.attempts === 0) {
+      //     return res.status(403).json({
+      //       success: false,
+      //       message: 'Please attempt the chapter quiz to unlock next sections.',
+      //       canAccess: false,
+      //       reason: 'CHAPTER_QUIZ_NOT_ATTEMPTED'
+      //     });
+      //   }
+      // }
+
 
     // Process content with progress (same as before)
     const sectionProgress = userEnrollment.chapterProgress
@@ -798,6 +1396,7 @@ const getSectionDetails = async (req, res) => {
         _id: targetSection._id,
         title: targetSection.title,
         introduction: targetSection.introduction || '',
+        requiredTime: targetSection.requiredTime || 0,
         objective: targetSection.objective || '',
         content: processedContent,
         quiz: null, // Explicitly null — no quiz on normal sections
@@ -1228,6 +1827,13 @@ const processSectionsWithUnlockStatus = async (sections, userQuizResults, chapte
         } else {
           canAccess = false;
         }
+        if (prevSection?.quiz) {
+        const quizResult = userQuizResults?.[prevSection._id.toString()];
+        if (!quizResult || quizResult.attempts === 0) {
+          canAccess = false;
+          sectionStatus = 'Locked';
+        }
+      }
       }
 
       // Determine section status
@@ -1299,6 +1905,27 @@ const processSectionsWithUnlockStatus = async (sections, userQuizResults, chapte
   return processedSections;
 };
 
+const isChapterCompleted = async (chapter, userQuizResults, userEnrollment = null) => {
+  // 1️⃣ All sections must be completed
+  for (const section of chapter.sections) {
+    if (!isSectionCompleted(section, userQuizResults, userEnrollment)) {
+      return false;
+    }
+  }
+
+  // 2️⃣ If chapter has quiz → ATTEMPT REQUIRED
+  if (chapter.quiz) {
+    const quizResult = userQuizResults?.[chapter._id.toString()];
+
+    if (!quizResult || quizResult.attempts === 0) {
+      return false; 
+    }
+  }
+
+  return true;
+};
+
+
 // Helper function to check if chapter is completed
 // const isChapterCompleted = async (chapter, userQuizResults) => {
 //   // Chapter is completed if all sections with quizzes are passed with 70%+
@@ -1313,14 +1940,14 @@ const processSectionsWithUnlockStatus = async (sections, userQuizResults, chapte
 //   return true;
 // };
 
-const isChapterCompleted = async (chapter, userQuizResults, userEnrollment = null) => {
-  for (const section of chapter.sections) {
-    if (!isSectionCompleted(section, userQuizResults, userEnrollment)) {
-      return false;
-    }
-  }
-  return true;
-};
+// const isChapterCompleted = async (chapter, userQuizResults, userEnrollment = null) => {
+//   for (const section of chapter.sections) {
+//     if (!isSectionCompleted(section, userQuizResults, userEnrollment)) {
+//       return false;
+//     }
+//   }
+//   return true;
+// };
 
 
 
@@ -3863,7 +4490,7 @@ const updateCourse = async (req, res) => {
     if (!existingCourse) {
       return res.status(404).json({ message: 'Course not found' });
     }
-
+    
     const {
       name,
       description,
@@ -3960,31 +4587,38 @@ const updateCourse = async (req, res) => {
       parsedChapters = convertFormDataToChapters(chaptersObj);
     }
     if (parsedChapters && parsedChapters.length > 0) {
-      // Map: fieldname => file path
-      if (req.files && req.files.length > 0) {
-        const fileMap = {};
-        req.files.forEach(file => {
-          fileMap[file.fieldname] = file.path.replace(/\\/g, '/');
-        });
-        // Traverse chapters/sections/content and set videoUrl
-        parsedChapters.forEach((chapter, cIdx) => {
-          if (chapter.sections) {
-            chapter.sections.forEach((section, sIdx) => {
-              if (section.content) {
-                section.content.forEach((content, conIdx) => {
-                  const fieldName = `chapter_video_${cIdx}_section_${sIdx}_content_${conIdx}`;
-                  if (fileMap[fieldName]) {
-                    content.videoUrl = fileMap[fieldName];
-                  }
-                });
-              }
-            });
-          }
+      // ========================================================================
+      // Process and upload videos to Bunny Stream
+      // ========================================================================
+      console.log('[Course Update] Processing video uploads...');
+      const videoProcessingResult = await processAndUploadCourseVideos(
+        req,
+        courseId, // courseId for MongoDB updates
+        parsedChapters
+      );
+
+      // Update parsedChapters with HLS URLs from video processing
+      parsedChapters = videoProcessingResult.chapters;
+
+      // Check for upload errors
+      if (videoProcessingResult.errors && videoProcessingResult.errors.length > 0) {
+        const firstError = videoProcessingResult.errors[0];
+        return res.status(500).json({
+          message: `Failed to upload video: ${firstError.contentTitle}`,
+          error: firstError.error,
+          contentTitle: firstError.contentTitle,
+          chapterIndex: firstError.chapterIndex + 1,
+          sectionIndex: firstError.sectionIndex + 1,
+          contentIndex: firstError.contentIndex + 1,
+          allErrors: videoProcessingResult.errors
         });
       }
-      const totalVideos = countTotalVideos(parsedChapters);
+      
+      const totalVideos = videoProcessingResult.totalVideos;
       updateData.chapters = parsedChapters;
       updateData.totalVideos = totalVideos;
+
+      console.log(`[Course Update] ✅ Video processing complete. ${videoProcessingResult.successCount} video(s) uploaded, ${totalVideos} total videos in course`);
     }
 
     // Update the course
@@ -7238,6 +7872,154 @@ const getDashboardSummary = async (req, res) => {
 
 
 // Upload image from React Quill editor
+/**
+ * Proxy endpoint to stream videos from Bunny.net with proper CORS headers
+ * This solves CORS issues when accessing Bunny.net CDN directly from frontend
+ */
+const streamVideo = async (req, res) => {
+  try {
+    const { videoUrl } = req.query;
+    
+    if (!videoUrl) {
+      return res.status(400).json({ message: 'Video URL is required' });
+    }
+
+    // Validate that the URL is from Bunny.net (security check)
+    if (!videoUrl.includes('b-cdn.net') && !videoUrl.includes('bunnycdn.com')) {
+      return res.status(400).json({ message: 'Invalid video URL' });
+    }
+
+    // Set CORS headers first
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+
+    // Handle OPTIONS request for CORS preflight
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end();
+    }
+    // Prepare headers for Bunny.net CDN request
+    // Note: CDN requests don't require API key - only management API needs it
+    // The API key is only for video.bunnycdn.com, not for b-cdn.net (CDN)
+    const bunnyHeaders = {
+      'Accept': 'video/*, application/vnd.apple.mpegurl, application/x-mpegURL, */*',
+    };
+    
+    // Check if this is an HLS playlist (.m3u8) - handle differently
+    const isHlsPlaylist = videoUrl.includes('.m3u8') || videoUrl.includes('playlist.m3u8');
+    
+    if (isHlsPlaylist) {
+      // For HLS playlists, fetch as text to rewrite segment URLs
+      const playlistData = await axios.get(videoUrl, {
+        responseType: 'text',
+        headers: bunnyHeaders,
+      });
+
+      // Rewrite segment URLs in the playlist to use our proxy
+      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      const proxyBase = `${baseUrl}/api/courses/video-proxy?videoUrl=`;
+      
+      // Parse the original video URL to get base URL for relative segments
+      const originalUrlObj = new URL(videoUrl);
+      const basePath = originalUrlObj.origin + originalUrlObj.pathname.substring(0, originalUrlObj.pathname.lastIndexOf('/') + 1);
+      
+      // Replace segment URLs in the playlist
+      let modifiedPlaylist = playlistData.data;
+      
+      // Match segment URLs - handle both absolute and relative
+      // Pattern: lines that contain .ts (segment files) or .m3u8 (variant playlists)
+      let segmentCount = 0;
+      modifiedPlaylist = modifiedPlaylist.split('\n').map(line => {
+        const trimmedLine = line.trim();
+        
+        // Skip comments and empty lines
+        if (trimmedLine.startsWith('#') || !trimmedLine) {
+          return line;
+        }
+        
+        // Check if this line contains a segment URL (.ts files or variant .m3u8 playlists)
+        // Exclude lines that are comments (start with #)
+        if ((trimmedLine.includes('.ts') || trimmedLine.includes('.m3u8')) && !trimmedLine.startsWith('#')) {
+          let segmentUrl = trimmedLine;
+          
+          // If relative URL, make it absolute using the base path
+          if (!segmentUrl.startsWith('http://') && !segmentUrl.startsWith('https://')) {
+            try {
+              segmentUrl = new URL(segmentUrl, basePath).href;
+            } catch (e) {
+              console.warn(`[Proxy] Failed to construct absolute URL for: ${segmentUrl}`, e.message);
+              return line; // Return original line if URL construction fails
+            }
+          }
+          
+          // Only proxy Bunny.net URLs
+          if (segmentUrl.includes('b-cdn.net') || segmentUrl.includes('bunnycdn.com')) {
+            const proxiedUrl = `${proxyBase}${encodeURIComponent(segmentUrl)}`;
+            segmentCount++;
+            // Replace the URL in the line while preserving any leading/trailing whitespace
+            return line.replace(trimmedLine, proxiedUrl);
+          }
+        }
+        
+        return line;
+      }).join('\n');
+      
+      console.log(`[Proxy] Rewrote HLS playlist: ${segmentCount} segment URL(s) proxied`);
+
+      // Set content type for HLS playlist
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Content-Length', Buffer.byteLength(modifiedPlaylist));
+      res.status(200);
+      res.send(modifiedPlaylist);
+      return;
+    }
+
+    // For non-HLS content (MP4, etc.), stream directly
+    if (req.headers.range) {
+      bunnyHeaders['Range'] = req.headers.range;
+    }
+
+    const response = await axios.get(videoUrl, {
+      responseType: 'stream',
+      headers: bunnyHeaders,
+    });
+
+    const contentType = response.headers['content-type'] || 'video/mp4';
+    res.setHeader('Content-Type', contentType);
+
+    // Forward content length and range headers from Bunny.net
+    if (response.headers['content-length']) {
+      res.setHeader('Content-Length', response.headers['content-length']);
+    }
+    
+    if (response.headers['content-range']) {
+      res.setHeader('Content-Range', response.headers['content-range']);
+      res.status(206); // Partial Content
+    } else {
+      res.status(200); // OK
+    }
+    
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    // Stream video from Bunny.net to client
+    response.data.pipe(res);
+    
+    response.data.on('error', (err) => {
+      console.error('Stream error:', err);
+      if (!res.headersSent) {
+        res.status(500).end();
+      }
+    });
+  } catch (error) {
+    console.error('Error streaming video:', error.message);
+    res.status(500).json({ 
+      message: 'Failed to stream video',
+      error: error.message 
+    });
+  }
+};
+
 const uploadQuillImage = async (req, res) => {
   try {
     if (!req.file) {
@@ -7267,6 +8049,7 @@ const uploadQuillImage = async (req, res) => {
 };
 
 module.exports = {
+  streamVideo,
   uploadQuillImage,
   createCourse,
   updateVideoLikeDislike,
