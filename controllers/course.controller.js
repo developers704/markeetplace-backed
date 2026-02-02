@@ -853,10 +853,11 @@ const getCustomerCourses = async (req, res) => {
       });
     }
 
-    // Find courses accessible to customer's role and warehouse
+    // ✅ CRITICAL FIX: Find BOTH main courses AND short courses accessible to customer's role and warehouse
+    // This allows navigation between short courses when "Go to Next Course" is clicked
     const accessibleCourses = await Course.find({
       isActive: true,
-      courseType: 'Course',
+      courseType: { $in: ['Course', 'Short Course'] }, // ✅ Include both Course and Short Course
       $and: [
         {
           $or: [
@@ -1953,45 +1954,116 @@ const isChapterCompleted = async (chapter, userQuizResults, userEnrollment = nul
 
 
 // Helper function to check if section is completed
-const isSectionCompleted = (section, userQuizResults, userEnrollment = null) => {
+// const isSectionCompleted = (section, userQuizResults, userEnrollment = null) => {
 
-  // Content completion drives progression (quizzes are grading, not locking)
-  if (!section.content || section.content.length === 0) {
+//   // ✅ CRITICAL FIX: Sections with NO content and NO quiz must NOT auto-complete
+//   // Empty sections require manual completion via button
+//   const hasContent = Array.isArray(section.content) && section.content.length > 0;
+//   const hasQuiz = !!section.quiz;
+
+//   // If section has no content and no quiz, check if it was manually completed
+//   if (!hasContent && !hasQuiz) {
+//     if (!userEnrollment || !userEnrollment.chapterProgress) {
+//       return false; // Not completed - requires manual completion
+//     }
+
+//     // Find section progress to check if manually completed
+//     let sectionProgress = null;
+//     for (const chapterProgress of userEnrollment.chapterProgress) {
+//       sectionProgress = chapterProgress.sectionProgress?.find(
+//         (sp) => sp.sectionId && sp.sectionId.toString() === section._id.toString()
+//       );
+//       if (sectionProgress) break;
+//     }
+
+//     // Return true only if section was manually completed
+//     return sectionProgress?.completed === true && sectionProgress?.manualCompleted === true;
+//   }
+
+//   // Section has content - check content completion
+//   if (!userEnrollment || !userEnrollment.chapterProgress) {
+//     return false;
+//   }
+
+//   // Find section progress by checking all chapters
+//   let sectionProgress = null;
+//   for (const chapterProgress of userEnrollment.chapterProgress) {
+//     sectionProgress = chapterProgress.sectionProgress?.find(
+//       (sp) => sp.sectionId && sp.sectionId.toString() === section._id.toString()
+//     );
+//     if (sectionProgress) break;
+//   }
+
+//   if (!sectionProgress) return false;
+
+//   // ✅ SAFETY CHECK: Ensure content array exists
+//   if (!Array.isArray(section.content) || section.content.length === 0) {
+//     return false; // No content means not completed (unless manually completed above)
+//   }
+
+//   for (const content of section.content) {
+//     const contentProgress = sectionProgress.contentProgress?.find(
+//       (cp) => cp.contentId && cp.contentId.toString() === content._id.toString()
+//     );
+
+//     if (!contentProgress) return false;
+
+//     if (content.contentType === 'video') {
+//       const minWatchTime = content.minimumWatchTime || 0;
+//       if ((contentProgress.watchedDuration || 0) < minWatchTime) return false;
+//     } else if (content.contentType === 'text') {
+//       if (!contentProgress.completed) return false;
+//     }
+//   }
+
+//   return true;
+// };
+const isSectionCompleted = (section, userQuizResults, userEnrollment) => {
+  if (!section) return false;
+
+  // 🔑 Find sectionProgress
+  const chapterProgress = userEnrollment?.chapterProgress?.find(cp =>
+    cp.sectionProgress?.some(sp => sp.sectionId.toString() === section._id.toString())
+  );
+
+  const sectionProgress = chapterProgress?.sectionProgress?.find(
+    sp => sp.sectionId.toString() === section._id.toString()
+  );
+
+  // ✅ 1️⃣ MANUAL COMPLETION (EMPTY SECTION)
+  if (
+    sectionProgress?.completed === true &&
+    Array.isArray(section.content) &&
+    section.content.length === 0 &&
+    !section.quiz
+  ) {
     return true;
   }
 
-  if (!userEnrollment || !userEnrollment.chapterProgress) {
-    return false;
-  }
-
-  // Find section progress by checking all chapters
-  let sectionProgress = null;
-  for (const chapterProgress of userEnrollment.chapterProgress) {
-    sectionProgress = chapterProgress.sectionProgress?.find(
-      (sp) => sp.sectionId && sp.sectionId.toString() === section._id.toString()
-    );
-    if (sectionProgress) break;
-  }
-
+  // ❌ No progress at all
   if (!sectionProgress) return false;
 
-  for (const content of section.content) {
-    const contentProgress = sectionProgress.contentProgress?.find(
-      (cp) => cp.contentId && cp.contentId.toString() === content._id.toString()
-    );
+  // ✅ 2️⃣ CONTENT BASED COMPLETION
+  if (Array.isArray(section.content) && section.content.length > 0) {
+    return section.content.every(item => {
+      const cp = sectionProgress.contentProgress?.find(
+        p => p.contentId.toString() === item._id.toString()
+      );
 
-    if (!contentProgress) return false;
+      if (!cp) return false;
 
-    if (content.contentType === 'video') {
-      const minWatchTime = content.minimumWatchTime || 0;
-      if ((contentProgress.watchedDuration || 0) < minWatchTime) return false;
-    } else if (content.contentType === 'text') {
-      if (!contentProgress.completed) return false;
-    }
+      if (item.contentType === 'video') {
+        return (cp.watchedDuration || 0) >= (item.minimumWatchTime || 0);
+      }
+
+      return cp.completed === true;
+    });
   }
 
-  return true;
+  // ❌ Empty but NOT manually completed
+  return false;
 };
+
 
 
 // const isSectionCompleted = (section, userQuizResults) => {
@@ -3066,9 +3138,18 @@ const getUserCourseProgress = async (req, res) => {
         for (const section of chapter.sections) {
           totalSections++;
 
-          // Auto-complete empty sections (no content, no quiz)
+          // ✅ CRITICAL FIX: Do NOT auto-complete empty sections
+          // Sections with no content and no quiz require manual completion
+          // Only count as completed if they have been manually completed
           if ((!section.content || section.content.length === 0) && !section.quiz) {
-            completedSections++;
+            // Check if section was manually completed
+            const sectionProgress = chapterProgress?.sectionProgress?.find(
+              sp => sp && sp.sectionId && sp.sectionId.toString() === section._id.toString()
+            );
+            if (sectionProgress?.completed === true && sectionProgress?.manualCompleted === true) {
+              completedSections++;
+            }
+            // Do NOT auto-increment completedSections - section requires manual completion
             continue;
           }
 
@@ -3287,6 +3368,12 @@ const getUserCourseProgress = async (req, res) => {
       if (totalSections > 0) {
         overallProgress = Math.round((completedSections / totalSections) * 100);
       }
+      
+      // ✅ CRITICAL FIX: Use enrollment.progress if it's 100% and matches calculated progress
+      // This ensures we respect the database status when course is truly completed
+      if (enrollment.progress === 100 && overallProgress >= 100) {
+        overallProgress = 100;
+      }
 
       // ✅ USE ENROLLMENT.GRADEPERCENTAGE IF AVAILABLE (calculated by quiz controller)
       // Otherwise calculate from quiz results
@@ -3317,37 +3404,44 @@ const getUserCourseProgress = async (req, res) => {
         gradePercentage = 100;
         gradeLabel = 'A';
       }
-      let status = 'Not Started';
+      
       // ✅ NO-CONTENT/NO-QUIZ COURSES AUTO-COMPLETE WITH 100%
       const hasAnyContentOrQuiz = totalContent > 0 || totalQuizzes > 0;
       if (!hasAnyContentOrQuiz) {
         overallProgress = 100;
         gradePercentage = 100;
         gradeLabel = 'A';
-        status = 'Completed';
         completedSections = totalSections;
         completedContent = totalContent;
       }
 
-      // ✅ NO-CONTENT/NO-QUIZ COURSES AUTO-COMPLETE WITH 100% AND GRADE A
-      // const hasAnyContentOrQuiz = totalContent > 0 || totalQuizzes > 0;
-      // if (!hasAnyContentOrQuiz) {
-      //   overallProgress = 100;
-      //   gradePercentage = 100;
-      //   gradeLabel = 'A';
-      //   status = 'Completed';
-      //   completedSections = totalSections;
-      //   completedContent = totalContent;
-      // }
-
       // ✅ STATUS (CONTENT-ONLY PROGRESSION)
+      // Priority: 1) Certificate Approved → Done, 2) Enrollment status if Completed/Done, 3) Calculate from progress
+      let status = 'Not Started';
       
       if (enrollment.certificateRequestStatus === 'Approved') {
         status = 'Done';
+      } else if (enrollment.status === 'Done' || enrollment.status === 'Completed') {
+        // ✅ CRITICAL FIX: Respect enrollment status from database if already Completed/Done
+        // If enrollment status is Completed/Done AND progress is 100%, use enrollment status
+        if (overallProgress === 100 || enrollment.progress === 100) {
+          status = enrollment.status === 'Done' ? 'Done' : 'Completed';
+        } else {
+          // Enrollment says completed but progress doesn't match - recalculate based on actual progress
+          if (overallProgress === 100) {
+            status = 'Completed';
+          } else if (overallProgress > 0) {
+            status = 'In Progress';
+          }
+        }
       } else if (overallProgress === 100) {
+        // ✅ CRITICAL FIX: If calculated progress is 100%, set status to Completed
         status = 'Completed';
       } else if (overallProgress > 0) {
         status = 'In Progress';
+      } else {
+        // ✅ Use enrollment status if no progress calculated (fallback)
+        status = enrollment.status || 'Not Started';
       }
 
       // ✅ CERTIFICATE INFO (PROGRAM-LEVEL) - eligibility will be computed after all courses processed
@@ -3583,11 +3677,16 @@ const getUserCourseProgress = async (req, res) => {
 
     const passingThreshold = 70;
     // ✅ CERTIFICATE ELIGIBILITY: Must complete ALL ASSIGNED main courses (not just enrolled ones)
+    // ✅ CRITICAL FIX: Use allMainCoursesCompleted as fallback if no assigned courses
+    const coursesCompleted = assignedMainCourseIds.length > 0 
+      ? allAssignedMainCoursesCompleted 
+      : allMainCoursesCompleted;
+    
     let eligibleForCertificate =
-      allAssignedMainCoursesCompleted &&
+      coursesCompleted &&
       (totalQuizzesAcrossMain === 0 || programPercentage >= passingThreshold);
     let requiresShortCourses =
-      allAssignedMainCoursesCompleted &&
+      coursesCompleted &&
       totalQuizzesAcrossMain > 0 &&
       programPercentage < passingThreshold;
 
@@ -3607,6 +3706,31 @@ const getUserCourseProgress = async (req, res) => {
         }
       }
     }
+    
+    // ✅ CRITICAL FIX: Also check if main course percentage >= 70% (direct certificate eligibility)
+    // OR if any short course has gradePercentage >= 70% (individual short course eligibility)
+    if (coursesCompleted) {
+      if (programPercentage >= passingThreshold) {
+        eligibleForCertificate = true;
+        requiresShortCourses = false;
+      } else if (shortCourses.length > 0) {
+        // Check if any short course has gradePercentage >= 70%
+        const hasPassingShortCourse = shortCourses.some(
+          sc => (sc.gradePercentage || 0) >= passingThreshold && 
+                (sc.status === 'Completed' || sc.status === 'Done' || sc.progress === 100)
+        );
+        if (hasPassingShortCourse) {
+          eligibleForCertificate = true;
+          requiresShortCourses = false;
+        }
+      }
+    }
+    
+    // ✅ CRITICAL FIX: Also check if main course percentage >= 70% (direct certificate eligibility)
+    if (coursesCompleted && programPercentage >= passingThreshold) {
+      eligibleForCertificate = true;
+      requiresShortCourses = false;
+    }
 
     // ✅ PROCESS SHORT COURSES: Add lock/unlock logic based on assigned main course completion and program percentage
     // console.log(`Short course unlock check: allAssignedMainCoursesCompleted=${allAssignedMainCoursesCompleted}, programPercentage=${programPercentage}, passingThreshold=${passingThreshold}`);
@@ -3616,10 +3740,14 @@ const getUserCourseProgress = async (req, res) => {
       sc.lockReason = 'Complete all main courses first';
       
       // Short course unlocks ONLY if:
-      // 1. All assigned main courses are completed
+      // 1. All assigned main courses are completed (or all enrolled if no assigned)
       // 2. Program percentage < 70 (needs remediation)
       // 3. Short course is not already completed/passed (grade < 70% AND progress < 100%)
-      if (allAssignedMainCoursesCompleted) {
+      const coursesCompletedForShort = assignedMainCourseIds.length > 0 
+        ? allAssignedMainCoursesCompleted 
+        : allMainCoursesCompleted;
+      
+      if (coursesCompletedForShort) {
         if (programPercentage < passingThreshold) {
           // Check if short course is already completed or passed
           const isShortCourseCompleted = sc.status === 'Completed' || sc.status === 'Done' || sc.progress === 100;
@@ -3672,12 +3800,17 @@ const getUserCourseProgress = async (req, res) => {
 
       const isAnchor = anchorCourseId && c._id.toString() === anchorCourseId;
       const baseEligible = isAnchor && eligibleForCertificate;
+      
+      // ✅ CRITICAL FIX: Check if this specific course has gradePercentage >= 70% for direct eligibility
+      const courseDirectEligible = (c.gradePercentage || 0) >= passingThreshold && 
+        (c.status === 'Completed' || c.status === 'Done' || c.progress === 100);
 
       // Only expose remediation flag on anchor course to avoid repeating CTA on every course
       c.certificateInfo.requiresShortCourses = isAnchor ? requiresShortCourses : false;
-      c.certificateInfo.eligible = baseEligible;
+      // ✅ CRITICAL FIX: Eligible if base eligible OR course directly eligible (grade >= 70%)
+      c.certificateInfo.eligible = baseEligible || (isAnchor && courseDirectEligible);
       c.certificateInfo.canRequest =
-        baseEligible &&
+        (baseEligible || (isAnchor && courseDirectEligible)) &&
         !requiresShortCourses &&
         (c.status === 'Completed' || c.status === 'Done' || c.progress === 100) &&
         c.certificateInfo.requestStatus !== 'Requested' &&

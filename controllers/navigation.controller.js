@@ -1995,30 +1995,49 @@ const updateContentProgress = async (req, res) => {
     // UPDATE SECTION/CHAPTER COMPLETION (CONTENT-ONLY)
     // =======================
 
-    // Mark section completed when all its content meets completion rules
-    const isSectionContentCompleted = section.content.every((item) => {
-      const cp = sectionProgress.contentProgress.find(
-        (p) => p.contentId.toString() === item._id.toString()
-      );
-      if (!cp) return false;
+    // ✅ CRITICAL FIX: Sections with NO content and NO quiz must NOT auto-complete
+    // Empty sections require manual completion via button
+    const hasContent = Array.isArray(section.content) && section.content.length > 0;
+    const hasQuiz = !!section.quiz;
 
-      if (item.contentType === 'video') {
-        const minWatchTime = item.minimumWatchTime || 0;
-        return (cp.watchedDuration || 0) >= minWatchTime;
-      }
+    // Only auto-complete if section has actual content
+    let isSectionContentCompleted = false;
+    if (hasContent) {
+      // ✅ CRITICAL FIX: Mark section completed when all its content meets completion rules
+      // Check ALL content items, not just current one
+      isSectionContentCompleted = section.content.every((item) => {
+        const cp = sectionProgress.contentProgress.find(
+          (p) => p.contentId.toString() === item._id.toString()
+        );
+        if (!cp) return false;
 
-      // text/other
-      return cp.completed === true;
-    });
+        if (item.contentType === 'video') {
+          const minWatchTime = item.minimumWatchTime || 0;
+          // ✅ CRITICAL: Check if watchedDuration meets minimumWatchTime AND completed flag is true
+          const meetsWatchTime = (cp.watchedDuration || 0) >= minWatchTime;
+          const isMarkedCompleted = cp.completed === true;
+          return meetsWatchTime && isMarkedCompleted;
+        }
+
+        // text/other
+        return cp.completed === true;
+      });
+    } else {
+      // Section has no content - do NOT auto-complete (requires manual completion)
+      isSectionContentCompleted = false;
+    }
     sectionProgress.completed = isSectionContentCompleted;
 
     // Mark chapter completed when all its sections are completed (content-only)
-    const isChapterContentCompleted = chapter.sections.every((sec) => {
-      const sp = chapterProgress.sectionProgress.find(
-        (p) => p.sectionId.toString() === sec._id.toString()
-      );
-      return sp?.completed === true;
-    });
+    // ✅ SAFETY CHECK: Ensure sections array exists and is valid
+    const isChapterContentCompleted = Array.isArray(chapter.sections) && chapter.sections.length > 0
+      ? chapter.sections.every((sec) => {
+          const sp = chapterProgress.sectionProgress.find(
+            (p) => p.sectionId.toString() === sec._id.toString()
+          );
+          return sp?.completed === true;
+        })
+      : false;
     chapterProgress.completed = isChapterContentCompleted;
 
     // Recalculate overall progress (content-only)
@@ -2087,33 +2106,55 @@ function calculateOverallProgress(course, enrollmentIndex) {
   let totalItems = 0;
   let completedItems = 0;
   
+  // ✅ SAFETY CHECK: Ensure chapters array exists
+  if (!Array.isArray(course.chapters)) {
+    console.log('No chapters array found');
+    return 0;
+  }
+  
   // Count ONLY content items (videos/text). Quizzes are grading, not progression.
   course.chapters.forEach((chapter) => {
+    // ✅ SAFETY CHECK: Ensure sections array exists
+    if (!Array.isArray(chapter.sections)) {
+      console.log(`Chapter ${chapter._id} has no sections array`);
+      return;
+    }
+    
     chapter.sections.forEach((section) => {
+      // ✅ SAFETY CHECK: Ensure content array exists
+      if (!Array.isArray(section.content)) {
+        console.log(`Section ${section._id} has no content array`);
+        return;
+      }
+      
       section.content.forEach((content) => {
         totalItems++;
 
-        const chapterProgress = userEnrollment.chapterProgress.find(
-          (cp) => cp.chapterId.toString() === chapter._id.toString()
+        const chapterProgress = userEnrollment.chapterProgress?.find(
+          (cp) => cp?.chapterId?.toString() === chapter._id.toString()
         );
         const sectionProgress = chapterProgress?.sectionProgress?.find(
-          (sp) => sp.sectionId.toString() === section._id.toString()
+          (sp) => sp?.sectionId?.toString() === section._id.toString()
         );
         const contentProgress = sectionProgress?.contentProgress?.find(
-          (cp) => cp.contentId.toString() === content._id.toString()
+          (cp) => cp?.contentId?.toString() === content._id.toString()
         );
 
         if (!contentProgress) return;
 
         if (content.contentType === 'video') {
           const minWatchTime = content.minimumWatchTime || 0;
-          if ((contentProgress.watchedDuration || 0) >= minWatchTime) {
+          // ✅ CRITICAL FIX: Check both watchedDuration AND completed flag for videos
+          const meetsWatchTime = (contentProgress.watchedDuration || 0) >= minWatchTime;
+          const isMarkedCompleted = contentProgress.completed === true;
+          if (meetsWatchTime && isMarkedCompleted) {
             completedItems++;
           }
           return;
         }
 
-        if (contentProgress.completed) {
+        // text/other content types
+        if (contentProgress.completed === true) {
           completedItems++;
         }
       });
@@ -2126,6 +2167,185 @@ function calculateOverallProgress(course, enrollmentIndex) {
   
   return calculatedProgress;
 }
+
+// 🆕 MANUAL SECTION COMPLETION API
+// POST /api/navigation/:courseId/chapters/:chapterId/sections/:sectionId/manual-complete
+// Marks a section as completed manually (for sections with no content and no quiz)
+const manualCompleteSection = async (req, res) => {
+  try {
+    const { courseId, chapterId, sectionId } = req.params;
+    const userId = req.user.id;
+
+    const course = await Course.findById(courseId);
+    if (!course) {
+      return res.status(404).json({ success: false, message: 'Course not found' });
+    }
+
+    // ✅ Enrollment check
+    const enrollmentIndex = course.enrolledUsers.findIndex(
+      e => e.user.toString() === userId
+    );
+    if (enrollmentIndex === -1) {
+      return res.status(404).json({ success: false, message: 'User not enrolled' });
+    }
+
+    const enrollment = course.enrolledUsers[enrollmentIndex];
+
+    // ✅ Update status on first access
+    if (enrollment.status === 'Not Started') {
+      enrollment.status = 'In Progress';
+    }
+
+    // =======================
+    // FIND CHAPTER / SECTION
+    // =======================
+
+    const chapterIndex = course.chapters.findIndex(c => c._id.toString() === chapterId);
+    if (chapterIndex === -1) {
+      return res.status(404).json({ success: false, message: 'Chapter not found' });
+    }
+    const chapter = course.chapters[chapterIndex];
+
+    const sectionIndex = chapter.sections.findIndex(s => s._id.toString() === sectionId);
+    if (sectionIndex === -1) {
+      return res.status(404).json({ success: false, message: 'Section not found' });
+    }
+    const section = chapter.sections[sectionIndex];
+
+    // ✅ VALIDATION: Only allow manual completion for sections with NO content and NO quiz
+    const hasContent = Array.isArray(section.content) && section.content.length > 0;
+    const hasQuiz = !!section.quiz;
+
+    if (hasContent || hasQuiz) {
+      return res.status(400).json({
+        success: false,
+        message: 'This section cannot be manually completed. It has content or quiz that must be completed first.',
+        hasContent,
+        hasQuiz
+      });
+    }
+
+    // =======================
+    // ENSURE CHAPTER PROGRESS
+    // =======================
+
+    let chapterProgress = enrollment.chapterProgress.find(
+      cp => cp.chapterId.toString() === chapterId
+    );
+
+    if (!chapterProgress) {
+      chapterProgress = {
+        chapterId: chapter._id,
+        sequence: chapterIndex,
+        completed: false,
+        sectionProgress: []
+      };
+      enrollment.chapterProgress.push(chapterProgress);
+    }
+
+    // =======================
+    // ENSURE SECTION PROGRESS
+    // =======================
+
+    let sectionProgress = chapterProgress.sectionProgress.find(
+      sp => sp.sectionId.toString() === sectionId
+    );
+
+    if (!sectionProgress) {
+      sectionProgress = {
+        sectionId: section._id,
+        sequence: sectionIndex,
+        completed: false,
+        contentProgress: []
+      };
+      chapterProgress.sectionProgress.push(sectionProgress);
+    }
+
+    // =======================
+    // MARK SECTION AS COMPLETED
+    // =======================
+
+    sectionProgress.completed = true;
+    sectionProgress.manualCompleted = true; // Flag to indicate manual completion
+    sectionProgress.manualCompletedAt = new Date();
+
+    // =======================
+    // UPDATE CURRENT POSITION
+    // =======================
+
+    enrollment.currentChapter = chapterIndex;
+    enrollment.currentSection = sectionIndex;
+    enrollment.currentContent = null; // No content in manual sections
+
+    // =======================
+    // UPDATE CHAPTER COMPLETION
+    // =======================
+
+    // Mark chapter completed when all its sections are completed
+    // ✅ SAFETY CHECK: Ensure sections array exists and is valid
+    const isChapterContentCompleted = Array.isArray(chapter.sections) && chapter.sections.length > 0
+      ? chapter.sections.every((sec) => {
+          const sp = chapterProgress.sectionProgress.find(
+            (p) => p.sectionId.toString() === sec._id.toString()
+          );
+          return sp?.completed === true;
+        })
+      : false;
+    chapterProgress.completed = isChapterContentCompleted;
+
+    // Recalculate overall progress
+    enrollment.progress = calculateOverallProgress(course, enrollmentIndex);
+
+    // Update status from progress (don't override final status like "Done")
+    if (enrollment.status !== 'Done') {
+      if (enrollment.progress === 100) {
+        enrollment.status = 'Completed';
+        enrollment.completionDate = enrollment.completionDate || new Date();
+      } else if (enrollment.progress > 0) {
+        enrollment.status = 'In Progress';
+      } else {
+        enrollment.status = 'Not Started';
+      }
+    }
+
+    await course.save();
+
+    // =======================
+    // FIND NEXT CONTENT
+    // =======================
+
+    let nextContent = findNextContent(
+      course,
+      chapterIndex,
+      sectionIndex,
+      -1, // No content index for manual sections
+      enrollmentIndex
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Section marked as completed successfully',
+      data: {
+        progress: enrollment.progress,
+        status: enrollment.status,
+        currentChapter: enrollment.currentChapter,
+        currentSection: enrollment.currentSection,
+        currentContent: enrollment.currentContent,
+        nextContent,
+        courseCompleted:
+          enrollment.status === 'Completed' || enrollment.status === 'Failed'
+      }
+    });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to manually complete section',
+      error: error.message
+    });
+  }
+};
 
 // 🆕 HELPER FUNCTION: Check Course Completion
 function checkCourseCompletion(course, enrollmentIndex) {
@@ -2283,7 +2503,8 @@ function findNextContent(course, chapterIndex, sectionIndex, contentIndex, enrol
   if (sectionIndex + 1 < chapter.sections.length) {
     const nextSection = chapter.sections[sectionIndex + 1];
 
-    if (nextSection.content && nextSection.content.length > 0) {
+    // ✅ SAFETY CHECK: Handle sections with content
+    if (Array.isArray(nextSection.content) && nextSection.content.length > 0) {
       const first = nextSection.content[0];
       return {
         navigationType: 'content',
@@ -2312,10 +2533,23 @@ function findNextContent(course, chapterIndex, sectionIndex, contentIndex, enrol
         }
       };
     }
+    // ✅ CRITICAL FIX: If next section has no content and no quiz, navigate to it
+    // This allows routing from content section to empty section (with introduction)
+    if ((!nextSection.content || nextSection.content.length === 0) && !nextSection.quiz) {
+      return {
+        navigationType: 'section', // Changed from 'manual-section' to 'section' for proper routing
+        chapterId: chapter._id,
+        sectionId: nextSection._id,
+        requiresManualCompletion: true,
+        hasIntroduction: !!nextSection.introduction,
+        hasObjective: !!nextSection.objective
+      };
+    }
   }
 
   // 3) Chapter-level quiz (only after finishing the last section of the chapter)
-  if (chapter.quiz) {
+  // ✅ SAFETY CHECK: Ensure sections array exists
+  if (chapter.quiz && Array.isArray(chapter.sections)) {
     const allSectionsCompleted = chapter.sections.every((sec) => {
       const sp = chapterProgress?.sectionProgress?.find(
         (p) => p.sectionId.toString() === sec._id.toString()
@@ -2334,13 +2568,24 @@ function findNextContent(course, chapterIndex, sectionIndex, contentIndex, enrol
     }
   }
 
-  // 4) Next chapter
-  if (chapterIndex + 1 < course.chapters.length) {
+  // 4) Next chapter (only if current chapter is fully completed)
+  // ✅ STRICT: Ensure current chapter is completed before unlocking next
+  const isCurrentChapterCompleted = Array.isArray(chapter.sections) && chapter.sections.length > 0
+    ? chapter.sections.every((sec) => {
+        const sp = chapterProgress?.sectionProgress?.find(
+          (p) => p.sectionId.toString() === sec._id.toString()
+        );
+        return sp?.completed === true;
+      })
+    : false;
+
+  if (isCurrentChapterCompleted && chapterIndex + 1 < course.chapters.length) {
     const nextChapter = course.chapters[chapterIndex + 1];
     const firstSection = nextChapter.sections?.[0];
-    const firstContent = firstSection?.content?.[0];
-
-    if (firstSection && firstContent) {
+    
+    // ✅ SAFETY CHECK: Handle sections with content
+    if (firstSection && Array.isArray(firstSection.content) && firstSection.content.length > 0) {
+      const firstContent = firstSection.content[0];
       return {
         navigationType: 'content',
         chapterId: nextChapter._id,
@@ -2366,6 +2611,15 @@ function findNextContent(course, chapterIndex, sectionIndex, contentIndex, enrol
             dislikes: firstContent.dislikes || 0,
           }),
         }
+      };
+    }
+    // ✅ If next chapter's first section has no content and no quiz, it requires manual completion
+    if (firstSection && (!firstSection.content || firstSection.content.length === 0) && !firstSection.quiz) {
+      return {
+        navigationType: 'manual-section',
+        chapterId: nextChapter._id,
+        sectionId: firstSection._id,
+        requiresManualCompletion: true
       };
     }
   }
@@ -3308,6 +3562,7 @@ const nextChapter = course.chapters[chapterIndex + 1];
 module.exports = {
   getNextContent,
   updateContentProgress,
+  manualCompleteSection,
   getDashboardSidebar,
   getRecommendedShortCourses,
   getCustomerDashboard,

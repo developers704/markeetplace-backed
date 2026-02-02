@@ -147,9 +147,13 @@ const getShortCourses = async (req, res) => {
               if (!contentProgress) return false;
 
               if (content.contentType === 'video') {
-                return contentProgress.watchedDuration >= content.minimumWatchTime;
+                // ✅ CRITICAL FIX: Check both watchedDuration AND completed flag for videos
+                const minWatchTime = content.minimumWatchTime || 0;
+                const meetsWatchTime = (contentProgress.watchedDuration || 0) >= minWatchTime;
+                const isMarkedCompleted = contentProgress.completed === true;
+                return meetsWatchTime && isMarkedCompleted;
               } else if (content.contentType === 'text') {
-                return contentProgress.completed;
+                return contentProgress.completed === true;
               }
               return false;
             }).length;

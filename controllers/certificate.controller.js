@@ -363,14 +363,34 @@ const requestCertificate = async (req, res) => {
       .select('_id name sequence chapters enrolledUsers')
       .sort({ sequence: 1 });
 
+    // ✅ CRITICAL FIX: Fallback to enrolled courses if no assigned courses found
+    // This handles cases where user has enrolled courses but no assigned courses based on role/warehouse
+    let mainCourses = assignedMainCourses;
+    
     if (!assignedMainCourses || assignedMainCourses.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No assigned main courses found for certificate program',
-      });
+      console.log('No assigned main courses found, falling back to enrolled courses');
+      
+      // Fallback: Get all enrolled main courses
+      const enrolledMainCourses = await Course.find({
+        isActive: true,
+        courseType: 'Course',
+        'enrolledUsers.user': userId
+      })
+        .select('_id name sequence chapters enrolledUsers')
+        .sort({ sequence: 1 });
+      
+      if (!enrolledMainCourses || enrolledMainCourses.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'No assigned or enrolled main courses found for certificate program. Please enroll in courses first.',
+        });
+      }
+      
+      mainCourses = enrolledMainCourses;
+      console.log(`Using ${mainCourses.length} enrolled main courses as fallback`);
     }
 
-    const anchorCourse = assignedMainCourses[assignedMainCourses.length - 1];
+    const anchorCourse = mainCourses[mainCourses.length - 1];
     const anchorCourseId = anchorCourse._id.toString();
 
     if (courseId.toString() !== anchorCourseId) {
@@ -385,7 +405,7 @@ const requestCertificate = async (req, res) => {
        3️⃣ CHECK COMPLETION OF ALL ASSIGNED MAIN COURSES
        (Calculate progress same way as getUserCourseProgress)
     ====================================================== */
-    const allAssignedMainCoursesCompleted = assignedMainCourses.every((course) => {
+    const allAssignedMainCoursesCompleted = mainCourses.every((course) => {
       const enrollment = course.enrolledUsers.find(
         e => e && e.user && e.user.toString() === userId.toString()
       );
@@ -438,9 +458,13 @@ const requestCertificate = async (req, res) => {
               if (!contentProgress) return false;
 
               if (content.contentType === 'video') {
-                return contentProgress.watchedDuration >= content.minimumWatchTime;
+                // ✅ CRITICAL FIX: Check both watchedDuration AND completed flag for videos
+                const minWatchTime = content.minimumWatchTime || 0;
+                const meetsWatchTime = (contentProgress.watchedDuration || 0) >= minWatchTime;
+                const isMarkedCompleted = contentProgress.completed === true;
+                return meetsWatchTime && isMarkedCompleted;
               } else if (content.contentType === 'text') {
-                return contentProgress.completed;
+                return contentProgress.completed === true;
               }
               return false;
             }).length;
@@ -476,8 +500,7 @@ const requestCertificate = async (req, res) => {
       });
     }
 
-    // Use assigned courses for quiz calculation
-    const mainCourses = assignedMainCourses;
+    // ✅ mainCourses already set above (either assignedMainCourses or enrolledMainCourses fallback)
     
     // Compute program quiz status (weighted) across ALL main courses
     const mainCourseIds = mainCourses.map((c) => c._id);
