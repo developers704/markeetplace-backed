@@ -114,9 +114,20 @@ const customerLogin = async (req, res) => {
      if (!warehouseId) {
       return res.status(400).json({ message: "Warehouse ID is required for login" });
     }
+       const customer = await Customer.findOne({ email })
+        .populate({
+        path: "role",
+        select: "role_name permissions", // Ensure permissions are included
+      }).populate("warehouse");
+      if (!customer) {
+      return res.status(400).json({ message: "Invalid email or password" });
+    }
+    const roleName = customer.role?.role_name || '';
+    const isSuperAdmin = roleName.toLowerCase().replace(/\s+/g, '') === 'superadmin';
     
-
-    // comment code 
+    
+    if (!isSuperAdmin) {
+     // comment code 
     let clientIP = req.headers['x-real-ip'] 
       || req.headers['x-forwarded-for']?.split(',')[0]
       || req.headers['cf-connecting-ip']
@@ -161,17 +172,12 @@ const customerLogin = async (req, res) => {
                         patternIP: clientIP.split('.').slice(0, 3).join('.') + '.*',
                         headers: req.headers
                       });
-                    }
-
-    const customer = await Customer.findOne({ email })
-    .populate({
-        path: "role",
-        select: "role_name permissions", // Ensure permissions are included
-      }).populate("warehouse");
-    if (!customer) {
-      return res.status(400).json({ message: "Invalid email or password" });
+                    }  
     }
-    // log('customer.warehouse:', customer);
+   
+
+ 
+  
 
      // 3️⃣ Verify that the selected warehouse is assigned to this user
     const hasAccess = customer.warehouse.some(
