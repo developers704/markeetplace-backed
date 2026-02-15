@@ -9,6 +9,10 @@ const allRoutes = require('./config/indexRoute.js'); // Import the route manager
 const session = require('express-session');
 const crypto = require('crypto');
 const  {sendEmail}  = require('./config/sendMails.js');
+const dns = require("node:dns/promises");
+
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
+
 
 
 

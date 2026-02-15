@@ -52,8 +52,36 @@ skuSchema.pre('validate', function setSkuKey(next) {
   next();
 });
 
-skuSchema.index({ skuKey: 1 }, { unique: true });
+// skuSchema.index({ skuKey: 1 }, { unique: true });
 skuSchema.index({ productId: 1, metalColor: 1, metalType: 1, size: 1 });
+
+skuSchema.post('save', function () {
+  try {
+    const { scheduleSync  } = require('../services/productListingSync.service');
+    if (this.productId) scheduleSync(this.productId).catch((err) => console.error('[ProductListing] sync', err.message));
+  } catch (_) {}
+});
+
+skuSchema.post('findOneAndDelete', async function (doc) {
+  if (!doc?.productId) return;
+  try {
+    const { scheduleSync } = require('../services/productListingSync.service');
+    await scheduleSync(doc.productId);
+  } catch (err) {
+    console.error('[ProductListing] SKU delete sync error', err.message);
+  }
+});
+
+skuSchema.post('findOneAndUpdate', async function (doc) {
+  if (!doc?.productId) return;
+  try {
+    const { scheduleSync } = require('../services/productListingSync.service');
+    await scheduleSync(doc.productId);
+  } catch (err) {
+    console.error('[ProductListing] SKU update sync error', err.message);
+  }
+});
+
 
 const Sku = mongoose.model('Sku', skuSchema);
 

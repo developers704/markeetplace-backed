@@ -52,11 +52,41 @@ vendorProductSchema.pre('validate', function setVendorModelKey(next) {
   next();
 });
 
-vendorProductSchema.index({ vendorModelKey: 1 }, { unique: true });
+// vendorProductSchema.index({ vendorModelKey: 1 }, { unique: true });
 vendorProductSchema.index({ brand: 1 });
 vendorProductSchema.index({ category: 1 });
 vendorProductSchema.index({ subcategory: 1 });
 vendorProductSchema.index({ subsubcategory: 1 });
+
+vendorProductSchema.post('save', function () {
+  try {
+    const { scheduleSync } = require('../services/productListingSync.service');
+    scheduleSync(this._id).catch((err) => console.error('[ProductListing] sync', err.message));
+  } catch (_) {}
+});
+
+vendorProductSchema.post('findOneAndDelete', async function (doc) {
+  if (!doc) return;
+  try {
+    const ProductListing = require('../models/productListing.model');
+    await ProductListing.deleteOne({ productId: doc._id });
+  } catch (err) {
+    console.error('[ProductListing] Vendor delete cleanup error', err.message);
+  }
+});
+
+vendorProductSchema.post('findOneAndUpdate', async function (doc) {
+  if (!doc?._id) return;
+  try {
+    const { scheduleSync } = require('../services/productListingSync.service');
+     scheduleSync(doc._id);
+  } catch (err) {
+    console.error('[ProductListing] Vendor update sync error', err.message);
+  }
+});
+
+
+
 
 const VendorProduct = mongoose.model('VendorProduct', vendorProductSchema);
 

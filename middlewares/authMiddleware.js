@@ -64,12 +64,12 @@ const authMiddleware = async (req, res, next) => {
         user = user.toObject({ getters: true });
         user.selectedWarehouse = decoded.warehouse || null;
         req.user = user;
-        console.log('Auth Middleware - User Info:', {
-            id: req.user._id,
-            email: req.user.email,
-            role: req.user.role,
-            warehouse: req.user.selectedWarehouse,
-        });
+        // console.log('Auth Middleware - User Info:', {
+        //     id: req.user._id,
+        //     email: req.user.email,
+        //     role: req.user.role,
+        //     warehouse: req.user.selectedWarehouse,
+        // });
         next();
     } catch (error) {
         res.status(400).json({ message: 'Invalid token. Please log in again.', error: error.message });

@@ -46,6 +46,51 @@ const skuInventorySchema = new mongoose.Schema(
 // Prevent duplicate inventory rows per SKU per (warehouse, city)
 skuInventorySchema.index({ skuId: 1, warehouse: 1, city: 1 }, { unique: true });
 
+skuInventorySchema.post('save', function () {
+  const Sku = mongoose.model('Sku');
+  Sku.findById(this.skuId).select('productId').lean()
+    .then((sku) => {
+      if (sku && sku.productId) {
+        const { scheduleSync } = require('../services/productListingSync.service');
+        scheduleSync(sku.productId).catch((err) => console.error('[ProductListing] sync', err.message));
+      }
+    })
+    .catch(() => {});
+});
+
+skuInventorySchema.post('findOneAndDelete', function (doc) {
+  if (!doc) return;
+  const Sku = mongoose.model('Sku');
+  Sku.findById(doc.skuId).select('productId').lean()
+    .then((sku) => {
+      if (sku?.productId) {
+        const { scheduleSync } = require('../services/productListingSync.service');
+        scheduleSync(sku.productId);
+      }
+    })
+    .catch(() => {});
+});
+
+
+skuInventorySchema.post('findOneAndUpdate', function (doc) {
+  if (!doc) return;
+  try {
+    const Sku = mongoose.model('Sku');
+    Sku.findById(doc.skuId).select('productId').lean()
+      .then((sku) => {
+        if (sku?.productId) {
+          const { scheduleSync } = require('../services/productListingSync.service');
+          scheduleSync(sku.productId);
+        }
+      })
+      .catch(() => {});
+  } catch (err) {
+    console.error('[ProductListing] Inventory update sync error', err.message);
+  }
+});
+
+
+
 const SkuInventory = mongoose.model('SkuInventory', skuInventorySchema);
 
 module.exports = SkuInventory;
