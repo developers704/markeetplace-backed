@@ -23,6 +23,12 @@ const b2bPurchaseRequestSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    vendorWarehouseId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Warehouse',
+      required: true,
+      index: true,
+    },
     quantity: { type: Number, required: true, min: 1 },
 
     // Store configuration (a "store" is represented by a Warehouse record in this system)

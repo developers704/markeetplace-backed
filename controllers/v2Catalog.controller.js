@@ -66,309 +66,309 @@ const toLooseEqualsRegex = (value) => {
   const pattern = parts.map(escapeRegex).join('[-\\s_]+');
   return new RegExp(`^${pattern}$`, 'i');
 };
-// const listVendorProducts = async (req, res) => {
-//   try {
-//     // Support both page-based and cursor-based pagination
-//     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-//     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-//     const cursor = req.query.cursor || req.query.lastProductId; // Cursor: last product ID
-//     const skip = cursor ? 0 : (page - 1) * limit; // Only use skip for page-based
+const listVendorProductsAdmin = async (req, res) => {
+  try {
+    // Support both page-based and cursor-based pagination
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const cursor = req.query.cursor || req.query.lastProductId; // Cursor: last product ID
+    const skip = cursor ? 0 : (page - 1) * limit; // Only use skip for page-based
 
-//     const search = String(req.query.search || '').trim();
-//     const brandRaw = req.query.brand;
-//     const categoryRaw = req.query.category;
-//     const subcategoryRaw = req.query.subcategory;
-//     const subsubcategoryRaw = req.query.subsubcategory;
-//     const minPrice = parseFloat(req.query.minPrice) || null;
-//     const maxPrice = parseFloat(req.query.maxPrice) || null;
+    const search = String(req.query.search || '').trim();
+    const brandRaw = req.query.brand;
+    const categoryRaw = req.query.category;
+    const subcategoryRaw = req.query.subcategory;
+    const subsubcategoryRaw = req.query.subsubcategory;
+    const minPrice = parseFloat(req.query.minPrice) || null;
+    const maxPrice = parseFloat(req.query.maxPrice) || null;
 
-//     const match = {};
-//     const brandValues = parseMulti(brandRaw);
-//     const categoryValues = parseMulti(categoryRaw);
+    const match = {};
+    const brandValues = parseMulti(brandRaw);
+    const categoryValues = parseMulti(categoryRaw);
 
-//     // Brand filtering (string-based)
-//     if (brandValues.length === 1) {
-//       match.brand = toLooseEqualsRegex(brandValues[0]);
-//     } else if (brandValues.length > 1) {
-//       match.brand = { $in: brandValues.map(toLooseEqualsRegex).filter(Boolean) };
-//     }
+    // Brand filtering (string-based)
+    if (brandValues.length === 1) {
+      match.brand = toLooseEqualsRegex(brandValues[0]);
+    } else if (brandValues.length > 1) {
+      match.brand = { $in: brandValues.map(toLooseEqualsRegex).filter(Boolean) };
+    }
 
-//     // Category filtering - support both ObjectId and string
-//     if (categoryRaw) {
-//       if (mongoose.Types.ObjectId.isValid(categoryRaw)) {
-//         // If it's a valid ObjectId, search by ObjectId or category name
-//         const category = await Category.findById(categoryRaw);
-//         if (category) {
-//           // Use $or only if not already set
-//           if (!match.$or) {
-//             match.$or = [];
-//           }
-//           // Add category matching conditions
-//           const categoryConditions = [
-//             { category: category._id },
-//             { category: category.name }
-//           ];
-//           // If there are existing $or conditions, combine them
-//           if (match.$or.length > 0) {
-//             match.$and = [
-//               { $or: match.$or },
-//               { $or: categoryConditions }
-//             ];
-//             delete match.$or;
-//           } else {
-//             match.$or = categoryConditions;
-//           }
-//         }
-//       } else {
-//         // String-based category search (legacy)
-//         if (categoryValues.length === 1) {
-//           match.category = toLooseEqualsRegex(categoryValues[0]);
-//         } else if (categoryValues.length > 1) {
-//           match.category = { $in: categoryValues.map(toLooseEqualsRegex).filter(Boolean) };
-//         }
-//       }
-//     }
+    // Category filtering - support both ObjectId and string
+    if (categoryRaw) {
+      if (mongoose.Types.ObjectId.isValid(categoryRaw)) {
+        // If it's a valid ObjectId, search by ObjectId or category name
+        const category = await Category.findById(categoryRaw);
+        if (category) {
+          // Use $or only if not already set
+          if (!match.$or) {
+            match.$or = [];
+          }
+          // Add category matching conditions
+          const categoryConditions = [
+            { category: category._id },
+            { category: category.name }
+          ];
+          // If there are existing $or conditions, combine them
+          if (match.$or.length > 0) {
+            match.$and = [
+              { $or: match.$or },
+              { $or: categoryConditions }
+            ];
+            delete match.$or;
+          } else {
+            match.$or = categoryConditions;
+          }
+        }
+      } else {
+        // String-based category search (legacy)
+        if (categoryValues.length === 1) {
+          match.category = toLooseEqualsRegex(categoryValues[0]);
+        } else if (categoryValues.length > 1) {
+          match.category = { $in: categoryValues.map(toLooseEqualsRegex).filter(Boolean) };
+        }
+      }
+    }
 
-//     // Subcategory filtering (ObjectId only)
-//     if (subcategoryRaw) {
-//       if (mongoose.Types.ObjectId.isValid(subcategoryRaw)) {
-//         match.subcategory = new mongoose.Types.ObjectId(subcategoryRaw);
-//       }
-//     }
+    // Subcategory filtering (ObjectId only)
+    if (subcategoryRaw) {
+      if (mongoose.Types.ObjectId.isValid(subcategoryRaw)) {
+        match.subcategory = new mongoose.Types.ObjectId(subcategoryRaw);
+      }
+    }
 
-//     // Sub-subcategory filtering (ObjectId only)
-//     if (subsubcategoryRaw) {
-//       if (mongoose.Types.ObjectId.isValid(subsubcategoryRaw)) {
-//         match.subsubcategory = new mongoose.Types.ObjectId(subsubcategoryRaw);
-//       }
-//     }
+    // Sub-subcategory filtering (ObjectId only)
+    if (subsubcategoryRaw) {
+      if (mongoose.Types.ObjectId.isValid(subsubcategoryRaw)) {
+        match.subsubcategory = new mongoose.Types.ObjectId(subsubcategoryRaw);
+      }
+    }
 
-//     // Price range filter - will be applied after calculating minPrice/maxPrice
-//     const priceFilterConditions = [];
-//     if (minPrice !== null && !isNaN(minPrice) && minPrice > 0) {
-//       priceFilterConditions.push({ minPrice: { $gte: minPrice } });
-//     }
-//     if (maxPrice !== null && !isNaN(maxPrice) && maxPrice > 0) {
-//       priceFilterConditions.push({ maxPrice: { $lte: maxPrice } });
-//     }
+    // Price range filter - will be applied after calculating minPrice/maxPrice
+    const priceFilterConditions = [];
+    if (minPrice !== null && !isNaN(minPrice) && minPrice > 0) {
+      priceFilterConditions.push({ minPrice: { $gte: minPrice } });
+    }
+    if (maxPrice !== null && !isNaN(maxPrice) && maxPrice > 0) {
+      priceFilterConditions.push({ maxPrice: { $lte: maxPrice } });
+    }
 
-//     // Search: vendorModel, title, brand, category, and SKU
-//     if (search) {
-//       const searchRegex = new RegExp(escapeRegex(search), 'i');
-//       const searchConditions = [
-//         { vendorModel: searchRegex },
-//         { title: searchRegex },
-//         { brand: searchRegex },
-//         { category: searchRegex },
-//       ];
+    // Search: vendorModel, title, brand, category, and SKU
+    if (search) {
+      const searchRegex = new RegExp(escapeRegex(search), 'i');
+      const searchConditions = [
+        { vendorModel: searchRegex },
+        { title: searchRegex },
+        { brand: searchRegex },
+        { category: searchRegex },
+      ];
 
-//       // Also search in SKUs - find SKUs matching search, then match products
-//       const matchingSkus = await Sku.find({ sku: searchRegex }).select('productId').lean();
-//       if (matchingSkus.length > 0) {
-//         const productIds = matchingSkus.map((s) => s.productId).filter(Boolean);
-//         if (productIds.length > 0) {
-//           searchConditions.push({ _id: { $in: productIds } });
-//         }
-//       }
+      // Also search in SKUs - find SKUs matching search, then match products
+      const matchingSkus = await Sku.find({ sku: searchRegex }).select('productId').lean();
+      if (matchingSkus.length > 0) {
+        const productIds = matchingSkus.map((s) => s.productId).filter(Boolean);
+        if (productIds.length > 0) {
+          searchConditions.push({ _id: { $in: productIds } });
+        }
+      }
 
-//       // Combine search with existing $or if present
-//       if (match.$or) {
-//         // If $or already exists (from category filter), use $and
-//         if (match.$and) {
-//           match.$and.push({ $or: searchConditions });
-//         } else {
-//           match.$and = [
-//             { $or: match.$or },
-//             { $or: searchConditions }
-//           ];
-//           delete match.$or;
-//         }
-//       } else {
-//         match.$or = searchConditions;
-//       }
-//     }
+      // Combine search with existing $or if present
+      if (match.$or) {
+        // If $or already exists (from category filter), use $and
+        if (match.$and) {
+          match.$and.push({ $or: searchConditions });
+        } else {
+          match.$and = [
+            { $or: match.$or },
+            { $or: searchConditions }
+          ];
+          delete match.$or;
+        }
+      } else {
+        match.$or = searchConditions;
+      }
+    }
 
-//     // If cursor is provided, add cursor-based filtering
-//     // Cursor is the last product's _id from previous page
-//     if (cursor && mongoose.Types.ObjectId.isValid(cursor)) {
-//       // We'll filter after sorting, so we add it to the pipeline later
-//       // For now, just mark that we're using cursor-based pagination
-//     }
+    // If cursor is provided, add cursor-based filtering
+    // Cursor is the last product's _id from previous page
+    if (cursor && mongoose.Types.ObjectId.isValid(cursor)) {
+      // We'll filter after sorting, so we add it to the pipeline later
+      // For now, just mark that we're using cursor-based pagination
+    }
 
-//     const pipeline = [
-//       { $match: match },
-//       // Apply cursor filter before sorting for better performance
-//       ...(cursor && mongoose.Types.ObjectId.isValid(cursor)
-//         ? [
-//             {
-//               $match: {
-//                 _id: { $gt: new mongoose.Types.ObjectId(cursor) },
-//               },
-//             },
-//           ]
-//         : []),
-//       { $sort: { updatedAt: -1, createdAt: -1, _id: 1 } },
-//       {
-//         $facet: {
-//           data: [
-//             ...(cursor ? [] : [{ $skip: skip }]), // Skip only for page-based
-//             { $limit: limit + 1 }, // Fetch one extra to check if there's a next page
-//             {
-//               $lookup: {
-//                 from: 'skus',
-//                 localField: 'defaultSku',
-//                 foreignField: '_id',
-//                 as: 'defaultSkuDoc',
-//               },
-//             },
-//             { $unwind: { path: '$defaultSkuDoc', preserveNullAndEmptyArrays: true } },
-//             {
-//               // Pull SKUs for this vendor product (only _id + price needed for ranges)
-//               $lookup: {
-//                 from: 'skus',
-//                 let: { pid: '$_id' },
-//                 pipeline: [
-//                   { $match: { $expr: { $eq: ['$productId', '$$pid'] } } },
-//                   { $project: { _id: 1, price: 1, sku: 1,currency: 1, images: 1, gallery: 1, metalColor: 1, metalType: 1, size: 1, attributes: 1, } },
-//                 ],
-//                 as: 'skuDocs',
-//               },
-//             },
-//             {
-//               $lookup: {
-//                 from: 'skuinventories',
-//                 let: { skuIds: '$skuDocs._id' },
-//                 pipeline: [
-//                   { $match: { $expr: { $in: ['$skuId', '$$skuIds'] } } },
-//                   { $group: { _id: null, totalQty: { $sum: '$quantity' } } },
-//                 ],
-//                 as: 'inventoryAgg',
-//               },
-//             },
-//             {
-//               $addFields: {
-//                 totalInventory: { $ifNull: [{ $first: '$inventoryAgg.totalQty' }, 0] },
-//                 minPrice: { $ifNull: [{ $min: '$skuDocs.price' }, 0] },
-//                 maxPrice: { $ifNull: [{ $max: '$skuDocs.price' }, 0] },
-//                 skuCount: { $size: '$skuDocs' },
-//               },
-//             },
-//             // Apply price range filter after calculating minPrice/maxPrice
-//             ...(priceFilterConditions.length > 0
-//               ? [
-//                   {
-//                     $match: {
-//                       $and: priceFilterConditions,
-//                     },
-//                   },
-//                 ]
-//               : []),
-//                   {
-//               $lookup: {
-//                 from: 'categories',
-//                 localField: 'category',
-//                 foreignField: '_id',
-//                 as: 'categoryDoc',
-//               },
-//             },
+    const pipeline = [
+      { $match: match },
+      // Apply cursor filter before sorting for better performance
+      ...(cursor && mongoose.Types.ObjectId.isValid(cursor)
+        ? [
+            {
+              $match: {
+                _id: { $gt: new mongoose.Types.ObjectId(cursor) },
+              },
+            },
+          ]
+        : []),
+      { $sort: { updatedAt: -1, createdAt: -1, _id: 1 } },
+      {
+        $facet: {
+          data: [
+            ...(cursor ? [] : [{ $skip: skip }]), // Skip only for page-based
+            { $limit: limit + 1 }, // Fetch one extra to check if there's a next page
+            {
+              $lookup: {
+                from: 'skus',
+                localField: 'defaultSku',
+                foreignField: '_id',
+                as: 'defaultSkuDoc',
+              },
+            },
+            { $unwind: { path: '$defaultSkuDoc', preserveNullAndEmptyArrays: true } },
+            {
+              // Pull SKUs for this vendor product (only _id + price needed for ranges)
+              $lookup: {
+                from: 'skus',
+                let: { pid: '$_id' },
+                pipeline: [
+                  { $match: { $expr: { $eq: ['$productId', '$$pid'] } } },
+                  { $project: { _id: 1, price: 1, sku: 1,currency: 1, images: 1, gallery: 1, metalColor: 1, metalType: 1, size: 1, attributes: 1, } },
+                ],
+                as: 'skuDocs',
+              },
+            },
+            {
+              $lookup: {
+                from: 'skuinventories',
+                let: { skuIds: '$skuDocs._id' },
+                pipeline: [
+                  { $match: { $expr: { $in: ['$skuId', '$$skuIds'] } } },
+                  { $group: { _id: null, totalQty: { $sum: '$quantity' } } },
+                ],
+                as: 'inventoryAgg',
+              },
+            },
+            {
+              $addFields: {
+                totalInventory: { $ifNull: [{ $first: '$inventoryAgg.totalQty' }, 0] },
+                minPrice: { $ifNull: [{ $min: '$skuDocs.price' }, 0] },
+                maxPrice: { $ifNull: [{ $max: '$skuDocs.price' }, 0] },
+                skuCount: { $size: '$skuDocs' },
+              },
+            },
+            // Apply price range filter after calculating minPrice/maxPrice
+            ...(priceFilterConditions.length > 0
+              ? [
+                  {
+                    $match: {
+                      $and: priceFilterConditions,
+                    },
+                  },
+                ]
+              : []),
+                  {
+              $lookup: {
+                from: 'categories',
+                localField: 'category',
+                foreignField: '_id',
+                as: 'categoryDoc',
+              },
+            },
 
-//             {
-//               $lookup: {
-//                 from: 'subcategories',
-//                 localField: 'subcategory',
-//                 foreignField: '_id',
-//                 as: 'subcategoryDoc'
-//               }
-//             },
-//             {
-//               $lookup: {
-//                 from: 'subsubcategories',
-//                 localField: 'subsubcategory',
-//                 foreignField: '_id',
-//                 as: 'subsubcategoryDoc'
-//               }
-//             },
-//             {
-//               $project: {
-//                 vendorModel: 1,
-//                 title: 1,
-//                 brand: 1,
-//                 // category: 1, // Will be populated in post-processing
-//                 category: { $ifNull: [{ $first: '$categoryDoc' }, null] },
-//                 subcategory: { $ifNull: [{ $first: '$subcategoryDoc' }, null] },
-//                 subsubcategory: { $ifNull: [{ $first: '$subsubcategoryDoc' }, null] },
-//                 description: 1,
-//                 createdAt: 1,
-//                 updatedAt: 1,
-//                 skuCount: 1,
-//                 totalInventory: 1,
-//                 minPrice: 1,
-//                 maxPrice: 1,
-//                 defaultSku: {
-//                   _id: '$defaultSkuDoc._id',
-//                   sku: '$defaultSkuDoc.sku',
-//                   price: '$defaultSkuDoc.price',
-//                   currency: '$defaultSkuDoc.currency',
-//                   images: '$defaultSkuDoc.images',
-//                   gallery: '$defaultSkuDoc.gallery',
-//                   metalColor: '$defaultSkuDoc.metalColor',
-//                   metalType: '$defaultSkuDoc.metalType',
-//                   size: '$defaultSkuDoc.size',
-//                   attributes: '$defaultSkuDoc.attributes',
-//                 },
-//                 // skus: '$skuDocs',
-//               },
-//             },
-//           ],
-//           meta: [{ $count: 'total' }],
-//         },
-//       },
-//     ];
+            {
+              $lookup: {
+                from: 'subcategories',
+                localField: 'subcategory',
+                foreignField: '_id',
+                as: 'subcategoryDoc'
+              }
+            },
+            {
+              $lookup: {
+                from: 'subsubcategories',
+                localField: 'subsubcategory',
+                foreignField: '_id',
+                as: 'subsubcategoryDoc'
+              }
+            },
+            {
+              $project: {
+                vendorModel: 1,
+                title: 1,
+                brand: 1,
+                // category: 1, // Will be populated in post-processing
+                category: { $ifNull: [{ $first: '$categoryDoc' }, null] },
+                subcategory: { $ifNull: [{ $first: '$subcategoryDoc' }, null] },
+                subsubcategory: { $ifNull: [{ $first: '$subsubcategoryDoc' }, null] },
+                description: 1,
+                createdAt: 1,
+                updatedAt: 1,
+                skuCount: 1,
+                totalInventory: 1,
+                minPrice: 1,
+                maxPrice: 1,
+                defaultSku: {
+                  _id: '$defaultSkuDoc._id',
+                  sku: '$defaultSkuDoc.sku',
+                  price: '$defaultSkuDoc.price',
+                  currency: '$defaultSkuDoc.currency',
+                  images: '$defaultSkuDoc.images',
+                  gallery: '$defaultSkuDoc.gallery',
+                  metalColor: '$defaultSkuDoc.metalColor',
+                  metalType: '$defaultSkuDoc.metalType',
+                  size: '$defaultSkuDoc.size',
+                  attributes: '$defaultSkuDoc.attributes',
+                },
+                // skus: '$skuDocs',
+              },
+            },
+          ],
+          meta: [{ $count: 'total' }],
+        },
+      },
+    ];
 
-//     const agg = await VendorProduct.aggregate(pipeline);
-//     let data = agg?.[0]?.data || [];
-//     const total = agg?.[0]?.meta?.[0]?.total || 0;
+    const agg = await VendorProduct.aggregate(pipeline);
+    let data = agg?.[0]?.data || [];
+    const total = agg?.[0]?.meta?.[0]?.total || 0;
     
-//     // For cursor-based pagination, check if we have more items
-//     let hasNextPage = false;
-//     let nextCursor = null;
+    // For cursor-based pagination, check if we have more items
+    let hasNextPage = false;
+    let nextCursor = null;
     
-//     if (cursor) {
-//       // If we fetched limit + 1, we have a next page
-//       if (data.length > limit) {
-//         hasNextPage = true;
-//         data = data.slice(0, limit); // Remove the extra item
-//       }
-//       // Set next cursor to the last item's ID
-//       if (data.length > 0) {
-//         nextCursor = data[data.length - 1]._id.toString();
-//       }
-//     } else {
-//       // Page-based pagination
-//       const totalPages = Math.max(1, Math.ceil(total / limit));
-//       hasNextPage = page < totalPages;
-//     }
+    if (cursor) {
+      // If we fetched limit + 1, we have a next page
+      if (data.length > limit) {
+        hasNextPage = true;
+        data = data.slice(0, limit); // Remove the extra item
+      }
+      // Set next cursor to the last item's ID
+      if (data.length > 0) {
+        nextCursor = data[data.length - 1]._id.toString();
+      }
+    } else {
+      // Page-based pagination
+      const totalPages = Math.max(1, Math.ceil(total / limit));
+      hasNextPage = page < totalPages;
+    }
 
-//     return res.status(200).json({
-//       success: true,
-//       message: 'Vendor products retrieved successfully',
-//       data,
-//       paginatorInfo: {
-//         page: cursor ? null : page,
-//         limit,
-//         total: cursor ? null : total, // Don't return total for cursor-based (expensive)
-//         totalPages: cursor ? null : Math.max(1, Math.ceil(total / limit)),
-//         hasNextPage,
-//         hasPrevPage: cursor ? null : page > 1,
-//         nextPage: cursor ? null : (hasNextPage ? page + 1 : null),
-//         prevPage: cursor ? null : (page > 1 ? page - 1 : null),
-//         nextCursor, // Cursor for next page
-//       },
-//     });
-//   } catch (error) {
-//     return res.status(500).json({ success: false, message: 'Failed to fetch vendor products', error: error.message });
-//   }
-// };
+    return res.status(200).json({
+      success: true,
+      message: 'Vendor products retrieved successfully',
+      data,
+      paginatorInfo: {
+        page: cursor ? null : page,
+        limit,
+        total: cursor ? null : total, // Don't return total for cursor-based (expensive)
+        totalPages: cursor ? null : Math.max(1, Math.ceil(total / limit)),
+        hasNextPage,
+        hasPrevPage: cursor ? null : page > 1,
+        nextPage: cursor ? null : (hasNextPage ? page + 1 : null),
+        prevPage: cursor ? null : (page > 1 ? page - 1 : null),
+        nextCursor, // Cursor for next page
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch vendor products', error: error.message });
+  }
+};
 
 /**
  * GET /api/v2/products
@@ -786,10 +786,35 @@ const getVendorProductById = async (req, res) => {
           { $group: { _id: '$skuId', totalQty: { $sum: '$quantity' } } },
         ])
       : [];
+      // Fetch inventories with warehouse for all SKUs
+    const inventories = skuIds.length
+      ? await SkuInventory.find({ skuId: { $in: skuIds } })
+          .populate('warehouse', 'name isMain')
+          .populate('city', 'name')
+          .lean()
+      : [];
+
+    const inventoriesBySku = new Map();
+
+    for (const inv of inventories) {
+      const key = String(inv.skuId);
+      if (!inventoriesBySku.has(key)) {
+        inventoriesBySku.set(key, []);
+      }
+      inventoriesBySku.get(key).push(inv);
+    }
+
 
     const qtyBySku = new Map(inventoryAgg.map((x) => [String(x._id), x.totalQty]));
-    const skusWithQty = skus.map((s) => ({ ...s, totalQuantity: qtyBySku.get(String(s._id)) || 0 }));
-
+    // const skusWithQty = skus.map((s) => ({ ...s, totalQuantity: qtyBySku.get(String(s._id)) || 0 }));
+    const skusWithQty = skus.map((s) => {
+    const skuIdStr = String(s._id);
+    return {
+      ...s,
+      totalQuantity: qtyBySku.get(skuIdStr) || 0,
+      inventories: inventoriesBySku.get(skuIdStr) || [],
+      };
+    });
     const unique = (arr) => [...new Set(arr.filter((v) => String(v || '').trim() !== ''))];
     const availableColors = unique(skusWithQty.map((s) => s.metalColor));
     const availableSizes = unique(skusWithQty.map((s) => s.size));
@@ -857,7 +882,7 @@ const getSkuById = async (req, res) => {
     }
 
     const inventories = await SkuInventory.find({ skuId: sku._id })
-      .populate('warehouse', 'name')
+      .populate('warehouse', 'name isMain')
       .populate('city', 'name')
       .lean();
 
@@ -1308,6 +1333,7 @@ const getV2CategoriesWithSubcategories = async (req, res) => {
 };
 
 module.exports = {
+  listVendorProductsAdmin,
   listVendorProducts,
   getVendorProductById,
   getSkuById,

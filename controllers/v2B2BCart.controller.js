@@ -19,9 +19,8 @@ const getB2BCart = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Authentication required' });
     }
 
-    const selectedWarehouse = req.user?.selectedWarehouse ? String(req.user.selectedWarehouse) : null;
-    const userWarehouses = Array.isArray(req.user?.warehouse) ? req.user.warehouse.map((w) => String(w)) : [];
-    const storeWarehouseId = selectedWarehouse || userWarehouses[0] || null;
+    // 🔥 get store warehouse (destination)
+    const storeWarehouseId = req.user?.selectedWarehouse ? String(req.user.selectedWarehouse) : null;
 
     if (!storeWarehouseId || !isObjectId(storeWarehouseId)) {
       return res.status(400).json({
@@ -31,6 +30,7 @@ const getB2BCart = async (req, res) => {
       });
     }
 
+    // Fetch cart for this customer + store warehouse
     let cart = await B2BCart.findOne({
       customer: actor.id,
       storeWarehouseId,
@@ -48,6 +48,7 @@ const getB2BCart = async (req, res) => {
         items: [],
         subtotal: 0,
       });
+
       cart = await B2BCart.findById(newCart._id)
         .populate('items.vendorProductId', 'vendorModel title brand category')
         .populate('items.skuId', 'sku price currency metalColor metalType size images')
@@ -55,15 +56,22 @@ const getB2BCart = async (req, res) => {
         .lean();
     }
 
-    // Get warehouse wallet balance
+    // 🔥 Include wallet balance for this store warehouse
     const inventoryWallet = await InventoryWallet.findOne({ warehouse: storeWarehouseId }).lean();
     const walletBalance = inventoryWallet?.balance || 0;
+
+    // 🔥 Map items to include vendorWarehouseId (source warehouse)
+    const itemsWithVendorWarehouse = cart.items.map((item) => ({
+      ...item,
+      vendorWarehouseId: item.warehouseId, // rename warehouseId to vendorWarehouseId for clarity
+    }));
 
     return res.status(200).json({
       success: true,
       message: 'Cart retrieved',
       data: {
         ...cart,
+        items: itemsWithVendorWarehouse,
         walletBalance,
         remainingBalance: walletBalance - (cart.subtotal || 0),
       },
@@ -72,11 +80,123 @@ const getB2BCart = async (req, res) => {
     return res.status(500).json({ success: false, message: 'Failed to fetch cart', error: error.message });
   }
 };
+  
+
 
 /**
  * POST /api/v2/b2b/cart/add
  * Add SKU to B2B cart
  */
+// const addToB2BCart = async (req, res) => {
+//   try {
+//     const actor = req.b2bActor;
+//     if (!actor || actor.model !== 'Customer') {
+//       return res.status(401).json({ success: false, message: 'Authentication required' });
+//     }
+
+//     const { vendorProductId, skuId, quantity } = req.body || {};
+
+//     if (!isObjectId(vendorProductId) || !isObjectId(skuId)) {
+//       return res.status(400).json({ success: false, message: 'Invalid vendorProductId or skuId' });
+//     }
+
+//     const qty = Number(quantity);
+//     if (!Number.isFinite(qty) || qty <= 0) {
+//       return res.status(400).json({ success: false, message: 'Quantity must be a positive number' });
+//     }
+
+//     const selectedWarehouse = req.user?.selectedWarehouse ? String(req.user.selectedWarehouse) : null;
+//     const userWarehouses = Array.isArray(req.user?.warehouse) ? req.user.warehouse.map((w) => String(w)) : [];
+//     const storeWarehouseId = selectedWarehouse || userWarehouses[0] || null;
+
+//     if (!storeWarehouseId || !isObjectId(storeWarehouseId)) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'No warehouse selected. Please select a warehouse first.',
+//         data: { requiresWarehouseSelection: true },
+//       });
+//     }
+
+//     // Validate SKU exists and belongs to vendor product
+//     const [vendorProduct, sku, storeWarehouse] = await Promise.all([
+//       VendorProduct.findById(vendorProductId).select('_id vendorModel title').lean(),
+//       Sku.findById(skuId).select('_id sku productId price currency metalColor metalType size').lean(),
+//       Warehouse.findById(storeWarehouseId).select('_id name isActive').lean(),
+//     ]);
+
+//     if (!vendorProduct) return res.status(404).json({ success: false, message: 'Vendor product not found' });
+//     if (!sku) return res.status(404).json({ success: false, message: 'SKU not found' });
+//     if (String(sku.productId) !== String(vendorProduct._id)) {
+//       return res.status(400).json({ success: false, message: 'SKU does not belong to the provided vendor product' });
+//     }
+//     if (!storeWarehouse) return res.status(404).json({ success: false, message: 'Store warehouse not found' });
+//     if (storeWarehouse.isActive === false) {
+//       return res.status(400).json({ success: false, message: 'Store warehouse is not active' });
+//     }
+
+//     // Get or create cart
+//     let cart = await B2BCart.findOne({
+//       customer: actor.id,
+//       storeWarehouseId,
+//     });
+
+//     if (!cart) {
+//       cart = await B2BCart.create({
+//         customer: actor.id,
+//         storeWarehouseId,
+//         items: [],
+//         subtotal: 0,
+//       });
+//     }
+
+//     // Check if item already exists in cart
+//     const existingItemIndex = cart.items.findIndex(
+//       (item) => String(item.vendorProductId) === String(vendorProductId) && String(item.skuId) === String(skuId)
+//     );
+
+//     if (existingItemIndex > -1) {
+//       // Update quantity
+//       cart.items[existingItemIndex].quantity += qty;
+//       cart.items[existingItemIndex].price = sku.price; // Update price in case it changed
+//     } else {
+//       // Add new item
+//       cart.items.push({
+//         vendorProductId: vendorProduct._id,
+//         skuId: sku._id,
+//         quantity: qty,
+//         price: sku.price,
+//         currency: sku.currency || 'USD',
+//       });
+//     }
+
+//     cart.calculateSubtotal();
+//     await cart.save();
+
+//     const populated = await B2BCart.findById(cart._id)
+//       .populate('items.vendorProductId', 'vendorModel title brand category')
+//       .populate('items.skuId', 'sku price currency metalColor metalType size images')
+//       .populate('storeWarehouseId', 'name isMain')
+//       .lean();
+
+//     // Get wallet balance
+//     const inventoryWallet = await InventoryWallet.findOne({ warehouse: storeWarehouseId }).lean();
+//     const walletBalance = inventoryWallet?.balance || 0;
+
+//     return res.status(200).json({
+//       success: true,
+//       message: 'Item added to cart',
+//       data: {
+//         ...populated,
+//         walletBalance,
+//         remainingBalance: walletBalance - populated.subtotal,
+//       },
+//     });
+//   } catch (error) {
+//     return res.status(500).json({ success: false, message: 'Failed to add item to cart', error: error.message });
+//   }
+// };
+
+
 const addToB2BCart = async (req, res) => {
   try {
     const actor = req.b2bActor;
@@ -84,7 +204,7 @@ const addToB2BCart = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Authentication required' });
     }
 
-    const { vendorProductId, skuId, quantity } = req.body || {};
+    const { vendorProductId, skuId, quantity, warehouseId } = req.body || {};
 
     if (!isObjectId(vendorProductId) || !isObjectId(skuId)) {
       return res.status(400).json({ success: false, message: 'Invalid vendorProductId or skuId' });
@@ -95,36 +215,62 @@ const addToB2BCart = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Quantity must be a positive number' });
     }
 
-    const selectedWarehouse = req.user?.selectedWarehouse ? String(req.user.selectedWarehouse) : null;
-    const userWarehouses = Array.isArray(req.user?.warehouse) ? req.user.warehouse.map((w) => String(w)) : [];
-    const storeWarehouseId = selectedWarehouse || userWarehouses[0] || null;
+    // 🔥 vendor warehouse (stock will deduct from here)
+    const vendorWarehouseId = warehouseId ? String(warehouseId) : null;
+
+    // 🔥 store warehouse (stock will transfer to here)
+    const storeWarehouseId = req.user?.selectedWarehouse
+      ? String(req.user.selectedWarehouse)
+      : null;
+
+    if (!vendorWarehouseId || !isObjectId(vendorWarehouseId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vendor warehouse is required',
+      });
+    }
 
     if (!storeWarehouseId || !isObjectId(storeWarehouseId)) {
       return res.status(400).json({
         success: false,
-        message: 'No warehouse selected. Please select a warehouse first.',
-        data: { requiresWarehouseSelection: true },
+        message: 'Store warehouse not selected',
       });
     }
 
-    // Validate SKU exists and belongs to vendor product
-    const [vendorProduct, sku, storeWarehouse] = await Promise.all([
+    // Validate product, sku, warehouses
+    const [vendorProduct, sku, vendorWarehouse, storeWarehouse] = await Promise.all([
       VendorProduct.findById(vendorProductId).select('_id vendorModel title').lean(),
-      Sku.findById(skuId).select('_id sku productId price currency metalColor metalType size').lean(),
+      Sku.findById(skuId).select('_id sku productId price currency').lean(),
+      Warehouse.findById(vendorWarehouseId).select('_id name isActive').lean(),
       Warehouse.findById(storeWarehouseId).select('_id name isActive').lean(),
     ]);
 
-    if (!vendorProduct) return res.status(404).json({ success: false, message: 'Vendor product not found' });
-    if (!sku) return res.status(404).json({ success: false, message: 'SKU not found' });
+    if (!vendorProduct)
+      return res.status(404).json({ success: false, message: 'Vendor product not found' });
+
+    if (!sku)
+      return res.status(404).json({ success: false, message: 'SKU not found' });
+
     if (String(sku.productId) !== String(vendorProduct._id)) {
-      return res.status(400).json({ success: false, message: 'SKU does not belong to the provided vendor product' });
-    }
-    if (!storeWarehouse) return res.status(404).json({ success: false, message: 'Store warehouse not found' });
-    if (storeWarehouse.isActive === false) {
-      return res.status(400).json({ success: false, message: 'Store warehouse is not active' });
+      return res.status(400).json({
+        success: false,
+        message: 'SKU does not belong to the provided vendor product',
+      });
     }
 
-    // Get or create cart
+    if (!vendorWarehouse)
+      return res.status(404).json({ success: false, message: 'Vendor warehouse not found' });
+
+    if (!storeWarehouse)
+      return res.status(404).json({ success: false, message: 'Store warehouse not found' });
+
+    if (!vendorWarehouse.isActive)
+      return res.status(400).json({ success: false, message: 'Vendor warehouse inactive' });
+
+    if (!storeWarehouse.isActive)
+      return res.status(400).json({ success: false, message: 'Store warehouse inactive' });
+
+    // 🔥 Get or create cart (per store warehouse)
     let cart = await B2BCart.findOne({
       customer: actor.id,
       storeWarehouseId,
@@ -139,20 +285,28 @@ const addToB2BCart = async (req, res) => {
       });
     }
 
-    // Check if item already exists in cart
+    // 🔥 Check if same SKU from same warehouses already in cart
     const existingItemIndex = cart.items.findIndex(
-      (item) => String(item.vendorProductId) === String(vendorProductId) && String(item.skuId) === String(skuId)
+      (item) =>
+        String(item.vendorProductId) === String(vendorProductId) &&
+        String(item.skuId) === String(skuId) &&
+        String(item.warehouseId) === String(vendorWarehouseId) // 🔥 only this needed
     );
 
+
     if (existingItemIndex > -1) {
-      // Update quantity
       cart.items[existingItemIndex].quantity += qty;
-      cart.items[existingItemIndex].price = sku.price; // Update price in case it changed
+      cart.items[existingItemIndex].price = sku.price;
     } else {
-      // Add new item
       cart.items.push({
         vendorProductId: vendorProduct._id,
         skuId: sku._id,
+        // 🔥 SOURCE warehouse
+        warehouseId : vendorWarehouseId,
+
+        // 🔥 DESTINATION warehouse
+        storeWarehouseId,
+
         quantity: qty,
         price: sku.price,
         currency: sku.currency || 'USD',
@@ -168,8 +322,11 @@ const addToB2BCart = async (req, res) => {
       .populate('storeWarehouseId', 'name isMain')
       .lean();
 
-    // Get wallet balance
-    const inventoryWallet = await InventoryWallet.findOne({ warehouse: storeWarehouseId }).lean();
+    // 🔥 wallet belongs to STORE warehouse
+    const inventoryWallet = await InventoryWallet.findOne({
+      warehouse: storeWarehouseId,
+    }).lean();
+
     const walletBalance = inventoryWallet?.balance || 0;
 
     return res.status(200).json({
@@ -182,9 +339,15 @@ const addToB2BCart = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(500).json({ success: false, message: 'Failed to add item to cart', error: error.message });
+    console.error('[B2B CART]', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to add item to cart',
+      error: error.message,
+    });
   }
 };
+
 
 /**
  * PUT /api/v2/b2b/cart/update/:itemId

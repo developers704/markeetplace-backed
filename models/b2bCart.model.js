@@ -19,6 +19,12 @@ const b2bCartItemSchema = new mongoose.Schema(
       ref: 'Sku',
       required: true,
     },
+      warehouseId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Warehouse',
+      required: true,
+    },
+
     quantity: {
       type: Number,
       required: true,

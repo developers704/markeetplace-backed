@@ -69,6 +69,8 @@ const bulkOtherProductImportRoutes = require('../routes/bulkOtherProductImport.r
 const v2CatalogRoutes = require('../routes/v2Catalog.route');
 const v2B2BRoutes = require('../routes/v2B2B.route');
 const v2B2BCartRoutes = require('../routes/v2B2BCart.route');
+const specialOrderRoutes = require('../routes/specialOrder.route');
+const salaryRoutes = require('../routes/salary.routes');
 
 const router = express.Router();
 
@@ -76,6 +78,7 @@ router.use('/president', presedentroutes);
 router.use('/v2', v2CatalogRoutes);
 router.use('/v2/b2b', v2B2BRoutes);
 router.use('/v2/b2b/cart', v2B2BCartRoutes);
+router.use('/special-orders', specialOrderRoutes);
 router.use('/bulk-products', bulkProductImportRoutes);
 router.use('/bulk-other-products', bulkOtherProductImportRoutes);
 router.use('/adminProgress', adminProgressRoutes);
@@ -141,5 +144,6 @@ router.use('/admin-logs', adminRoutes);
 router.use('/mobilemiddlebanner', mobileMiddleBannerRoutes);
 router.use('/subscribers', suscribeRoutes);
 router.use('/admin-notifications', adminNotificationRoutes);
+router.use('/salary', salaryRoutes);
 
 module.exports = router;

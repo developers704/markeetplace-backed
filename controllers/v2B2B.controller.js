@@ -17,30 +17,52 @@ const InventoryWallet = require('../models/inventoryWallet.model');
 
 const isObjectId = (value) => mongoose.isValidObjectId(String(value || '').trim());
 
-const sumSkuInventory = async (skuId, session) => {
+const sumSkuInventory = async (skuId, warehouseId, session) => {
+  if (!skuId || !warehouseId) return 0;
+
   const pipeline = [
-    { $match: { skuId: new mongoose.Types.ObjectId(String(skuId)) } },
-    { $group: { _id: null, total: { $sum: '$quantity' } } },
+    {
+      $match: {
+        skuId: new mongoose.Types.ObjectId(String(skuId)),
+        warehouse: new mongoose.Types.ObjectId(String(warehouseId)), // ✅ FIXED FIELD
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: '$quantity' },
+      },
+    },
   ];
+
   const q = SkuInventory.aggregate(pipeline);
   if (session) q.session(session);
+
   const agg = await q;
   return agg?.[0]?.total || 0;
 };
 
-const deductSkuInventory = async ({ skuId, quantity, session }) => {
+
+
+const deductSkuInventory = async ({ skuId, warehouseId, quantity, session }) => {
   let remaining = quantity;
   const deductions = [];
 
-  const invQuery = SkuInventory.find({ skuId, quantity: { $gt: 0 } }).sort({ quantity: -1, updatedAt: 1 });
+  const invQuery = SkuInventory.find({
+    skuId,
+    warehouse: warehouseId, // ✅ correct field name
+    quantity: { $gt: 0 },
+  }).sort({ quantity: -1, updatedAt: 1 });
+
   if (session) invQuery.session(session);
   const inventories = await invQuery.lean();
 
   for (const inv of inventories) {
     if (remaining <= 0) break;
+
     const updateOpts = session ? { session } : {};
 
-    // Defensive loop to avoid negative stock under concurrent approvals
+    // concurrency-safe deduction loop
     for (let attempt = 0; attempt < 3; attempt++) {
       const currentQuery = SkuInventory.findById(inv._id).select('quantity');
       if (session) currentQuery.session(session);
@@ -50,14 +72,23 @@ const deductSkuInventory = async ({ skuId, quantity, session }) => {
       if (available <= 0) break;
 
       const take = Math.min(remaining, available);
+
       const updateRes = await SkuInventory.updateOne(
-        { _id: inv._id, quantity: { $gte: take } },
+        {
+          _id: inv._id,
+          warehouse: warehouseId, // ✅ ensure same warehouse
+          quantity: { $gte: take },
+        },
         { $inc: { quantity: -take } },
         updateOpts
       );
 
       if (updateRes.modifiedCount === 1) {
-        deductions.push({ inventoryId: inv._id, deducted: take });
+        deductions.push({
+          inventoryId: inv._id,
+          deducted: take,
+        });
+
         remaining -= take;
         break;
       }
@@ -70,6 +101,8 @@ const deductSkuInventory = async ({ skuId, quantity, session }) => {
 
   return deductions;
 };
+
+
 
 const resolveRequestedByDetails = async (requests) => {
   const customerIds = [];
@@ -464,20 +497,11 @@ const createPurchaseRequest = async (req, res) => {
 
       const dmUserId = storeWarehouse.districtManager;
       const cmUserId = storeWarehouse.corporateManager;
-      // if (!dmUserId || !cmUserId) {
-      //   return res.status(400).json({ success: false, message: 'Store is missing DM/CM assignment' });
-      // }
+  
 
       const requireDM = storeWarehouse.requireDMApproval !== false;
       const requireCM = storeWarehouse.requireCMApproval !== false;
-      // let initialStatus = 'PENDING_ADMIN';
-      // if (requireDM && requireCM) {
-      //   initialStatus = 'PENDING_DM';
-      // } else if (requireDM && !requireCM) {
-      //   initialStatus = 'PENDING_DM';
-      // } else if (!requireDM && requireCM) {
-      //   initialStatus = 'PENDING_CM';
-      // }
+  
 
       let initialStatus = 'PENDING_ADMIN'; // default
 
@@ -494,12 +518,18 @@ const createPurchaseRequest = async (req, res) => {
       // Validate inventory for all items
       const inventoryChecks = await Promise.all(
         cart.items.map(async (item) => {
-          const available = await sumSkuInventory(item.skuId._id);
+          // Use cart item's warehouseId (from your cart)
+          const warehouseId = item.warehouseId || item.vendorWarehouseId || null;
+          const available = warehouseId ? await sumSkuInventory(item.skuId._id, warehouseId) : 0;
+
+          // console.log(`[Inventory Check] SKU: ${item.skuId._id}, Warehouse: ${warehouseId}, Available: ${available}, Requested: ${item.quantity}`);
+
           return {
             item,
             available,
             requested: item.quantity,
             sufficient: available >= item.quantity,
+            warehouseId, // now properly set
           };
         })
       );
@@ -508,8 +538,11 @@ const createPurchaseRequest = async (req, res) => {
       if (insufficientItems.length > 0) {
         const details = insufficientItems.map(
           (check) =>
-            `SKU ${check.item.skuId.sku}: Available=${check.available}, Requested=${check.requested}`
+            `SKU ${check.item.skuId._id}: Available=${check.available}, Requested=${check.requested}, Warehouse=${check.warehouseId || 'N/A'}`
         );
+
+        console.error('[Insufficient Stock]', details);
+
         return res.status(400).json({
           success: false,
           message: 'Insufficient vendor stock for some items',
@@ -517,12 +550,20 @@ const createPurchaseRequest = async (req, res) => {
         });
       }
 
+
       // Create purchase requests for each cart item
       const createdRequests = [];
       for (const item of cart.items) {
+      if (!item.warehouseId) {
+        return res.status(400).json({
+          success: false,
+          message: `Vendor warehouse missing for SKU ${item.skuId.sku}`,
+        });
+      }
         const request = await B2BPurchaseRequest.create({
           vendorProductId: item.vendorProductId._id,
           skuId: item.skuId._id,
+          vendorWarehouseId: item.warehouseId,
           quantity: item.quantity,
           storeId: storeWarehouse._id,
           storeWarehouseId: storeWarehouse._id,
@@ -584,12 +625,12 @@ const createPurchaseRequest = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Store warehouse is not active' });
     }
 
-    const available = await sumSkuInventory(sku._id);
+    const available = await sumSkuInventory(sku._id, vendorWarehouseId);
     if (available < qty) {
       return res.status(400).json({
         success: false,
         message: `Insufficient vendor stock. Available=${available}, requested=${qty}`,
-        data: { available, requested: qty },
+        data: { available, requested: qty, warehouse: vendorWarehouseId },
       });
     }
 
@@ -608,22 +649,10 @@ const createPurchaseRequest = async (req, res) => {
 
     const dmUserId = storeWarehouse.districtManager || null;
     const cmUserId = storeWarehouse.corporateManager || null;
-    // if (!dmUserId || !cmUserId) {
-    //   return res.status(400).json({ success: false, message: 'Store is missing DM/CM assignment' });
-    // }
 
-    // Determine initial status based on store-level approval flags (v2)
     const requireDM = storeWarehouse.requireDMApproval !== false; // Default true if not set
     const requireCM = storeWarehouse.requireCMApproval !== false; // Default true if not set
 
-    // let initialStatus = 'PENDING_ADMIN'; // Default: skip to admin if both flags off
-    // if (requireDM && requireCM) {
-    //   initialStatus = 'PENDING_DM'; // Full flow: DM → CM → Admin
-    // } else if (requireDM && !requireCM) {
-    //   initialStatus = 'PENDING_DM'; // DM → Admin (CM skipped)
-    // } else if (!requireDM && requireCM) {
-    //   initialStatus = 'PENDING_CM'; // CM → Admin (DM skipped)
-    // }
     let initialStatus = 'PENDING_ADMIN'; // default if no DM/CM exists
 
       if (requireDM && dmUserId && requireCM && cmUserId) {
@@ -635,11 +664,19 @@ const createPurchaseRequest = async (req, res) => {
       } 
 
 
+    const { vendorWarehouseId } = req.body;
+    if (!isObjectId(vendorWarehouseId)) {
+    return res.status(400).json({
+      success: false,
+      message: 'vendorWarehouseId required',
+    });
+    }
 
 
     const created = await B2BPurchaseRequest.create({
       vendorProductId: vendorProduct._id,
       skuId: sku._id,
+      vendorWarehouseId,
       quantity: qty,
       storeId: storeWarehouse._id,
       storeWarehouseId: storeWarehouse._id,
@@ -852,12 +889,12 @@ const approvePurchaseRequest = async (req, res) => {
       if (!fresh) throw new Error('Purchase request not found');
       if (fresh.status !== 'PENDING_ADMIN') throw new Error('Request is not pending admin approval');
 
-      const available = await sumSkuInventory(fresh.skuId, session);
+      const available = await sumSkuInventory(fresh.skuId,   fresh.vendorWarehouseId, session);
       if (available < fresh.quantity) {
         throw new Error(`Insufficient vendor stock at approval time. Available=${available}, requested=${fresh.quantity}`);
       }
 
-      await deductSkuInventory({ skuId: fresh.skuId, quantity: fresh.quantity, session });
+      await deductSkuInventory({ skuId: fresh.skuId, warehouseId: fresh.vendorWarehouseId, quantity: fresh.quantity, session });
 
       const storeInvOpts = session ? { upsert: true, session } : { upsert: true };
       await StoreInventory.updateOne(
@@ -892,6 +929,20 @@ const approvePurchaseRequest = async (req, res) => {
         inventoryWallet.lastTransaction = now;
         await inventoryWallet.save(session ? { session } : {});
       }
+
+      const vendorWalletQuery = InventoryWallet.findOne({ warehouse: fresh.vendorWarehouseId });
+      if (session) vendorWalletQuery.session(session);
+      const vendorWallet = await vendorWalletQuery;
+
+      if (!vendorWallet) {
+        throw new Error('Inventory wallet not found for vendor warehouse');
+      }
+      
+      // Credit vendor warehouse
+      vendorWallet.balance += itemTotal;
+      vendorWallet.lastTransaction = now;
+      await vendorWallet.save(session ? { session } : {});
+
 
       fresh.approvals.admin = { userId: actor.id, userModel: actor.model, approvedAt: now };
       fresh.status = 'APPROVED';

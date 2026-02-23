@@ -7,6 +7,7 @@ function getClient() {
   if (client) return client;
 
   const uri = process.env.REDIS_URI;
+  console.log(uri)
   if (!uri) {
     console.log("❌ REDIS_URI missing");
     return null;
@@ -14,7 +15,8 @@ function getClient() {
 
   client = new Redis(uri, {
     maxRetriesPerRequest: null,
-    tls: {}
+    enableReadyCheck: true,
+    // tls: {}
   });
 
   client.on("ready", () => console.log("✅ Redis connected"));

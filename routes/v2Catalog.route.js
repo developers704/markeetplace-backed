@@ -22,6 +22,7 @@ const {
   getV2SubcategoriesByCategory,
   getV2SubSubcategoriesBySubCategory,
   getV2CategoriesWithSubcategories,
+  listVendorProductsAdmin,
 } = require('../controllers/v2Catalog.controller');
 
 /**
@@ -33,6 +34,7 @@ const {
  */
 
 // Public/read routes
+router.get('/products/admin', listVendorProductsAdmin);
 router.get('/products', listVendorProducts);
 router.get('/products/:id', getVendorProductById);
 router.get('/skus/:skuId', getSkuById);
