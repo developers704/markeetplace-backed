@@ -10,6 +10,7 @@ const Settings = require('../models/settings.model');
 const IPAccess = require("../models/IPAccess.model");
 const TermsAndConditions = require("../models/TermsAndConditions.model");
 const Warehouse = require("../models/warehouse.model");
+const LoginLog = require("../models/loginLog.model");
 
 
 const generateSixDigitOTP = () => crypto.randomInt(100000, 1000000);
@@ -271,6 +272,9 @@ const customerLogin = async (req, res) => {
       };
     }
        const warehouse = await Warehouse.findById(warehouseId);
+
+    // Record login for daily visits (dashboard); non-blocking
+    LoginLog.create({ customer: customer._id }).catch(() => {});
 
     // customerData.oldLastLoginDate = oldLastLoginDate;
     res.status(200).json({

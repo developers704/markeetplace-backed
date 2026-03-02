@@ -1,4 +1,4 @@
-// // config/sendMails.js
+// config/sendMails.js
 // const nodemailer = require("nodemailer");
 
 // const transporter = nodemailer.createTransport({
@@ -157,35 +157,150 @@
 
 // config/sendMails.js
 // config/sendMails.js
-const sgMail = require("@sendgrid/mail");
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-const sendEmail = async (mailOptions) => {
+// const sgMail = require("@sendgrid/mail");
+// sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+// const sendGrid = process.env.SENDGRID_API_KEY
+// console.log("apikey", sendGrid)
+// const sendEmail = async (mailOptions) => {
+//   try {
+//     const fromEmail = process.env.FROM_EMAIL || "no-reply@studylinksuk.com"; 
+//     const html = mailOptions.html || (mailOptions.message ? `<p>${mailOptions.message}</p>` : undefined);
+//     const text = mailOptions.text || mailOptions.message || mailOptions.subject || " ";
+
+//     const msg = {
+//       to: mailOptions.to,
+//       from: fromEmail,
+//       subject: mailOptions.subject,
+//       text,
+//       html,
+//     };
+
+//     const [res] = await sgMail.send(msg);
+//     console.log("✅ SendGrid:", { statusCode: res.statusCode, messageId: res.headers["x-message-id"] });
+//     return { success: res.statusCode === 202, messageId: res.headers["x-message-id"] };
+//   } catch (error) {
+//     console.error("⚠️ SendGrid Error:", error.response?.body || error.message);
+//     return { success: false, error: error.response?.body || error.message };
+//   }
+// };
+// module.exports = { sendEmail };
+
+
+
+
+
+
+
+
+// config/sendMails.js
+// const mailchimpTransactional = require("@mailchimp/mailchimp_transactional");
+// const client = mailchimpTransactional(process.env.MAILCHIMP_API_KEY);
+
+// const sendEmail = async ({ to, subject, html, text }) => {
+//   try {
+//     if (!to || !subject || (!html && !text)) {
+//       throw new Error("Missing required email fields");
+//     }
+
+//     const fromEmail = process.env.EMAIL_USER || "no-reply@studylinksuk.com";
+//     const fromName = process.env.FROM_NAME || "Cloud Lab Private LTD";
+
+//     const msg = {
+//       from_email: fromEmail,
+//       from_name: fromName,
+//       subject,
+//       html,
+//       text,
+//       to: [
+//         {
+//           email: to,
+//           type: "to",
+//         },
+//       ],
+//     };
+
+//     const response = await client.messages.send({ message: msg });
+//     console.log("✅ Mailchimp Transactional:", response);
+
+//     return {
+//       success: Array.isArray(response) && response[0].status === "sent",
+//       response,
+//     };
+//   } catch (error) {
+//     console.error("⚠️ Mailchimp Error:", error?.response || error.message || error);
+//     return { success: false, error: error?.response || error.message || error };
+//   }
+// };
+
+// module.exports = { sendEmail };
+
+// const mailchimpTransactional = require("@mailchimp/mailchimp_transactional")(process.env.MAILCHIMP_API_KEY);
+
+// const sendEmail = async ({ to, subject, html, text }) => {
+//   try {
+//     const message = {
+//       // from_email: "info@vallianimarketplace.com",
+//       from_email: "marketing@vallianijewelers.com",
+//       from_name: "Valliani Jewelers",
+//       subject,
+//       text,
+//       html,
+//       to: [{ email: to, type: "to" }],
+//     };
+
+//     const response = await mailchimpTransactional.messages.send({ message });
+
+//     console.log("✅ Email sent:", response);
+//     return { success: true, data: response };
+//   } catch (error) {
+//     console.error("❌ Mailchimp Error:", error.response?.body || error.message);
+//     return { success: false, error: error.response?.body || error.message };
+//   }
+// };
+// module.exports = { sendEmail };
+
+
+require("dotenv").config();
+const nodemailer = require("nodemailer");
+// console.log(process.env.SMTP_HOST, process.env.SMTP_PORT, process.env.SMTP_SECURE);
+
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT) || 465,
+  secure: process.env.SMTP_SECURE === "true", // true for 465, false for 587
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+  logger: true,
+  debug: true,
+});
+
+const sendEmail = async ({ to, subject, html, text }) => {
   try {
-    const fromEmail = process.env.FROM_EMAIL || "no-reply@studylinksuk.com"; 
-    const html = mailOptions.html || (mailOptions.message ? `<p>${mailOptions.message}</p>` : undefined);
-    const text = mailOptions.text || mailOptions.message || mailOptions.subject || " ";
-
-    const msg = {
-      to: mailOptions.to,
-      from: fromEmail,
-      subject: mailOptions.subject,
+    // const info = await transporter.sendMail({
+    //   from: `"${process.env.EMAIL_FROM_NAME}" <${process.env.EMAIL_FROM}>`,
+    //   to,
+    //   subject,
+    //   text,
+    //   html,
+    // });
+    await transporter.sendMail({
+      from: `"Valliani Jewelers" <info@vallianimarketplace.com>`,
+      to,
+      subject,
       text,
       html,
-    };
+      replyTo: "info@vallianimarketplace.com"
+      });
 
-    const [res] = await sgMail.send(msg);
-    console.log("✅ SendGrid:", { statusCode: res.statusCode, messageId: res.headers["x-message-id"] });
-    return { success: res.statusCode === 202, messageId: res.headers["x-message-id"] };
+    // console.log("✅ Email sent:", info.messageId);
+    return { success: true };
   } catch (error) {
-    console.error("⚠️ SendGrid Error:", error.response?.body || error.message);
-    return { success: false, error: error.response?.body || error.message };
+    // console.error("❌ SMTP Error:", error);
+    return { success: false, error: error.message };
   }
 };
+
 module.exports = { sendEmail };
-
-
-
-
-
-

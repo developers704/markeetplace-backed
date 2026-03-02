@@ -1,5 +1,7 @@
+const { sendEmail } = require('../config/sendMails');
 const SpecialOrder = require('../models/specialOrder.model');
 const mongoose = require('mongoose');
+const specialOrderReceiverModel = require('../models/specialOrderReceiver.model');
 
 const isObjectId = (v) => mongoose.isValidObjectId(String(v || '').trim());
 
@@ -84,6 +86,55 @@ const createSpecialOrder = async (req, res) => {
     const populated = await SpecialOrder.findById(order._id)
       .populate('storeId', 'name')
       .lean();
+      
+      // send email dynamic user start
+      // 1️⃣ Creator email
+      const emails = [];
+
+      const requester = req.user;
+      if (requester?.email) {
+        emails.push({
+          to: requester.email,
+          subject: `Special Order Submitted - ${order.ticketNumber}`,
+          html: `
+            <h2>Special Order Submitted</h2>
+            <p>Your special order <strong>${order.ticketNumber}</strong> has been submitted successfully.</p>
+            <p>Store: ${populated?.storeId?.name || ''}</p>
+            <p>Status: SUBMITTED</p>
+          `
+        });
+      }
+
+      // 2️⃣ Get admin receivers from DB
+      const receivers = await specialOrderReceiverModel.find({ isActive: true })
+        .populate('userId', 'email username')
+        .lean();
+
+      receivers.forEach(r => {
+        if (r.userId?.email) {
+          emails.push({
+            to: r.userId.email,
+            subject: `New Special Order - ${order.ticketNumber}`,
+            html: `
+              <h2>New Special Order Received</h2>
+              <p><strong>Ticket:</strong> ${order.ticketNumber}</p>
+              <p><strong>Requested By:</strong> ${requester?.username || ''}</p>
+              <p><strong>Store:</strong> ${populated?.storeId?.name || ''}</p>
+              <p><a href="${process.env.ADMIN_URL}/special-orders/${order._id}">
+              View Order</a></p>
+            `
+          });
+        }
+      });
+
+      // 3️⃣ Send emails (non-blocking like your existing system)
+      if (emails.length > 0) {
+        Promise.all(emails.map(mail => sendEmail(mail)))
+          .catch(err => console.error('Special Order email error:', err));
+      }
+
+      // send email dynamic user end
+
 
     return res.status(201).json({
       success: true,

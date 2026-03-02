@@ -71,6 +71,8 @@ const v2B2BRoutes = require('../routes/v2B2B.route');
 const v2B2BCartRoutes = require('../routes/v2B2BCart.route');
 const specialOrderRoutes = require('../routes/specialOrder.route');
 const salaryRoutes = require('../routes/salary.routes');
+const speciaOrderRecevierRoutes = require('../routes/specialOrderReceiver.route');
+const dashboardRoutes = require('../routes/dashboard.route');
 
 const router = express.Router();
 
@@ -145,5 +147,7 @@ router.use('/mobilemiddlebanner', mobileMiddleBannerRoutes);
 router.use('/subscribers', suscribeRoutes);
 router.use('/admin-notifications', adminNotificationRoutes);
 router.use('/salary', salaryRoutes);
+router.use('/spo-users', speciaOrderRecevierRoutes);
+router.use('/dashboard', dashboardRoutes);
 
 module.exports = router;
