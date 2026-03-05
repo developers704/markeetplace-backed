@@ -1777,6 +1777,7 @@ const processChaptersWithUnlockStatus = async (chapters, userEnrollment, userQui
     processedChapters.push({
       _id: chapter._id,
       title: chapter.title,
+      chapterImage:chapter.chapterImage,
       description: chapter.description || '',
       sequence: chapter.sequence,
       deadline: chapter.deadline || null,
