@@ -672,10 +672,14 @@ const createCourse = async (req, res) => {
         processedSections.push(processedSection);
       }
 
+      const chapterImageFile = req.files.find((file) => file.fieldname === `chapterImage_${i}`);
+      const chapterImagePath = chapterImageFile ? chapterImageFile.path.replace(/\\/g, '/') : (chapter.chapterImage || null);
+
       processedChapters.push({
         ...chapter,
         sections: processedSections,
-        deadline: chapter.deadline
+        deadline: chapter.deadline,
+        ...(chapterImagePath && { chapterImage: chapterImagePath }),
       });
     }
 
@@ -4733,6 +4737,16 @@ const updateCourse = async (req, res) => {
 
       // Update parsedChapters with HLS URLs from video processing
       parsedChapters = videoProcessingResult.chapters;
+
+      // Apply chapter images from uploaded files
+      if (req.files && req.files.length > 0) {
+        for (let i = 0; i < parsedChapters.length; i++) {
+          const chapterImageFile = req.files.find((f) => f.fieldname === `chapterImage_${i}`);
+          if (chapterImageFile) {
+            parsedChapters[i].chapterImage = chapterImageFile.path.replace(/\\/g, '/');
+          }
+        }
+      }
 
       // Check for upload errors
       if (videoProcessingResult.errors && videoProcessingResult.errors.length > 0) {

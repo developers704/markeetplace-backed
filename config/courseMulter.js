@@ -18,7 +18,7 @@ const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         if (file.fieldname === 'videos' || file.fieldname.startsWith('chapter_video_')) {
             cb(null, 'uploads/courses/videos');
-        } else if (file.fieldname === 'courseThumbnail' || file.fieldname === 'videoThumbnails' || file.fieldname.startsWith('content_thumbnail_')) {
+        } else if (file.fieldname === 'courseThumbnail' || file.fieldname === 'videoThumbnails' || file.fieldname.startsWith('content_thumbnail_') || file.fieldname.startsWith('chapterImage_')) {
             cb(null, 'uploads/courses/thumbnails');
         } else {
             cb(null, 'uploads/courses/content');
@@ -35,7 +35,7 @@ const fileFilter = (req, file, cb) => {
         if (!file.originalname.match(/\.(mp4|webm|mkv)$/)) {
             return cb(new Error('Invalid video format. Only mp4, webm, and mkv files are allowed.'), false);
         }
-    } else if (file.fieldname === 'courseThumbnail' || file.fieldname === 'videoThumbnails' || file.fieldname.startsWith('content_thumbnail_')) {
+    } else if (file.fieldname === 'courseThumbnail' || file.fieldname === 'videoThumbnails' || file.fieldname.startsWith('content_thumbnail_') || file.fieldname.startsWith('chapterImage_')) {
         if (!file.originalname.match(/\.(jpg|jpeg|png)$/)) {
             return cb(new Error('Invalid image format. Only jpg, jpeg, and png files are allowed.'), false);
         }
@@ -61,7 +61,7 @@ const upload = multer({
         fileSize: (req, file) => {
             if (file.fieldname === 'videos' || file.fieldname.startsWith('chapter_video_')) {
                 return limits.videos;
-            } else if (file.fieldname === 'courseThumbnail' || file.fieldname === 'videoThumbnails' || file.fieldname.startsWith('content_thumbnail_')) {
+            } else if (file.fieldname === 'courseThumbnail' || file.fieldname === 'videoThumbnails' || file.fieldname.startsWith('content_thumbnail_') || file.fieldname.startsWith('chapterImage_')) {
                 return limits.thumbnails;
             } else {
                 return limits.documents;
