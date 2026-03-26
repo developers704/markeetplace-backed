@@ -9,6 +9,7 @@ const Sku = require('../models/sku.model');
 const SkuInventory = require('../models/skuInventory.model');
 const ProductListing = require('../models/productListing.model');
 const { Category, SubCategory, SubSubCategory } = require('../models/productCategory.model');
+const Warehouse = require('../models/warehouse.model');
 
 const pendingSyncs = new Map();
 
@@ -39,6 +40,17 @@ try {
 } catch (_) {}
 
 const normalizeKey = (v) => String(v || '').trim().toUpperCase();
+const isDebugEnabled = String(process.env.PRODUCT_LISTING_DEBUG || '').toLowerCase() === 'true';
+
+const toObjectIdArray = (values = []) =>
+  values
+    .map((v) => {
+      if (!v) return null;
+      if (v instanceof mongoose.Types.ObjectId) return v;
+      if (mongoose.Types.ObjectId.isValid(v)) return new mongoose.Types.ObjectId(v);
+      return null;
+    })
+    .filter(Boolean);
 
 async function syncProductListing(productId, bumpCacheVersion = true) {
   if (!productId || !mongoose.Types.ObjectId.isValid(productId)) return;
@@ -72,12 +84,41 @@ async function syncProductListing(productId, bumpCacheVersion = true) {
   .filter(Boolean)
   .join(' ');
 
-  const skuIds = skus.map((s) => s._id);
+  const skuIds = toObjectIdArray(skus.map((s) => s._id));
+  const mainWarehouses = await Warehouse.find({ isMain: true }).select('_id').lean();
+  const mainWarehousesIds = toObjectIdArray(mainWarehouses.map((w) => w?._id));
+
   const invAgg = await SkuInventory.aggregate([
     { $match: { skuId: { $in: skuIds } } },
     { $group: { _id: null, totalQty: { $sum: '$quantity' } } },
   ]);
   const totalInventory = invAgg[0]?.totalQty ?? 0;
+
+  
+  let mainWarehouseInventory = 0;
+  if (mainWarehousesIds.length > 0) {
+    const mainInvAgg = await SkuInventory.aggregate([
+      {
+        $match: {
+          skuId: { $in: skuIds },
+          warehouse: { $in: mainWarehousesIds },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalQty: { $sum: '$quantity' },
+        },
+      },
+    ]);
+    mainWarehouseInventory = mainInvAgg[0]?.totalQty ?? 0;
+  }
+
+  if (isDebugEnabled) {
+    console.log('[ProductListing][debug] matching skuIds:', skuIds.map(String));
+    console.log('[ProductListing][debug] main warehouse ids:', mainWarehousesIds.map(String));
+    console.log('[ProductListing][debug] computed mainWarehouseInventory:', mainWarehouseInventory);
+  }
 
   const prices = skus.map((s) => s.price).filter((n) => typeof n === 'number');
   const minPrice = prices.length ? Math.min(...prices) : 0;
@@ -139,20 +180,21 @@ async function syncProductListing(productId, bumpCacheVersion = true) {
     subsubcategoryDoc: subsubcategoryDoc ? { _id: subsubcategoryDoc._id, name: subsubcategoryDoc.name, description: subsubcategoryDoc.description, image: subsubcategoryDoc.image } : null,
     minPrice,
     maxPrice,
+    mainWarehouseInventory,
     totalInventory,
     skuCount: skus.length,
-  defaultSku: {
-  _id: defaultSkuDoc._id,
-  sku: defaultSkuDoc.sku,
-  price: defaultSkuDoc.price,
-  currency: defaultSkuDoc.currency || 'USD',
-  // images: defaultSkuDoc.images || [],
-  // gallery: defaultSkuDoc.gallery || [],
-  metalColor: defaultSkuDoc.metalColor,
-  metalType: defaultSkuDoc.metalType,
-  size: defaultSkuDoc.size,
-  attributes:
-  defaultSkuDoc?.attributes instanceof Map
+    defaultSku: {
+    _id: defaultSkuDoc._id,
+    sku: defaultSkuDoc.sku,
+    price: defaultSkuDoc.price,
+    currency: defaultSkuDoc.currency || 'USD',
+    // images: defaultSkuDoc.images || [],
+    // gallery: defaultSkuDoc.gallery || [],
+    metalColor: defaultSkuDoc.metalColor,
+    metalType: defaultSkuDoc.metalType,
+    size: defaultSkuDoc.size,
+    attributes:
+    defaultSkuDoc?.attributes instanceof Map
     ? Object.fromEntries(defaultSkuDoc.attributes)
     : (defaultSkuDoc?.attributes || {}),
   // attributes: defaultSkuDoc.attributes && typeof defaultSkuDoc.attributes === 'object' && !Array.isArray(defaultSkuDoc.attributes)

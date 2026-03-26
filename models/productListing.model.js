@@ -29,6 +29,7 @@ const productListingSchema = new mongoose.Schema(
     minPrice: { type: Number, default: 0 },
     maxPrice: { type: Number, default: 0 },
     totalInventory: { type: Number, default: 0 },
+    mainWarehouseInventory: { type: Number, default: 0 },
     skuCount: { type: Number, default: 0 },
 
     defaultSku: {
@@ -62,6 +63,7 @@ productListingSchema.index({ categoryId: 1, subcategoryId: 1, subsubcategoryId: 
 productListingSchema.index({ updatedAt: -1, _id: 1 });
 productListingSchema.index({ createdAt: -1, _id: 1 });
 productListingSchema.index({ totalInventory: -1, _id: 1 });
+productListingSchema.index({ mainWarehouseInventory: -1, _id: 1 });
 productListingSchema.index({ minPrice: 1, _id: 1 });
 productListingSchema.index({ maxPrice: 1, _id: 1 });
 productListingSchema.index({ metalColorKeys: 1 });

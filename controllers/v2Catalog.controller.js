@@ -6,6 +6,7 @@ const Sku = require('../models/sku.model');
 const SkuInventory = require('../models/skuInventory.model');
 const ProductListing = require('../models/productListing.model');
 const { Category, SubCategory, SubSubCategory } = require('../models/productCategory.model');
+const Warehouse = require('../models/warehouse.model');
 
 let getRedis;
 let getListingCacheVersion;
@@ -530,6 +531,7 @@ const sortVp = {
   'new-arrivals': { createdAt: -1, _id: 1 },
   'best-sellers': { /* can't use totalInventory here, optional */ createdAt: -1, _id: 1 },
   'featured': { updatedAt: -1, _id: 1 },
+  'ismain': {_id : 1},
 }[sortRule] || { updatedAt: -1, _id: 1 };
   // const sort = sortOpts[sortRule] || sortOpts['featured'];
 
@@ -539,6 +541,9 @@ const sortVp = {
 
   if (listingCount > 0) {
     const listingMatch = {};
+    if (sortRule === 'ismain') {
+    listingMatch.mainWarehouseInventory = { $gt: 0 };
+    }
     if (brandKeys.length === 1) listingMatch.brandKey = brandKeys[0];
     else if (brandKeys.length > 1) listingMatch.brandKey = { $in: brandKeys };
     if (categoryId) listingMatch.categoryId = { $in: [categoryId, categoryId.toString()] };
@@ -609,8 +614,6 @@ const sortVp = {
         { title: searchRegex },
         { brand: searchRegex },
         { vendorModel: searchRegex },
-        
-
       ];
     }
     // const sortVp = (sortRule === 'new-arrivals')
@@ -743,6 +746,8 @@ async function refreshCache(cacheKey, query) {
 const getVendorProductById = async (req, res) => {
   try {
     const { id } = req.params;
+    const { filterMain } = req.query;
+    const isFilterMain = filterMain === 'true';
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({ success: false, message: 'Invalid product id' });
     }
@@ -779,20 +784,40 @@ const getVendorProductById = async (req, res) => {
       .sort({ createdAt: 1 })
       .lean();
     const skuIds = skus.map((s) => s._id);
+    const mainWarehouseIds = isFilterMain
+      ? (await Warehouse.find({ isMain: true }).select('_id').lean()).map((w) => w._id)
+      : [];
+    const inventoryMatch = {
+      skuId: { $in: skuIds },
+      ...(isFilterMain
+        ? { warehouse: { $in: mainWarehouseIds.length ? mainWarehouseIds : [new mongoose.Types.ObjectId()] } }
+        : {}),
+    };
 
     const inventoryAgg = skuIds.length
       ? await SkuInventory.aggregate([
-          { $match: { skuId: { $in: skuIds } } },
+          { $match: inventoryMatch },
           { $group: { _id: '$skuId', totalQty: { $sum: '$quantity' } } },
         ])
       : [];
       // Fetch inventories with warehouse for all SKUs
-    const inventories = skuIds.length
+    // const inventories = skuIds.length
+    //   ? await SkuInventory.find({ skuId: { $in: skuIds } })
+    //       .populate('warehouse', 'name isMain')
+    //       .populate('city', 'name')
+    //       .lean()
+    //   : [];
+    let inventories = skuIds.length
       ? await SkuInventory.find({ skuId: { $in: skuIds } })
           .populate('warehouse', 'name isMain')
           .populate('city', 'name')
           .lean()
       : [];
+
+    // Filter inventories if isFilterMain=true
+    if (isFilterMain) {
+      inventories = inventories.filter(inv => inv.warehouse?.isMain);
+    }
 
     const inventoriesBySku = new Map();
 
@@ -814,7 +839,7 @@ const getVendorProductById = async (req, res) => {
       totalQuantity: qtyBySku.get(skuIdStr) || 0,
       inventories: inventoriesBySku.get(skuIdStr) || [],
       };
-    });
+    }).filter(s => !isFilterMain || (s.inventories.length > 0));
     const unique = (arr) => [...new Set(arr.filter((v) => String(v || '').trim() !== ''))];
     const availableColors = unique(skusWithQty.map((s) => s.metalColor));
     const availableSizes = unique(skusWithQty.map((s) => s.size));
@@ -872,6 +897,8 @@ const getVendorProductById = async (req, res) => {
 const getSkuById = async (req, res) => {
   try {
     const { skuId } = req.params;
+    const { filterMain } = req.query;
+    const isFilterMain = filterMain === 'true';
     if (!mongoose.isValidObjectId(skuId)) {
       return res.status(400).json({ success: false, message: 'Invalid sku id' });
     }
@@ -881,11 +908,19 @@ const getSkuById = async (req, res) => {
       return res.status(404).json({ success: false, message: 'SKU not found' });
     }
 
-    const inventories = await SkuInventory.find({ skuId: sku._id })
+     let inventories = await SkuInventory.find({ skuId: sku._id })
       .populate('warehouse', 'name isMain')
       .populate('city', 'name')
       .lean();
 
+    // Filter inventories if isFilterMain=true
+    if (isFilterMain) {
+      inventories = inventories.filter(inv => inv.warehouse?.isMain);
+    }
+    // const inventories = await SkuInventory.find({ skuId: sku._id })
+    //   .populate('warehouse', 'name isMain')
+    //   .populate('city', 'name')
+    //   .lean();
     const totalQuantity = inventories.reduce((sum, inv) => sum + (inv.quantity || 0), 0);
 
     return res.status(200).json({

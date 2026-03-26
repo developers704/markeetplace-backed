@@ -11,7 +11,7 @@ dns.setServers(["8.8.8.8", "1.1.1.1"]);
 dotenv.config();
 
 async function run() {
-  const uri = process.env.MONGO_URI;
+  const uri = "mongodb+srv://admin:admin@staging.jjfts4o.mongodb.net/2pl";
   if (!uri) {
     console.error('MONGO_URI not set in .env');
     process.exit(1);
