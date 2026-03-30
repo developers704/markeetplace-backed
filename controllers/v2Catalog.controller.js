@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 
 const VendorProduct = require('../models/vendorProduct.model');
 const Sku = require('../models/sku.model');
@@ -46,6 +47,7 @@ function listingCacheKey(gen, params) {
     size: (params?.size || '').trim(),
     stonetype: (params?.stonetype || '').trim(),
     centerclarity: (params?.centerclarity || '').trim(),
+    warehouseId: params?.warehouseId ? String(params.warehouseId) : '',
     attr: params.attributeFilters ? JSON.stringify(Object.keys(params?.attributeFilters).sort().map((k) => [k, params?.attributeFilters[k]].sort())) : '',
   };
   const hash = crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex').slice(0, 24);
@@ -66,6 +68,29 @@ const toLooseEqualsRegex = (value) => {
   if (!parts.length) return null;
   const pattern = parts.map(escapeRegex).join('[-\\s_]+');
   return new RegExp(`^${pattern}$`, 'i');
+};
+
+const extractWarehouseId = (raw) => {
+  if (!raw) return null;
+  const value = typeof raw === 'object' && raw._id ? raw._id : raw;
+  const asString = String(value);
+  return mongoose.Types.ObjectId.isValid(asString) ? new mongoose.Types.ObjectId(asString) : null;
+};
+
+const getSelectedWarehouseIdFromRequest = (req) => {
+  const fromUser = extractWarehouseId(req?.user?.selectedWarehouse || req?.user?.warehouse);
+  if (fromUser) return fromUser;
+
+  const authHeader = req?.header?.('Authorization') || req?.headers?.authorization;
+  if (!authHeader) return null;
+  const token = String(authHeader).replace('Bearer ', '').trim();
+  if (!token) return null;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    return extractWarehouseId(decoded?.warehouse);
+  } catch (_) {
+    return null;
+  }
 };
 const listVendorProductsAdmin = async (req, res) => {
   try {
@@ -400,6 +425,8 @@ const listVendorProducts = async (req, res) => {
     const minPrice = parseFloat(req?.query?.minPrice) || null;
     const maxPrice = parseFloat(req?.query?.maxPrice) || null;
     const sortRule = String(req.query.sort || req.query.srule || 'featured').toLowerCase();
+    const isOwnInventorySort = sortRule === 'own-inventory';
+    const selectedWarehouseId = isOwnInventorySort ? getSelectedWarehouseIdFromRequest(req) : null;
     const minQuantity = typeof req.query.minQuantity !== 'undefined' && req.query.minQuantity !== ''
       ? Math.max(0, parseInt(req.query.minQuantity, 10) || 0)
       : null;
@@ -452,6 +479,7 @@ const listVendorProducts = async (req, res) => {
       size: sizeRaw ? String(sizeRaw).trim() : '',
       stonetype: stonetypeRaw ? String(stonetypeRaw).trim() : '',
       centerclarity: centerclarityRaw ? String(centerclarityRaw).trim() : '',
+      warehouseId: selectedWarehouseId,
       attributeFilters,
     };
     const redis = getRedis();
@@ -462,12 +490,12 @@ const listVendorProducts = async (req, res) => {
       const cached = await redis.get(cacheKey);
       if (cached) {
         res.status(200).json(JSON.parse(cached));
-        refreshCache(cacheKey, req.query).catch(() => {});
+        refreshCache(cacheKey, req.query, { selectedWarehouseId }).catch(() => {});
         return;
       }
     }
 
-    const payload = await buildListingPayload(req.query);
+    const payload = await buildListingPayload(req.query, { selectedWarehouseId });
     if (redis) await redis.setex(cacheKey, LISTING_CACHE_TTL, JSON.stringify(payload));
     return res.status(200).json(payload);
 
@@ -477,7 +505,7 @@ const listVendorProducts = async (req, res) => {
 };
 
 // --- Helper: Build listing payload from query (same logic as listVendorProducts, no Redis) ---
-async function buildListingPayload(query) {
+async function buildListingPayload(query, context = {}) {
   const page = Math.max(1, parseInt(query.page, 10) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 20));
   const skip = (page - 1) * limit;
@@ -490,6 +518,8 @@ async function buildListingPayload(query) {
   const minPrice = parseFloat(query.minPrice) || null;
   const maxPrice = parseFloat(query.maxPrice) || null;
   const sortRule = String(query?.sort || query?.srule || 'featured').toLowerCase();
+  const isOwnInventorySort = sortRule === 'own-inventory';
+  const selectedWarehouseId = isOwnInventorySort ? extractWarehouseId(context?.selectedWarehouseId) : null;
   const minQuantity = typeof query.minQuantity !== 'undefined' && query.minQuantity !== ''
     ? Math.max(0, parseInt(query.minQuantity, 10) || 0)
     : null;
@@ -541,6 +571,35 @@ const sortVp = {
 
   if (listingCount > 0) {
     const listingMatch = {};
+    if (isOwnInventorySort) {
+      if (!selectedWarehouseId) {
+        listingMatch.productId = { $in: [] };
+      } else {
+        const ownInvAgg = await SkuInventory.aggregate([
+          { $match: { warehouse: selectedWarehouseId, quantity: { $gt: 0 } } },
+          {
+            $lookup: {
+              from: 'skus',
+              localField: 'skuId',
+              foreignField: '_id',
+              as: 'skuDoc',
+            },
+          },
+          { $unwind: '$skuDoc' },
+          {
+            $group: {
+              _id: '$skuDoc.productId',
+              totalQty: { $sum: '$quantity' },
+            },
+          },
+          ...(minQuantity != null && minQuantity > 0 ? [{ $match: { totalQty: { $gte: minQuantity } } }] : []),
+        ]);
+        const ownProductIds = ownInvAgg
+          .map((row) => row?._id)
+          .filter((id) => mongoose.Types.ObjectId.isValid(id));
+        listingMatch.productId = { $in: ownProductIds };
+      }
+    }
     if (sortRule === 'ismain') {
     listingMatch.mainWarehouseInventory = { $gt: 0 };
     }
@@ -551,7 +610,7 @@ const sortVp = {
     if (subsubcategoryId) listingMatch.subsubcategoryId = { $in: [subsubcategoryId, subsubcategoryId.toString()] };
     if (minPrice != null && minPrice > 0) listingMatch.minPrice = { $gte: minPrice };
     if (maxPrice != null && maxPrice > 0) listingMatch.maxPrice = { $lte: maxPrice };
-    if (minQuantity != null && minQuantity > 0) listingMatch.totalInventory = { $gte: minQuantity };
+    if (!isOwnInventorySort && minQuantity != null && minQuantity > 0) listingMatch.totalInventory = { $gte: minQuantity };
     if (metalColorRaw && String(metalColorRaw).trim()) listingMatch.metalColorKeys = normalizeKey(metalColorRaw);
     // if (metalTypeRaw && String(metalTypeRaw).trim()) listingMatch.metalTypeKeys = normalizeKey(metalTypeRaw);
     if (metalTypeRaw && String(metalTypeRaw).trim()) {
@@ -684,7 +743,12 @@ const sortVp = {
     let totalInventoryByProduct = new Map();
     if (skuIds.length > 0) {
       const invAgg = await SkuInventory.aggregate([
-        { $match: { skuId: { $in: skuIds } } },
+        {
+          $match: {
+            skuId: { $in: skuIds },
+            ...(isOwnInventorySort && selectedWarehouseId ? { warehouse: selectedWarehouseId } : {}),
+          },
+        },
         { $group: { _id: '$skuId', totalQty: { $sum: '$quantity' } } },
       ]);
       const qtyBySku = new Map(invAgg.map((x) => [x._id.toString(), x.totalQty]));
@@ -723,11 +787,11 @@ const sortVp = {
 }
 
 // --- Helper: Background cache refresh (reuses same query logic so cache is overwritten with correct data) ---
-async function refreshCache(cacheKey, query) {
+async function refreshCache(cacheKey, query, context = {}) {
   const redis = getRedis();
   if (!redis) return;
   try {
-    const payload = await buildListingPayload(query);
+    const payload = await buildListingPayload(query, context);
     await redis.setex(cacheKey, LISTING_CACHE_TTL, JSON.stringify(payload));
   } catch (err) {
     // avoid background refresh breaking; cache will expire naturally
@@ -746,8 +810,10 @@ async function refreshCache(cacheKey, query) {
 const getVendorProductById = async (req, res) => {
   try {
     const { id } = req.params;
-    const { filterMain } = req.query;
+    const { filterMain, filterOwn } = req.query;
     const isFilterMain = filterMain === 'true';
+    const isFilterOwn = filterOwn === 'true';
+    const selectedWarehouseId = isFilterOwn ? getSelectedWarehouseIdFromRequest(req) : null;
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({ success: false, message: 'Invalid product id' });
     }
@@ -792,6 +858,9 @@ const getVendorProductById = async (req, res) => {
       ...(isFilterMain
         ? { warehouse: { $in: mainWarehouseIds.length ? mainWarehouseIds : [new mongoose.Types.ObjectId()] } }
         : {}),
+      ...(isFilterOwn
+        ? { warehouse: { $in: selectedWarehouseId ? [selectedWarehouseId] : [new mongoose.Types.ObjectId()] } }
+        : {}),
     };
 
     const inventoryAgg = skuIds.length
@@ -818,6 +887,10 @@ const getVendorProductById = async (req, res) => {
     if (isFilterMain) {
       inventories = inventories.filter(inv => inv.warehouse?.isMain);
     }
+    if (isFilterOwn) {
+      const selectedWarehouseString = selectedWarehouseId ? String(selectedWarehouseId) : '';
+      inventories = inventories.filter((inv) => String(inv?.warehouse?._id || '') === selectedWarehouseString);
+    }
 
     const inventoriesBySku = new Map();
 
@@ -839,7 +912,11 @@ const getVendorProductById = async (req, res) => {
       totalQuantity: qtyBySku.get(skuIdStr) || 0,
       inventories: inventoriesBySku.get(skuIdStr) || [],
       };
-    }).filter(s => !isFilterMain || (s.inventories.length > 0));
+    }).filter((s) => {
+      if (isFilterMain && s.inventories.length === 0) return false;
+      if (isFilterOwn && s.inventories.length === 0) return false;
+      return true;
+    });
     const unique = (arr) => [...new Set(arr.filter((v) => String(v || '').trim() !== ''))];
     const availableColors = unique(skusWithQty.map((s) => s.metalColor));
     const availableSizes = unique(skusWithQty.map((s) => s.size));
@@ -897,8 +974,10 @@ const getVendorProductById = async (req, res) => {
 const getSkuById = async (req, res) => {
   try {
     const { skuId } = req.params;
-    const { filterMain } = req.query;
+    const { filterMain, filterOwn } = req.query;
     const isFilterMain = filterMain === 'true';
+    const isFilterOwn = filterOwn === 'true';
+    const selectedWarehouseId = isFilterOwn ? getSelectedWarehouseIdFromRequest(req) : null;
     if (!mongoose.isValidObjectId(skuId)) {
       return res.status(400).json({ success: false, message: 'Invalid sku id' });
     }
@@ -916,6 +995,10 @@ const getSkuById = async (req, res) => {
     // Filter inventories if isFilterMain=true
     if (isFilterMain) {
       inventories = inventories.filter(inv => inv.warehouse?.isMain);
+    }
+    if (isFilterOwn) {
+      const selectedWarehouseString = selectedWarehouseId ? String(selectedWarehouseId) : '';
+      inventories = inventories.filter((inv) => String(inv?.warehouse?._id || '') === selectedWarehouseString);
     }
     // const inventories = await SkuInventory.find({ skuId: sku._id })
     //   .populate('warehouse', 'name isMain')
