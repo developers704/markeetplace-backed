@@ -973,33 +973,76 @@ const getCustomerCourses = async (req, res) => {
 
 const isCourseActuallyCompleted = (course, userEnrollment) => {
   if (!userEnrollment) return false;
+  if (userEnrollment.status === 'Completed' || userEnrollment.status === 'Done') return true;
 
-  // Overall progress
-  if (userEnrollment.progress < 100) return false;
+  const chapters = Array.isArray(course?.chapters) ? course.chapters : [];
+  if (chapters.length === 0) {
+    return userEnrollment.progress >= 100;
+  }
 
-  // Last chapter
-  const lastChapter = course.chapters?.[course.chapters.length - 1];
-  if (!lastChapter) return false;
-
-  // Enrollment for last chapter
-  const chapterEnrollment = userEnrollment.chapterProgress?.find(
-    ch => ch.chapterId.toString() === lastChapter._id.toString()
+  const hasAnyVideo = chapters.some((chapter) =>
+    Array.isArray(chapter?.sections) &&
+    chapter.sections.some(
+      (section) =>
+        Array.isArray(section?.content) &&
+        section.content.some((item) => item?.contentType === 'video')
+    )
   );
-  if (!chapterEnrollment) return false;
+  const hasAnyQuiz = chapters.some((chapter) => {
+    if (chapter?.quiz) return true;
+    return Array.isArray(chapter?.sections) && chapter.sections.some((section) => !!section?.quiz);
+  });
 
-  // Check all sections completed
-  // const allSectionsCompleted = chapterEnrollment.sectionProgress?.every(
-  //   sec => sec.completed === true
-  // );
-  // if (!allSectionsCompleted) return false;
+  const chapterProgressList = Array.isArray(userEnrollment?.chapterProgress) ? userEnrollment.chapterProgress : [];
+  if (chapterProgressList.length === 0) return false;
 
-  // Check quiz attempted
-  const quizAttempted = lastChapter.quiz
-    ? chapterEnrollment.quizProgress?.attempts >= 1
-    : true;
-  if (!quizAttempted) return false;
+  const isSectionCompletedFromProgress = (section, chapterProgress) => {
+    const sectionProgress = chapterProgress?.sectionProgress?.find(
+      (sp) => sp?.sectionId && sp.sectionId.toString() === section?._id?.toString()
+    );
+    if (!sectionProgress) return false;
 
-  return true;
+    const contentItems = Array.isArray(section?.content) ? section.content : [];
+    if (contentItems.length === 0) {
+      // Empty sections require explicit section completion in progress data
+      return sectionProgress.completed === true;
+    }
+
+    return contentItems.every((item) => {
+      const cp = sectionProgress?.contentProgress?.find(
+        (p) => p?.contentId && p.contentId.toString() === item?._id?.toString()
+      );
+      if (!cp) return false;
+      if (item?.contentType === 'video') {
+        return (cp.watchedDuration || 0) >= (item.minimumWatchTime || 0);
+      }
+      return cp.completed === true;
+    });
+  };
+
+  for (const chapter of chapters) {
+    const chapterProgress = chapterProgressList.find(
+      (ch) => ch?.chapterId && ch.chapterId.toString() === chapter?._id?.toString()
+    );
+    if (!chapterProgress) return false;
+
+    const sections = Array.isArray(chapter?.sections) ? chapter.sections : [];
+    for (const section of sections) {
+      if (!isSectionCompletedFromProgress(section, chapterProgress)) return false;
+    }
+
+    if (chapter?.quiz) {
+      const attempts = chapterProgress?.quizProgress?.attempts || 0;
+      if (attempts < 1) return false;
+    }
+  }
+
+  // If course has no video and no quiz, allow completion by section/content progress without forcing 100 DB progress.
+  if (!hasAnyVideo && !hasAnyQuiz) {
+    return true;
+  }
+
+  return userEnrollment.progress >= 100;
 };
 
 
@@ -6300,10 +6343,19 @@ const calculateSingleCourseProgress = async (course, enrollment, userId, allQuiz
     }
   }
 
-  // Calculate overall progress (SAME LOGIC)
+  // Calculate overall progress (handle no-quiz/no-content edge cases)
   const contentProgress = totalContent > 0 ? (completedContent / totalContent) * 100 : 0;
   const quizProgress = totalQuizzes > 0 ? (passedQuizzes / totalQuizzes) * 100 : 100;
-  const overallProgress = Math.round((contentProgress + quizProgress) / 2);
+  const hasNoQuiz = totalQuizzes === 0;
+  const hasNoContent = totalContent === 0;
+  let overallProgress = 0;
+  if (hasNoQuiz && hasNoContent) {
+    overallProgress = 100;
+  } else if (hasNoQuiz) {
+    overallProgress = Math.round(contentProgress);
+  } else {
+    overallProgress = Math.round((contentProgress + quizProgress) / 2);
+  }
 
   // Calculate grade (SAME LOGIC)
   let gradePercentage = 0;
@@ -6336,11 +6388,17 @@ const calculateSingleCourseProgress = async (course, enrollment, userId, allQuiz
     } else if (hasAnyFailedQuiz && overallProgress < 100) {
       status = 'Failed';
       gradeLabel = 'F';
-    } else if (overallProgress === 100 && failedQuizzes === 0 && totalQuizzes > 0 && passedQuizzes === totalQuizzes) {
-      if (gradePercentage >= course.passingGrade) {
+    } else if (overallProgress === 100 && failedQuizzes === 0) {
+      if (totalQuizzes === 0) {
         status = 'Completed';
+      } else if (passedQuizzes === totalQuizzes) {
+        if (gradePercentage >= course.passingGrade) {
+          status = 'Completed';
+        } else {
+          status = 'Failed';
+        }
       } else {
-        status = 'Failed';
+        status = 'In Progress';
       }
     } else if (overallProgress > 0 || hasAnyQuizAttempt) {
       status = 'In Progress';
@@ -6684,10 +6742,9 @@ const calculateCourseProgress = async (course, enrollment, courseQuizResults, us
 
             if (content.contentType === 'video') {
               return contentProgress.watchedDuration >= content.minimumWatchTime;
-            } else if (content.contentType === 'text') {
-              return contentProgress.completed;
             }
-            return false;
+            // Non-video content (text, docs, etc.) uses completion flag.
+            return contentProgress.completed === true;
           }).length;
 
           if (sectionCompletedContent < sectionContentCount) {
@@ -6728,10 +6785,19 @@ const calculateCourseProgress = async (course, enrollment, courseQuizResults, us
       }
     }
 
-    // Calculate overall progress
+    // Calculate overall progress (handle no-quiz/no-content edge cases)
     const contentProgress = totalContent > 0 ? (completedContent / totalContent) * 100 : 0;
     const sectionProgress = totalSections > 0 ? (completedSections / totalSections) * 100 : 0;
-    const overallProgress = Math.round((contentProgress + sectionProgress) / 2);
+    const hasNoQuiz = totalQuizzes === 0;
+    const hasNoContent = totalContent === 0;
+    let overallProgress = 0;
+    if (hasNoQuiz && hasNoContent) {
+      overallProgress = 100;
+    } else if (hasNoQuiz) {
+      overallProgress = Math.round(contentProgress);
+    } else {
+      overallProgress = Math.round((contentProgress + sectionProgress) / 2);
+    }
 
     // Calculate grade
     const gradePercentage = totalPossibleQuizScore > 0 ?
@@ -6773,12 +6839,20 @@ const calculateCourseProgress = async (course, enrollment, courseQuizResults, us
         status = 'Failed';
         gradeLabel = 'F';
         certificateStatus = 'Not Eligible';
-      } else if (overallProgress === 100 && failedQuizzes === 0 && totalQuizzes > 0 && passedQuizzes === totalQuizzes) {
-        if (gradePercentage >= course.passingGrade) {
+      } else if (overallProgress === 100 && failedQuizzes === 0) {
+        if (totalQuizzes === 0) {
           status = 'Completed';
           certificateStatus = 'Eligible';
+        } else if (passedQuizzes === totalQuizzes) {
+          if (gradePercentage >= course.passingGrade) {
+            status = 'Completed';
+            certificateStatus = 'Eligible';
+          } else {
+            status = 'Failed';
+            certificateStatus = 'Not Eligible';
+          }
         } else {
-          status = 'Failed';
+          status = 'In Progress';
           certificateStatus = 'Not Eligible';
         }
       } else if (overallProgress > 0 || hasAnyQuizAttempt) {
