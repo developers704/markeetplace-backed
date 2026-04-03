@@ -28,6 +28,7 @@ const RESERVED_QUERY_KEYS = new Set([
   'categoryId', 'subcategoryId', 'subsubcategoryId', 'minPrice', 'maxPrice', 'sort', 'srule', 'minQuantity',
   'metalColor', 'metalType', 'size', 'stonetype', 'centerclarity',
 ]);
+const ATTRIBUTE_SKIP_KEYS = ['featureimageslink', 'galleryimagelink', 'descriptionname', 'stonetype', 'centerclarity'];
 
 function listingCacheKey(gen, params) {
   const normalized = {
@@ -68,6 +69,99 @@ const toLooseEqualsRegex = (value) => {
   if (!parts.length) return null;
   const pattern = parts.map(escapeRegex).join('[-\\s_]+');
   return new RegExp(`^${pattern}$`, 'i');
+};
+
+const sortStrings = (arr = []) =>
+  [...new Set(arr.map((v) => String(v || '').trim()).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+
+const getListingFilterFacets = async (listingMatch = {}) => {
+  const pipeline = [
+    { $match: listingMatch },
+    {
+      $facet: {
+        brands: [
+          { $match: { brand: { $nin: [null, ''] } } },
+          { $group: { _id: '$brand' } },
+          { $sort: { _id: 1 } },
+        ],
+        priceRange: [
+          {
+            $group: {
+              _id: null,
+              min: { $min: '$minPrice' },
+              max: { $max: '$maxPrice' },
+            },
+          },
+        ],
+        metalColors: [
+          { $match: { 'defaultSku.metalColor': { $nin: [null, ''] } } },
+          { $group: { _id: '$defaultSku.metalColor' } },
+          { $sort: { _id: 1 } },
+        ],
+        metalTypes: [
+          { $match: { 'defaultSku.metalType': { $nin: [null, ''] } } },
+          { $group: { _id: '$defaultSku.metalType' } },
+          { $sort: { _id: 1 } },
+        ],
+        sizes: [
+          { $match: { 'defaultSku.size': { $nin: [null, ''] } } },
+          { $group: { _id: '$defaultSku.size' } },
+          { $sort: { _id: 1 } },
+        ],
+        stoneTypes: [
+          { $match: { 'defaultSku.attributes.stonetype': { $nin: [null, ''] } } },
+          { $group: { _id: '$defaultSku.attributes.stonetype' } },
+          { $sort: { _id: 1 } },
+        ],
+        centerClarities: [
+          { $match: { 'defaultSku.attributes.centerclarity': { $nin: [null, ''] } } },
+          { $group: { _id: '$defaultSku.attributes.centerclarity' } },
+          { $sort: { _id: 1 } },
+        ],
+        attributes: [
+          { $project: { attrs: { $objectToArray: { $ifNull: ['$defaultSku.attributes', {}] } } } },
+          { $unwind: '$attrs' },
+          { $match: { 'attrs.k': { $nin: ATTRIBUTE_SKIP_KEYS } } },
+          {
+            $project: {
+              key: '$attrs.k',
+              value: {
+                $trim: {
+                  input: {
+                    $convert: { input: '$attrs.v', to: 'string', onError: '', onNull: '' },
+                  },
+                },
+              },
+            },
+          },
+          { $match: { value: { $ne: '' } } },
+          { $group: { _id: { key: '$key', value: '$value' } } },
+          { $group: { _id: '$_id.key', values: { $addToSet: '$_id.value' } } },
+          { $sort: { _id: 1 } },
+        ],
+      },
+    },
+  ];
+
+  const facet = (await ProductListing.aggregate(pipeline))?.[0] || {};
+  const price = facet?.priceRange?.[0] || {};
+  return {
+    brands: sortStrings((facet?.brands || []).map((x) => x?._id)),
+    metalColors: sortStrings((facet?.metalColors || []).map((x) => x?._id)),
+    metalTypes: sortStrings((facet?.metalTypes || []).map((x) => x?._id)),
+    sizes: sortStrings((facet?.sizes || []).map((x) => x?._id)),
+    stoneTypes: sortStrings((facet?.stoneTypes || []).map((x) => x?._id)),
+    centerClarities: sortStrings((facet?.centerClarities || []).map((x) => x?._id)),
+    availableAttributes: (facet?.attributes || []).map((a) => ({
+      _id: a?._id,
+      values: sortStrings(a?.values || []),
+    })),
+    priceRange: {
+      min: Number.isFinite(Number(price?.min)) ? Number(price.min) : 0,
+      max: Number.isFinite(Number(price?.max)) ? Number(price.max) : 0,
+    },
+  };
 };
 
 const extractWarehouseId = (raw) => {
@@ -567,6 +661,7 @@ const sortVp = {
 
   let productIds = [];
   let total = 0;
+  let listingMatchForFacets = null;
   const listingCount = await ProductListing.estimatedDocumentCount().catch(() => 0);
 
   if (listingCount > 0) {
@@ -649,6 +744,7 @@ const sortVp = {
         listingMatch[path] = val;
       }
     });
+    listingMatchForFacets = { ...listingMatch };
 
     const listingQuery = ProductListing.find(listingMatch)
       .sort(sortVp)
@@ -768,11 +864,16 @@ const sortVp = {
   products.sort((a, b) => productIds.indexOf(a._id) - productIds.indexOf(b._id));
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const hasNextPage = page < totalPages;
+  let filters;
+  if (page === 1 && listingMatchForFacets) {
+    filters = await getListingFilterFacets(listingMatchForFacets).catch(() => undefined);
+  }
 
   return {
     success: true,
     message: 'Vendor products retrieved successfully',
     data: products,
+    ...(filters ? { filters } : {}),
     paginatorInfo: {
       page,
       limit,
