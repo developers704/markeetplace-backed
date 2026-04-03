@@ -660,7 +660,7 @@ const sortVp = {
     total = await ProductListing.countDocuments(listingMatch);
   }
 
-  if (productIds.length === 0) {
+  if (productIds.length === 0 && sortRule !== 'ismain' && !isOwnInventorySort) {
     const match = {};
     if (brandKeys.length === 1) match.brand = new RegExp(`^${escapeRegex(brandKeys[0])}$`, 'i');
     else if (brandKeys.length > 1) match.brand = { $in: brandKeys.map((b) => new RegExp(`^${escapeRegex(b)}$`, 'i')) };
