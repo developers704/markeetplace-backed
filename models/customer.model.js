@@ -7,6 +7,13 @@ const customerSchema = new mongoose.Schema({
         maxlength: 150,
         trim: true
     },
+    userId: {
+        type: String,
+        unique: true,
+        sparse: true,
+        maxlength: 150,
+        trim: true
+    },
     email: {
         type: String,
         unique: true,

@@ -14,6 +14,8 @@ const fsSync = require('fs');
 const csv = require('csv-parser');
 const { deleteFile } = require('../config/fileOperations.js');
 
+const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // Create User Role
 const createUserRole = async (req, res) => {
     try {
@@ -107,6 +109,7 @@ const bulkDeleteUserRoles = async (req, res) => {
 function transformUserCSV(rows) {
   return rows.map((r) => ({
     username: r.username?.trim() || "",
+    userId: r.userId?.trim() || "",
     email: r.email?.trim().toLowerCase() || "",
     password: r.password?.trim() || "",
     phone_number: r.phone_number?.trim() || "",
@@ -190,22 +193,35 @@ const importBulkUsers = async (req, res) => {
 
       try {
         // Required
-        if (!row.username || !row.email || !row.password) {
+        if (!row.username || !row.userId || !row.email || !row.password) {
           errors.push({
             row: rowNumber,
-            error: "Username, Email & Password required",
+            error: "Username, User ID, Email & Password required",
+            data: row
+          });
+          errorCount++;
+          continue;
+        }
+        if (String(row.userId).trim().length < 2) {
+          errors.push({
+            row: rowNumber,
+            error: "User ID must be at least 2 characters",
             data: row
           });
           errorCount++;
           continue;
         }
 
-        // Skip duplicate email
-        const exists =
+        // Skip duplicate email / userId
+        const existsByEmail =
           await User.findOne({ email: row.email }) ||
           await Customer.findOne({ email: row.email });
+        const userIdRegex = new RegExp(`^${escapeRegex(String(row.userId).trim())}$`, 'i');
+        const existsByUserId =
+          await User.findOne({ userId: userIdRegex }) ||
+          await Customer.findOne({ userId: userIdRegex });
 
-        if (exists) {
+        if (existsByEmail || existsByUserId) {
           skippedCount++;
           continue;
         }
@@ -228,6 +244,7 @@ const importBulkUsers = async (req, res) => {
         // Create User
         const user = await User.create({
           username: row.username,
+          userId: row.userId,
           email: row.email,
           password: hashedPassword,
           phone_number: row.phone_number,
@@ -239,6 +256,7 @@ const importBulkUsers = async (req, res) => {
         // Create Customer
         const customer = await Customer.create({
           username: row.username,
+          userId: row.userId,
           email: row.email,
           password: hashedPassword,
           phone_number: row.phone_number,
@@ -289,9 +307,33 @@ const importBulkUsers = async (req, res) => {
   }
 };
 
+const downloadBulkUsersTemplate = async (req, res) => {
+  try {
+    const headers = ['username', 'userId', 'email', 'password', 'phone_number', 'role', 'department', 'store' ];
+    const sampleRow = ['John Doe', 'john.doe', 'john@example.com', 'Pass@123', '+923001112233', 'Sales Manager', 'Sales', 'Main Warehouse, Karachi Warehouse'];
+    const escapeCsvValue = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const csvContent = `${headers.map(escapeCsvValue).join(',')}\n${sampleRow.map(escapeCsvValue).join(',')}\n`;
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="bulk-users-template.csv"');
+    return res.status(200).send(csvContent);
+  } catch (error) {
+    return res.status(500).json({ message: 'Error generating bulk users template', error: error.message });
+  }
+};
+
 const createUser = async (req, res) => {
     try {
-        const { username, email, password, phone_number, userRoleId, warehouseId, department, initialBalance} = req.body;
+        const { username, userId, email, password, phone_number, userRoleId, warehouseId, department, initialBalance} = req.body;
+        const normalizedUsername = String(username || '').trim();
+        const normalizedUserId = String(userId || '').trim();
+
+        if (normalizedUsername.length < 2) {
+            return res.status(400).json({ message: 'Username must be at least 2 characters' });
+        }
+        if (normalizedUserId.length < 2) {
+            return res.status(400).json({ message: 'User ID must be at least 2 characters' });
+        }
 
         // Check if userRoleId exists
         const role = await UserRole.findById(userRoleId);
@@ -325,6 +367,18 @@ const createUser = async (req, res) => {
         if (existingUserByEmail || existingCustomerByEmail) {
             return res.status(400).json({ message: 'Email already exists' });
         }
+        const usernameRegex = new RegExp(`^${escapeRegex(normalizedUsername)}$`, 'i');
+        const existingUserByUsername = await User.findOne({ username: usernameRegex });
+        const existingCustomerByUsername = await Customer.findOne({ username: usernameRegex });
+        if (existingUserByUsername || existingCustomerByUsername) {
+            return res.status(400).json({ message: 'Username already exists' });
+        }
+        const userIdRegex = new RegExp(`^${escapeRegex(normalizedUserId)}$`, 'i');
+        const existingUserByUserId = await User.findOne({ userId: userIdRegex });
+        const existingCustomerByUserId = await Customer.findOne({ userId: userIdRegex });
+        if (existingUserByUserId || existingCustomerByUserId) {
+            return res.status(400).json({ message: 'User ID already exists' });
+        }
 
         // Hash the password
         const salt = await bcrypt.genSalt(10);
@@ -332,7 +386,8 @@ const createUser = async (req, res) => {
 
         // Create the user with the provided userRoleId
         const user = new User({
-            username,
+            username: normalizedUsername,
+            userId: normalizedUserId,
             email,
             password: hashedPassword,
             phone_number,
@@ -342,7 +397,8 @@ const createUser = async (req, res) => {
         });
 
         const customer = new Customer({
-            username,
+            username: normalizedUsername,
+            userId: normalizedUserId,
             email,
             password: hashedPassword,
             phone_number,
@@ -374,7 +430,7 @@ const createUser = async (req, res) => {
 const updateUser = async (req, res) => {
     try {
         const { id } = req.params;
-        const { username, email, password, phone_number, userRoleId, warehouseId, department, initialBalance, initialSuppliesBalance, initialInventoryBalance } = req.body;
+        const { username, userId, email, password, phone_number, userRoleId, warehouseId, department, initialBalance, initialSuppliesBalance, initialInventoryBalance } = req.body;
 
         // Prevent modification of is_superuser
         if ('is_superuser' in req.body) {
@@ -439,7 +495,44 @@ const updateUser = async (req, res) => {
         // }
 
         const updates = {};
-        if (username) updates.username = username;
+        if (username !== undefined) {
+            const normalizedUsername = String(username || '').trim();
+            if (normalizedUsername.length < 2) {
+                return res.status(400).json({ message: 'Username must be at least 2 characters' });
+            }
+            const usernameRegex = new RegExp(`^${escapeRegex(normalizedUsername)}$`, 'i');
+            const existingUserByUsername = await User.findOne({ username: usernameRegex, _id: { $ne: id } });
+            if (existingUserByUsername) {
+                return res.status(400).json({ message: 'Username already exists' });
+            }
+            const existingCustomerByUsername = await Customer.findOne({
+                username: usernameRegex,
+                _id: { $ne: customer?._id },
+            });
+            if (existingCustomerByUsername) {
+                return res.status(400).json({ message: 'Username already exists' });
+            }
+            updates.username = normalizedUsername;
+        }
+        if (userId !== undefined) {
+            const normalizedUserId = String(userId || '').trim();
+            if (normalizedUserId.length < 2) {
+                return res.status(400).json({ message: 'User ID must be at least 2 characters' });
+            }
+            const userIdRegex = new RegExp(`^${escapeRegex(normalizedUserId)}$`, 'i');
+            const existingUserByUserId = await User.findOne({ userId: userIdRegex, _id: { $ne: id } });
+            if (existingUserByUserId) {
+                return res.status(400).json({ message: 'User ID already exists' });
+            }
+            const existingCustomerByUserId = await Customer.findOne({
+                userId: userIdRegex,
+                _id: { $ne: customer?._id },
+            });
+            if (existingCustomerByUserId) {
+                return res.status(400).json({ message: 'User ID already exists' });
+            }
+            updates.userId = normalizedUserId;
+        }
         if (email) {
             const existingUserByEmail = await User.findOne({ email, _id: { $ne: id } });
             if (existingUserByEmail) {
@@ -806,4 +899,4 @@ const toggleTwoFactorAuth = async (req, res) => {
 
 
 
-module.exports = { createUserRole, getAllUserRoles, updateUserRole, deleteUserRole, createUser, importBulkUsers , updateUser, updateOwnPassword, getAllUsers, getOwnData, deleteUser, updateUserInfo, toggleTwoFactorAuth, getDeactivationRequests, getUserById, deleteUsers, getTwoFactorAuthSetting, bulkDeleteUserRoles };
+module.exports = { createUserRole, getAllUserRoles, updateUserRole, deleteUserRole, createUser, importBulkUsers, downloadBulkUsersTemplate, updateUser, updateOwnPassword, getAllUsers, getOwnData, deleteUser, updateUserInfo, toggleTwoFactorAuth, getDeactivationRequests, getUserById, deleteUsers, getTwoFactorAuthSetting, bulkDeleteUserRoles };

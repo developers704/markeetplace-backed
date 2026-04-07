@@ -111,17 +111,21 @@ const userLogin = async (req, res) => {
 
 const customerLogin = async (req, res) => {
   try {
-    const { email, password, warehouseId } = req.body;
+    const { userId, password, warehouseId } = req.body;
+     if (!userId || String(userId).trim().length < 2) {
+      return res.status(400).json({ message: "User ID is required for login" });
+    }
      if (!warehouseId) {
       return res.status(400).json({ message: "Warehouse ID is required for login" });
     }
-       const customer = await Customer.findOne({ email })
+      const userIdRegex = new RegExp(`^${String(userId).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+       const customer = await Customer.findOne({ userId: userIdRegex })
         .populate({
         path: "role",
         select: "role_name permissions", // Ensure permissions are included
       }).populate("warehouse");
       if (!customer) {
-      return res.status(400).json({ message: "Invalid email or password" });
+      return res.status(400).json({ message: "Invalid user ID or password" });
     }
     const roleName = customer.role?.role_name || '';
     const isSuperAdmin = roleName.toLowerCase().replace(/\s+/g, '') === 'superadmin';
@@ -195,7 +199,7 @@ const customerLogin = async (req, res) => {
 
     const isMatch = await bcrypt.compare(password, customer.password);
     if (!isMatch) {
-      return res.status(400).json({ message: "Invalid email or password" });
+      return res.status(400).json({ message: "Invalid user ID or password" });
     }
 
     const settings = await Settings.findOne();
@@ -297,10 +301,16 @@ const customerLogin = async (req, res) => {
 
 const resendCustomerOTP = async (req, res) => {
   try {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ message: "Email is required to resend OTP" });
+    const { email, userId } = req.body;
+    if (!email && !userId) return res.status(400).json({ message: "Email or user ID is required to resend OTP" });
 
-    const customer = await Customer.findOne({ email });
+    let customer = null;
+    if (email) {
+      customer = await Customer.findOne({ email });
+    } else if (userId) {
+      const userIdRegex = new RegExp(`^${String(userId).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+      customer = await Customer.findOne({ userId: userIdRegex });
+    }
     if (!customer) return res.status(404).json({ message: "Customer not found" });
 
     const otpCode = generateSixDigitOTP();

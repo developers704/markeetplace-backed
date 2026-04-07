@@ -8,6 +8,13 @@ const userSchema = new mongoose.Schema({
         maxlength: 150,
         trim: true // Trim whitespace from the input
     },
+    userId: {
+        type: String,
+        unique: true,
+        sparse: true,
+        maxlength: 150,
+        trim: true
+    },
     email: {
         type: String,
         required: true,

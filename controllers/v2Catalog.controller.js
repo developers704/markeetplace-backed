@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const { stringify } = require('csv-stringify/sync');
 
 const VendorProduct = require('../models/vendorProduct.model');
 const Sku = require('../models/sku.model');
@@ -613,6 +614,7 @@ async function buildListingPayload(query, context = {}) {
   const maxPrice = parseFloat(query.maxPrice) || null;
   const sortRule = String(query?.sort || query?.srule || 'featured').toLowerCase();
   const isOwnInventorySort = sortRule === 'own-inventory';
+  const isMainInventorySort = sortRule === 'ismain';
   const selectedWarehouseId = isOwnInventorySort ? extractWarehouseId(context?.selectedWarehouseId) : null;
   const minQuantity = typeof query.minQuantity !== 'undefined' && query.minQuantity !== ''
     ? Math.max(0, parseInt(query.minQuantity, 10) || 0)
@@ -832,17 +834,22 @@ const sortVp = {
     const skuIds = skus.map((s) => s._id);
     const skuCountByProduct = new Map();
     for (const id of productIds) skuCountByProduct.set(id.toString(), 0);
-    for (const s of skus) {
-      const pid = s.productId.toString();
-      skuCountByProduct.set(pid, (skuCountByProduct.get(pid) || 0) + 1);
+
+    let scopedWarehouseIds = null;
+    if (isOwnInventorySort && selectedWarehouseId) {
+      scopedWarehouseIds = [selectedWarehouseId];
+    } else if (isMainInventorySort) {
+      const mainWarehouses = await Warehouse.find({ isMain: true }).select('_id').lean();
+      scopedWarehouseIds = mainWarehouses.map((w) => w._id).filter(Boolean);
     }
+
     let totalInventoryByProduct = new Map();
     if (skuIds.length > 0) {
       const invAgg = await SkuInventory.aggregate([
         {
           $match: {
             skuId: { $in: skuIds },
-            ...(isOwnInventorySort && selectedWarehouseId ? { warehouse: selectedWarehouseId } : {}),
+            ...(scopedWarehouseIds ? { warehouse: { $in: scopedWarehouseIds } } : {}),
           },
         },
         { $group: { _id: '$skuId', totalQty: { $sum: '$quantity' } } },
@@ -851,7 +858,19 @@ const sortVp = {
       for (const s of skus) {
         const pid = s.productId.toString();
         const qty = qtyBySku.get(s._id.toString()) || 0;
+        if (scopedWarehouseIds) {
+          if (qty > 0) {
+            skuCountByProduct.set(pid, (skuCountByProduct.get(pid) || 0) + 1);
+          }
+        } else {
+          skuCountByProduct.set(pid, (skuCountByProduct.get(pid) || 0) + 1);
+        }
         totalInventoryByProduct.set(pid, (totalInventoryByProduct.get(pid) || 0) + qty);
+      }
+    } else {
+      for (const s of skus) {
+        const pid = s.productId.toString();
+        skuCountByProduct.set(pid, (skuCountByProduct.get(pid) || 0) + 1);
       }
     }
     for (const p of products) {
@@ -1551,6 +1570,249 @@ const getV2CategoriesWithSubcategories = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/v2/products/export
+ * Export vendor products as CSV (1 row per SKU) with dynamic attribute headers
+ */
+const exportVendorProductsCsv = async (req, res) => {
+  try {
+    const extractObjectIdString = (value) => {
+      if (!value) return null;
+      if (typeof value === 'object' && value._id) return String(value._id);
+      const raw = typeof value === 'object' && value.toString ? value.toString() : String(value);
+      return mongoose.Types.ObjectId.isValid(raw) ? raw : null;
+    };
+
+    const resolveRefName = (value, idToNameMap) => {
+      if (!value) return '';
+      if (typeof value === 'object' && value.name) return String(value.name || '').trim();
+      const asId = extractObjectIdString(value);
+      if (asId && idToNameMap.has(asId)) return idToNameMap.get(asId) || '';
+      if (typeof value === 'string') return value.trim();
+      return '';
+    };
+
+    const search = String(req.query.search || '').trim();
+    const brandRaw = req.query.brand;
+    const categoryRaw = req.query.category;
+    const subcategoryRaw = req.query.subcategory;
+    const subsubcategoryRaw = req.query.subsubcategory;
+
+    const match = {};
+    const brandValues = parseMulti(brandRaw);
+    if (brandValues.length === 1) match.brand = toLooseEqualsRegex(brandValues[0]);
+    else if (brandValues.length > 1) match.brand = { $in: brandValues.map(toLooseEqualsRegex).filter(Boolean) };
+
+    if (subcategoryRaw && mongoose.Types.ObjectId.isValid(subcategoryRaw)) {
+      match.subcategory = new mongoose.Types.ObjectId(subcategoryRaw);
+    }
+    if (subsubcategoryRaw && mongoose.Types.ObjectId.isValid(subsubcategoryRaw)) {
+      match.subsubcategory = new mongoose.Types.ObjectId(subsubcategoryRaw);
+    }
+
+    if (categoryRaw) {
+      if (mongoose.Types.ObjectId.isValid(categoryRaw)) {
+        match.category = { $in: [new mongoose.Types.ObjectId(categoryRaw), categoryRaw] };
+      } else {
+        match.category = toLooseEqualsRegex(String(categoryRaw));
+      }
+    }
+
+    if (search) {
+      const searchRegex = new RegExp(escapeRegex(search), 'i');
+      const matchingSkus = await Sku.find({ sku: searchRegex }).select('productId').lean();
+      const productIdsFromSku = matchingSkus.map((s) => s.productId).filter(Boolean);
+      match.$or = [
+        { vendorModel: searchRegex },
+        { title: searchRegex },
+        { brand: searchRegex },
+        ...(productIdsFromSku.length > 0 ? [{ _id: { $in: productIdsFromSku } }] : []),
+      ];
+    }
+
+    const products = await VendorProduct.find(match)
+      .populate('category', '_id name')
+      .populate('subcategory', '_id name')
+      .populate('subsubcategory', '_id name')
+      .lean();
+
+    if (!products.length) {
+      const emptyCsv = stringify([[
+        'Vendor',
+        'Vendor Model',
+        'SKU',
+        'Product Title',
+        'Brand',
+        'Category',
+        'Subcategory',
+        'Sub-Subcategory',
+        'Total Quantity',
+        'Warehouses',
+        'Feature Image Links',
+        'Gallery Image Links',
+      ]], { quoted: true });
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="vendor-products-export.csv"');
+      return res.status(200).send(emptyCsv);
+    }
+
+    const productIds = products.map((p) => p._id);
+
+    // Resolve names when refs are stored as raw ObjectId/string (common for mixed category field).
+    const categoryIds = Array.from(new Set(products.map((p) => extractObjectIdString(p.category)).filter(Boolean)));
+    const subcategoryIds = Array.from(new Set(products.map((p) => extractObjectIdString(p.subcategory)).filter(Boolean)));
+    const subsubcategoryIds = Array.from(new Set(products.map((p) => extractObjectIdString(p.subsubcategory)).filter(Boolean)));
+
+    const [categoryDocs, subcategoryDocs, subsubcategoryDocs] = await Promise.all([
+      categoryIds.length ? Category.find({ _id: { $in: categoryIds } }).select('_id name').lean() : [],
+      subcategoryIds.length ? SubCategory.find({ _id: { $in: subcategoryIds } }).select('_id name').lean() : [],
+      subsubcategoryIds.length ? SubSubCategory.find({ _id: { $in: subsubcategoryIds } }).select('_id name').lean() : [],
+    ]);
+
+    const categoryById = new Map(categoryDocs.map((c) => [String(c._id), c.name || '']));
+    const subcategoryById = new Map(subcategoryDocs.map((c) => [String(c._id), c.name || '']));
+    const subsubcategoryById = new Map(subsubcategoryDocs.map((c) => [String(c._id), c.name || '']));
+
+    const skus = await Sku.find({ productId: { $in: productIds }, isActive: true }).lean();
+    const skuIds = skus.map((s) => s._id);
+
+    const inventories = skuIds.length
+      ? await SkuInventory.find({ skuId: { $in: skuIds } })
+          .populate('warehouse', '_id name')
+          .lean()
+      : [];
+
+    const invBySku = new Map();
+    inventories.forEach((inv) => {
+      const key = String(inv.skuId);
+      if (!invBySku.has(key)) invBySku.set(key, []);
+      invBySku.get(key).push(inv);
+    });
+    const allWarehouseNames = Array.from(
+      new Set(
+        inventories
+          .map((inv) => inv?.warehouse?.name || '')
+          .map((n) => String(n).trim())
+          .filter(Boolean)
+      )
+    ).sort((a, b) => a.localeCompare(b));
+    const warehouseQtyHeaders = allWarehouseNames.map((name) => `Warehouse Qty - ${name}`);
+
+    const productById = new Map(products.map((p) => [String(p._id), p]));
+    const dynamicAttrKeys = new Set();
+    skus.forEach((sku) => {
+      const attrs = sku?.attributes && typeof sku.attributes === 'object'
+        ? (sku.attributes instanceof Map ? Object.fromEntries(sku.attributes) : sku.attributes)
+        : {};
+      Object.keys(attrs || {}).forEach((k) => dynamicAttrKeys.add(k));
+    });
+
+    const dynamicHeaders = Array.from(dynamicAttrKeys).sort((a, b) => a.localeCompare(b));
+    const fixedHeaders = [
+      // 'Vendor',
+      'Vendor Model',
+      'SKU',
+      'Tag Price',
+      // 'Product Title',
+      'Brand',
+      'Category',
+      'Subcategory',
+      'Sub-Subcategory',
+      'Metal Color',
+      'Metal Type',
+      'Size',
+      'Warehouses',
+      'Total Quantity',
+      'Feature Image Links',
+      'Gallery Image Links',
+    ];
+    const headers = [...fixedHeaders, ...warehouseQtyHeaders, ...dynamicHeaders];
+
+    const rows = skus.map((sku) => {
+      const product = productById.get(String(sku.productId));
+      const attrsRaw = sku?.attributes && typeof sku.attributes === 'object'
+        ? (sku.attributes instanceof Map ? Object.fromEntries(sku.attributes) : sku.attributes)
+        : {};
+      const attrs = attrsRaw || {};
+      const skuInv = invBySku.get(String(sku._id)) || [];
+      const totalQuantity = skuInv.reduce((sum, i) => sum + Number(i?.quantity || 0), 0);
+      const skuWarehouseNames = Array.from(
+        new Set(
+          skuInv
+            .map((i) => i?.warehouse?.name || '')
+            .map((n) => String(n).trim())
+            .filter(Boolean)
+        )
+      );
+      const warehouseQtyByName = new Map();
+      skuInv.forEach((inv) => {
+        const name = String(inv?.warehouse?.name || '').trim();
+        if (!name) return;
+        const qty = Number(inv?.quantity || 0);
+        warehouseQtyByName.set(name, (warehouseQtyByName.get(name) || 0) + qty);
+      });
+
+      const featureImages = Array.from(
+        new Set(
+          [
+            attrs?.featureimageslink,
+            ...(Array.isArray(sku.images) ? sku.images : []),
+          ]
+            .map((v) => String(v || '').trim())
+            .filter(Boolean)
+        )
+      );
+      const galleryImages = Array.from(
+        new Set(
+          [
+            attrs?.galleryimagelink,
+            ...(Array.isArray(sku.gallery) ? sku.gallery : []),
+          ]
+            .map((v) => String(v || '').trim())
+            .filter(Boolean)
+        )
+      );
+
+      const row = {
+        // Vendor: attrs?.vendor || attrs?.branddesign || product?.brand || '',
+        'Vendor Model': product?.vendorModel || '',
+        SKU: sku?.sku || '',
+        'Tag Price': sku?.price || '',
+
+        // 'Product Title': product?.title || '',
+        Brand: product?.brand || '',
+        Category: resolveRefName(product?.category, categoryById),
+        Subcategory: resolveRefName(product?.subcategory, subcategoryById),
+        'Sub-Subcategory': resolveRefName(product?.subsubcategory, subsubcategoryById),
+        'Metal Color': sku?.metalColor || '',
+        'Metal Type': sku?.metalType || '',
+        Size: sku?.size || '',
+        Warehouses: skuWarehouseNames.join(', '),
+        'Total Quantity': totalQuantity,
+        'Feature Image Links': featureImages.join(', '),
+        'Gallery Image Links': galleryImages.join(', '),
+      };
+      warehouseQtyHeaders.forEach((header) => {
+        const warehouseName = header.replace('Warehouse Qty - ', '');
+        const qty = Number(warehouseQtyByName.get(warehouseName) || 0);
+        row[header] = qty > 0 ? qty : '';
+      });
+
+      dynamicHeaders.forEach((k) => {
+        row[k] = attrs?.[k] != null ? String(attrs[k]) : '';
+      });
+      return row;
+    });
+
+    const csv = stringify([headers, ...rows.map((r) => headers.map((h) => r[h] ?? ''))], { quoted: true });
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="vendor-products-export.csv"');
+    return res.status(200).send(csv);
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to export vendor products', error: error.message });
+  }
+};
+
 module.exports = {
   listVendorProductsAdmin,
   listVendorProducts,
@@ -1562,11 +1824,11 @@ module.exports = {
   deleteAllVendorData,
   downloadVendorCatalogTemplate,
   downloadSkuInventoryTemplate,
+  exportVendorProductsCsv,
   // Category management
   getV2Categories,
   getV2SubcategoriesByCategory,
   getV2SubSubcategoriesBySubCategory,
   getV2CategoriesWithSubcategories,
 };
-
 

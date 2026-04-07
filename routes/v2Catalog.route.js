@@ -17,6 +17,7 @@ const {
   deleteAllVendorData,
   downloadVendorCatalogTemplate,
   downloadSkuInventoryTemplate,
+  exportVendorProductsCsv,
   // Category management
   getV2Categories,
   getV2SubcategoriesByCategory,
@@ -35,6 +36,7 @@ const {
 
 // Public/read routes
 router.get('/products/admin', listVendorProductsAdmin);
+router.get('/products/export', authMiddleware, exportVendorProductsCsv);
 router.get('/products', listVendorProducts);
 router.get('/products/:id', getVendorProductById);
 router.get('/skus/:skuId', getSkuById);
