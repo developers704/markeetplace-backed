@@ -6,7 +6,11 @@ const authMiddleware = require('../middlewares/authMiddleware');
 const { uploadVendorCatalogCSV } = require('../middlewares/bulkVendorCatalogUploadMiddleware');
 const { uploadSkuInventoryCSV } = require('../middlewares/bulkSkuInventoryUploadMiddleware');
 
-const { importVendorCatalog, importSkuInventory } = require('../controllers/v2CatalogImport.controller');
+const {
+  importVendorCatalog,
+  getVendorImportJobStatus,
+  importSkuInventory,
+} = require('../controllers/v2CatalogImport.controller');
 const {
   listVendorProducts,
   getVendorProductById,
@@ -53,6 +57,8 @@ router.get('/templates/sku-inventory', downloadSkuInventoryTemplate);
 
 // Admin/import routes (protected)
 router.post('/bulk/vendor-catalog/import', authMiddleware, uploadVendorCatalogCSV, importVendorCatalog);
+router.get('/bulk/vendor-catalog/import/jobs/:jobId', authMiddleware, getVendorImportJobStatus);
+router.get('/bulk/sku-inventory/import/jobs/:jobId', authMiddleware, getVendorImportJobStatus);
 router.post('/bulk/sku-inventory/import', authMiddleware, uploadSkuInventoryCSV, importSkuInventory);
 
 // Admin/CRUD routes (protected)

@@ -1,6 +1,8 @@
 // server.js
+const http = require('http');
 const dotenv = require('dotenv');
 const express = require('express');
+const { getUploadsStaticDir } = require('./config/uploadPaths');
 const cors = require('cors');
 const cron = require('node-cron');
 const BlacklistedToken = require('./models/blacklistedToken.model.js');
@@ -18,13 +20,40 @@ dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
+const server = http.createServer(app);
 
 // env config
 dotenv.config();
 
-// Connect to database
-connectDB();
+try {
+  const { initImportProgressSocket } = require('./socket/importProgress.socket');
+  initImportProgressSocket(server);
+} catch (e) {
+  console.error('Socket.IO init failed:', e.message);
+}
+
+connectDB()
+  .then(() => {
+    try {
+      const { startVendorCatalogImportWorker } = require('./workers/vendorCatalogImport.worker');
+      startVendorCatalogImportWorker();
+    } catch (e) {
+      console.error('Vendor CSV import worker not started:', e.message);
+    }
+    try {
+      const { startSkuInventoryImportWorker } = require('./workers/skuInventoryImport.worker');
+      startSkuInventoryImportWorker();
+    } catch (e) {
+      console.error('SKU inventory import worker not started:', e.message);
+    }
+    try {
+      const { startProductListingSyncWorker } = require('./workers/productListingSync.worker');
+      startProductListingSyncWorker();
+    } catch (e) {
+      console.error('Product listing sync worker not started:', e.message);
+    }
+  })
+  .catch((err) => console.error('MongoDB connection error:', err));
 
 // Middleware
 app.use(express.json({limit: "50mb"})); // Parse JSON bodies
@@ -36,7 +65,7 @@ app.use(express.json({limit: "50mb"})); // Parse JSON bodies
 // };
 
 app.use(cors()); // Enable CORS with permissive options
-app.use('/uploads', express.static('uploads')); // Serve static files from the uploads folder
+app.use('/uploads', express.static(getUploadsStaticDir()));
 
 
 // Generate a random session secret
@@ -160,7 +189,7 @@ app.get('/', (req, res) => {
 });
 
 // Start the server
-app.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', () => {
     console.log(`Server is running on http://0.0.0.0:${PORT}`);
 });
 

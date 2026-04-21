@@ -6,30 +6,35 @@
 const mongoose = require('mongoose');
 const VendorProduct = require('../models/vendorProduct.model');
 const Sku = require('../models/sku.model');
-const SkuInventory = require('../models/skuInventory.model');
 const ProductListing = require('../models/productListing.model');
+const { getProductInventoryFromRedis, ensureProductInventoryRedis } = require('./inventoryRedis.service');
 const { Category, SubCategory, SubSubCategory } = require('../models/productCategory.model');
-const Warehouse = require('../models/warehouse.model');
 
-const pendingSyncs = new Map();
+/** Debounced enqueue to BullMQ worker (event-driven; not on request thread). */
+const pendingListingProductIds = new Set();
+let listingFlushTimer = null;
+const LISTING_DEBOUNCE_MS = Number(process.env.PRODUCT_LISTING_SYNC_DEBOUNCE_MS) || 600;
+
+function flushPendingListingSyncs() {
+  listingFlushTimer = null;
+  if (pendingListingProductIds.size === 0) return;
+  const ids = [...pendingListingProductIds];
+  pendingListingProductIds.clear();
+  try {
+    const { enqueueProductListingSync } = require('../queues/productListingSync.queue');
+    enqueueProductListingSync(ids).catch((err) =>
+      console.error('[ProductListing] enqueue error', err.message)
+    );
+  } catch (err) {
+    console.error('[ProductListing] enqueue error', err.message);
+  }
+}
 
 function scheduleSync(productId) {
   if (!productId) return;
-
-  if (pendingSyncs.has(productId)) return;
-
-  pendingSyncs.set(productId, true);
-
-  setTimeout(async () => {
-    try {
-      await syncProductListing(productId, false); 
-      await incrListingCacheVersion();
-    } catch (err) {
-      console.error('[ProductListing] debounced sync error', err.message);
-    } finally {
-      pendingSyncs.delete(productId);
-    }
-  }, 300); // 300ms window
+  pendingListingProductIds.add(String(productId));
+  if (listingFlushTimer) clearTimeout(listingFlushTimer);
+  listingFlushTimer = setTimeout(flushPendingListingSyncs, LISTING_DEBOUNCE_MS);
 }
 
 
@@ -85,39 +90,22 @@ async function syncProductListing(productId, bumpCacheVersion = true) {
   .join(' ');
 
   const skuIds = toObjectIdArray(skus.map((s) => s._id));
-  const mainWarehouses = await Warehouse.find({ isMain: true }).select('_id').lean();
-  const mainWarehousesIds = toObjectIdArray(mainWarehouses.map((w) => w?._id));
 
-  const invAgg = await SkuInventory.aggregate([
-    { $match: { skuId: { $in: skuIds } } },
-    { $group: { _id: null, totalQty: { $sum: '$quantity' } } },
-  ]);
-  const totalInventory = invAgg[0]?.totalQty ?? 0;
-
-  
+  let totalInventory = 0;
   let mainWarehouseInventory = 0;
-  if (mainWarehousesIds.length > 0) {
-    const mainInvAgg = await SkuInventory.aggregate([
-      {
-        $match: {
-          skuId: { $in: skuIds },
-          warehouse: { $in: mainWarehousesIds },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalQty: { $sum: '$quantity' },
-        },
-      },
-    ]);
-    mainWarehouseInventory = mainInvAgg[0]?.totalQty ?? 0;
+  const invRedis = await getProductInventoryFromRedis(productId);
+  if (invRedis) {
+    totalInventory = invRedis.totalInventory;
+    mainWarehouseInventory = invRedis.mainWarehouseInventory;
+  } else {
+    const rebuilt = await ensureProductInventoryRedis(productId);
+    totalInventory = rebuilt.totalInventory;
+    mainWarehouseInventory = rebuilt.mainWarehouseInventory;
   }
 
   if (isDebugEnabled) {
     console.log('[ProductListing][debug] matching skuIds:', skuIds.map(String));
-    console.log('[ProductListing][debug] main warehouse ids:', mainWarehousesIds.map(String));
-    console.log('[ProductListing][debug] computed mainWarehouseInventory:', mainWarehouseInventory);
+    console.log('[ProductListing][debug] inventory from Redis:', { totalInventory, mainWarehouseInventory });
   }
 
   const prices = skus.map((s) => s.price).filter((n) => typeof n === 'number');
@@ -163,7 +151,7 @@ async function syncProductListing(productId, bumpCacheVersion = true) {
   .filter(Boolean)
   .join(' ');
 
-
+  const existingListing = await ProductListing.findOne({ productId }).lean();
   const listing = {
     productId: vp._id,
     vendorModel: vp.vendorModel || '',
@@ -206,6 +194,7 @@ async function syncProductListing(productId, bumpCacheVersion = true) {
     metalTypeKeys,
     sizeKeys,
     searchText,
+    createdAt: existingListing?.createdAt || vp.createdAt || new Date(),
     updatedAt: new Date(),
   };
 
@@ -223,6 +212,18 @@ async function syncProductListings(productIds) {
     await syncProductListing(id, false);
   }
   await incrListingCacheVersion();
+}
+
+/**
+ * Parallel ProductListing sync (one Redis INCR at end). Used by bulk import worker.
+ */
+async function syncProductListingsInChunks(productIds, concurrency = 80) {
+  const ids = (productIds || []).filter(Boolean);
+  for (let i = 0; i < ids.length; i += concurrency) {
+    const slice = ids.slice(i, i + concurrency);
+    await Promise.all(slice.map((id) => syncProductListing(id, false)));
+  }
+  if (ids.length > 0) await incrListingCacheVersion();
 }
 
 async function rebuildAllProductListings(batchSize = 500) {
@@ -243,6 +244,7 @@ async function rebuildAllProductListings(batchSize = 500) {
 module.exports = {
   syncProductListing,
   syncProductListings,
+  syncProductListingsInChunks,
   rebuildAllProductListings,
   scheduleSync,
 };

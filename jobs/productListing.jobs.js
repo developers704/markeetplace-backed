@@ -2,16 +2,20 @@
  * Backfill ProductListing read model. Run once after deploy or when ProductListing is empty.
  * From project root: node jobs/productListing.jobs.js
  */
+
+const path = require('path');
 const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const { rebuildAllProductListings } = require('../services/productListingSync.service');
 const dns = require("node:dns/promises");
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
-dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 async function run() {
-  const uri = "mongodb+srv://admin:admin@staging.jjfts4o.mongodb.net/2pl";
+  // const uri = "mongodb+srv://admin:admin@staging.jjfts4o.mongodb.net/2pl";
+  const uri = process.env.MONGO_URI;
+  console.log("mongo uri", uri)
   if (!uri) {
     console.error('MONGO_URI not set in .env');
     process.exit(1);

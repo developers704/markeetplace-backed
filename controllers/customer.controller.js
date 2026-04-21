@@ -100,21 +100,21 @@ const registerCustomer = async (req, res) => {
 };
 
 
-const verifyEmail = async (req, res) => {
-    try {
-        const { token } = req.params;
-        const customer = await Customer.findOne({ verificationToken: token });
-        if (!customer) {
-            return res.status(400).json({ message: 'Invalid verification token' });
+    const verifyEmail = async (req, res) => {
+        try {
+            const { token } = req.params;
+            const customer = await Customer.findOne({ verificationToken: token });
+            if (!customer) {
+                return res.status(400).json({ message: 'Invalid verification token' });
+            }
+            customer.verified = true;
+            customer.verificationToken = undefined;
+            await customer.save();
+            res.status(200).json({ message: 'Email verified successfully' });
+        } catch (error) {
+            res.status(500).json({ message: error.message });
         }
-        customer.verified = true;
-        customer.verificationToken = undefined;
-        await customer.save();
-        res.status(200).json({ message: 'Email verified successfully' });
-    } catch (error) {
-        res.status(500).json({ message: error.message });
-    }
-};
+    };
 
 
 // Get customer profile
@@ -342,10 +342,35 @@ const updateCustomerProfile = async (req, res) => {
 };
 
 
+const MIN_NEW_PASSWORD_LENGTH = 8;
+const MAX_NEW_PASSWORD_LENGTH = 128;
+
 const changeCustomerPassword = async (req, res) => {
     try {
-        const customerId = req.user.id;
-        const { currentPassword, newPassword } = req.body;
+        const customerId = req.user?._id ?? req.user?.id;
+        if (!customerId) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const { currentPassword, newPassword } = req.body || {};
+
+        if (typeof currentPassword !== 'string' || !currentPassword.trim()) {
+            return res.status(400).json({ message: 'Current password is required' });
+        }
+        if (typeof newPassword !== 'string' || !newPassword.trim()) {
+            return res.status(400).json({ message: 'New password is required' });
+        }
+        if (newPassword.length < MIN_NEW_PASSWORD_LENGTH) {
+            return res.status(400).json({
+                message: `New password must be at least ${MIN_NEW_PASSWORD_LENGTH} characters`,
+            });
+        }
+        if (newPassword.length > MAX_NEW_PASSWORD_LENGTH) {
+            return res.status(400).json({ message: 'New password is too long' });
+        }
+        if (currentPassword === newPassword) {
+            return res.status(400).json({ message: 'New password must be different from your current password' });
+        }
 
         const customer = await Customer.findById(customerId);
         if (!customer) {
@@ -359,12 +384,12 @@ const changeCustomerPassword = async (req, res) => {
 
         const salt = await bcrypt.genSalt(10);
         customer.password = await bcrypt.hash(newPassword, salt);
-
         await customer.save();
 
-        res.status(200).json({ message: 'Password changed successfully' });
+        return res.status(200).json({ message: 'Password changed successfully' });
     } catch (error) {
-        res.status(400).json({ message: error.message });
+        console.error('changeCustomerPassword:', error);
+        return res.status(500).json({ message: error.message || 'Failed to change password' });
     }
 };
 

@@ -515,7 +515,7 @@ const getCSVTemplate = (req, res) => {
             '100:80:90',
             'Sample special product description',
             '/uploads/special-products/sample-image.jpg',
-            '/uploads/special-products/gallery1.jpg,/uploads/special-products/gallery2.jpg',
+            'uploads/special-products/gallery1.jpg,/uploads/special-products/gallery2.jpg',
             'Amazon|https://amazon.com/product|99.99;eBay|https://ebay.com/product|89.99',
             '50',
             'active',

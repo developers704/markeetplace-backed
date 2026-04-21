@@ -1,11 +1,12 @@
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { PROJECT_ROOT } = require('../config/uploadPaths');
 
 // Configure storage for Vendor Catalog CSV files
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const uploadPath = 'uploads/csv/vendor-catalog';
+    const uploadPath = path.join(PROJECT_ROOT, 'uploads', 'csv', 'vendor-catalog');
     if (!fs.existsSync(uploadPath)) {
       fs.mkdirSync(uploadPath, { recursive: true });
     }

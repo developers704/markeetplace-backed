@@ -1328,9 +1328,9 @@ const deleteAllVendorData = async (req, res) => {
  */
 const downloadVendorCatalogTemplate = async (req, res) => {
   try {
-    const csvContent = `Sku,Vendor-Model,Description-Name,Tag Price,99-Price,Category,Subcategory-Department,Style,Brand-Design,Metal-Color,Metal-Type,Size,Gender,Extent-Width,AvgWeight,Stone Type,Center-Stone,Center-Carat,Center-Shape,Center-Color,Center-Clarity,Side-Stone,Side-Carat,Side-Shape,Side-Color,Side-Clarity,Dial,Year,Model-No,Featureimages_Link,Galleryimage_Link
-    121431Y,SVR1074N10W,Diamond Ring,5499,4999,Diamond Jewelry,Rings,Classic,OTHERS,Yellow,14KT,7,Female,2.1,3.5,Diamond,Yes,1.2,Round,G,VS1,Diamond,0.5,Round,G,VS2,,2024,SVR1074N10W,https://example.com/feature1.jpg,https://example.com/gallery1.jpg
-    160009WR,RB-7883,Gold Ring,4999,4599,Diamond Jewelry,Rings,Modern,OTHERS,White,14KT,8,Male,2.3,4.0,Diamond,Yes,1.0,Princess,F,VS2,Diamond,0.4,Princess,F,VS1,,2023,RB-7883,https://example.com/feature2.jpg,https://example.com/gallery2.jpg`;
+    const csvContent = `Sku,Vendor-Model,Description-Name,Tag Price,99-Price,Category,Subcategory-Department,Style,Brand-Design,Metal-Color,Metal-Type,Size,Gender,Extent-Width,AvgWeight,Stone Type,Center-Stone,Center-Carat,Center-Shape,Center-Color,Center-Clarity,Side-Stone,Side-Carat,Side-Shape,Side-Color,Side-Clarity,Dial,Year,Model-No,Featureimages_Link,Galleryimage_Link,Vendor
+    121431Y,SVR1074N10W,Diamond Ring,5499,4999,Diamond Jewelry,Rings,Classic,OTHERS,Yellow,14KT,7,Female,2.1,3.5,Diamond,Yes,1.2,Round,G,VS1,Diamond,0.5,Round,G,VS2,,2024,SVR1074N10W,https://backend.vallianimarketplace.com/uploads/products/188663-6.webp,https://backend.vallianimarketplace.com/uploads/products/188663-6.webp,10017
+    160009WR,RB-7883,Gold Ring,4999,4599,Diamond Jewelry,Rings,Modern,OTHERS,White,14KT,8,Male,2.3,4.0,Diamond,Yes,1.0,Princess,F,VS2,Diamond,0.4,Princess,F,VS1,,2023,RB-7883,https://backend.vallianimarketplace.com/uploads/products/188663-6.webp,https://backend.vallianimarketplace.com/uploads/products/188663-6.webp,10017`;
 
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="product-template.csv"');

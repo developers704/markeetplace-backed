@@ -27,11 +27,12 @@ router.get('/export/csv',
     exportCustomersToCSV
 );
 
+router.post('/change-password-profile', authMiddleware, checkBlacklistedToken, changeCustomerPassword);
 
 // Route to update customer profile
 router.put('/profile', authMiddleware, checkBlacklistedToken, uploadSingleImage, updateCustomerProfile);
 
-// Route to change customer password
+// Route to change customer password (PUT = canonical; POST = compatibility for older clients)
 router.put('/change-password', authMiddleware, checkBlacklistedToken, changeCustomerPassword);
 
 // Route for admin to update customer profile by ID

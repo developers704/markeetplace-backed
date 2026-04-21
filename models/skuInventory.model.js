@@ -7,6 +7,8 @@ const mongoose = require('mongoose');
  * Warehouse & city based quantity control.
  */
 
+const { isActive: isSkuInventoryBulkImport } = require('../services/skuInventoryBulkImportGuard');
+
 const skuInventorySchema = new mongoose.Schema(
   {
     skuId: {
@@ -47,46 +49,57 @@ const skuInventorySchema = new mongoose.Schema(
 skuInventorySchema.index({ skuId: 1, warehouse: 1, city: 1 }, { unique: true });
 
 skuInventorySchema.post('save', function () {
-  const Sku = mongoose.model('Sku');
-  Sku.findById(this.skuId).select('productId').lean()
-    .then((sku) => {
-      if (sku && sku.productId) {
-        const { scheduleSync } = require('../services/productListingSync.service');
-        scheduleSync(sku.productId).catch((err) => console.error('[ProductListing] sync', err.message));
-      }
-    })
-    .catch(() => {});
-});
-
-skuInventorySchema.post('findOneAndDelete', function (doc) {
-  if (!doc) return;
-  const Sku = mongoose.model('Sku');
-  Sku.findById(doc.skuId).select('productId').lean()
-    .then((sku) => {
+  if (isSkuInventoryBulkImport()) return;
+  const sid = this.skuId;
+  const { rebuildSkuInventoryRedis, rebuildProductInventoryRedis } = require('../services/inventoryRedis.service');
+  rebuildSkuInventoryRedis(sid)
+    .then(async () => {
+      const Sku = mongoose.model('Sku');
+      const sku = await Sku.findById(sid).select('productId').lean();
       if (sku?.productId) {
+        await rebuildProductInventoryRedis(sku.productId);
         const { scheduleSync } = require('../services/productListingSync.service');
         scheduleSync(sku.productId);
       }
     })
-    .catch(() => {});
+    .catch((err) => console.error('[inventoryRedis] save hook', err.message));
+});
+
+skuInventorySchema.post('findOneAndDelete', function (doc) {
+  if (isSkuInventoryBulkImport()) return;
+  if (!doc) return;
+  const sid = doc.skuId;
+  const { rebuildSkuInventoryRedis, rebuildProductInventoryRedis } = require('../services/inventoryRedis.service');
+  rebuildSkuInventoryRedis(sid)
+    .then(async () => {
+      const Sku = mongoose.model('Sku');
+      const sku = await Sku.findById(sid).select('productId').lean();
+      if (sku?.productId) {
+        await rebuildProductInventoryRedis(sku.productId);
+        const { scheduleSync } = require('../services/productListingSync.service');
+        scheduleSync(sku.productId);
+      }
+    })
+    .catch((err) => console.error('[inventoryRedis] delete hook', err.message));
 });
 
 
 skuInventorySchema.post('findOneAndUpdate', function (doc) {
+  if (isSkuInventoryBulkImport()) return;
   if (!doc) return;
-  try {
-    const Sku = mongoose.model('Sku');
-    Sku.findById(doc.skuId).select('productId').lean()
-      .then((sku) => {
-        if (sku?.productId) {
-          const { scheduleSync } = require('../services/productListingSync.service');
-          scheduleSync(sku.productId);
-        }
-      })
-      .catch(() => {});
-  } catch (err) {
-    console.error('[ProductListing] Inventory update sync error', err.message);
-  }
+  const sid = doc.skuId;
+  const { rebuildSkuInventoryRedis, rebuildProductInventoryRedis } = require('../services/inventoryRedis.service');
+  rebuildSkuInventoryRedis(sid)
+    .then(async () => {
+      const Sku = mongoose.model('Sku');
+      const sku = await Sku.findById(sid).select('productId').lean();
+      if (sku?.productId) {
+        await rebuildProductInventoryRedis(sku.productId);
+        const { scheduleSync } = require('../services/productListingSync.service');
+        scheduleSync(sku.productId);
+      }
+    })
+    .catch((err) => console.error('[inventoryRedis] update hook', err.message));
 });
 
 

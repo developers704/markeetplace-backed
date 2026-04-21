@@ -1,14 +1,7 @@
 const mongoose = require('mongoose');
 
-/**
- * Vendor-Model Parent Product (v2 Catalog)
- *
- * IMPORTANT:
- * - This is intentionally NOT the legacy `Product` model (which is SKU-centric in this codebase).
- * - This model represents ONE vendor model used for listings (parent/umbrella product).
- */
-
-const normalizeKey = (value) => String(value || '').trim().toUpperCase();
+const normalizeKey = (value) =>
+  String(value || '').trim().toUpperCase();
 
 const vendorProductSchema = new mongoose.Schema(
   {
@@ -17,77 +10,120 @@ const vendorProductSchema = new mongoose.Schema(
 
     title: { type: String, required: true, trim: true },
     brand: { type: String, required: false, trim: true },
-    // Support both string (legacy) and ObjectId (new) for backward compatibility
-    category: { 
+
+    category: {
       type: mongoose.Schema.Types.Mixed,
       required: true,
-      // Can be String or ObjectId reference
     },
-    subcategory: { 
-      type: mongoose.Schema.Types.ObjectId, 
+
+    subcategory: {
+      type: mongoose.Schema.Types.ObjectId,
       ref: 'SubCategory',
-      default: null 
+      default: null,
     },
-    subsubcategory: { 
-      type: mongoose.Schema.Types.ObjectId, 
+
+    subsubcategory: {
+      type: mongoose.Schema.Types.ObjectId,
       ref: 'SubSubCategory',
-      default: null 
+      default: null,
     },
+
     description: { type: String, default: '', trim: true },
 
-    // Default SKU (variant) for listing card selection
     defaultSku: { type: mongoose.Schema.Types.ObjectId, ref: 'Sku', default: null },
 
-    // Cached list of SKU ids (variants) belonging to this vendor product.
-    // NOTE: This is redundant to `Sku.productId` but helps with quick lookups/aggregation.
-    skuIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Sku', default: [] }],
+    skuIds: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Sku',
+        default:[]
+      },
+    ],
   },
   { timestamps: true }
 );
 
-vendorProductSchema.pre('validate', function setVendorModelKey(next) {
+/* =========================
+   INDEXES
+========================= */
+vendorProductSchema.index({ brand: 1 });
+vendorProductSchema.index({ category: 1 });
+vendorProductSchema.index({ subcategory: 1 });
+vendorProductSchema.index({ subsubcategory: 1 });
+
+/* =========================
+   NORMALIZE KEY
+========================= */
+vendorProductSchema.pre('validate', function (next) {
   if (this.vendorModel) {
     this.vendorModelKey = normalizeKey(this.vendorModel);
   }
   next();
 });
 
-// vendorProductSchema.index({ vendorModelKey: 1 }, { unique: true });
-vendorProductSchema.index({ brand: 1 });
-vendorProductSchema.index({ category: 1 });
-vendorProductSchema.index({ subcategory: 1 });
-vendorProductSchema.index({ subsubcategory: 1 });
-
-vendorProductSchema.post('save', function () {
+/* =========================
+   IMPORT SERVICE (SAFE LOAD)
+========================= */
+const getSyncService = () => {
   try {
-    const { scheduleSync } = require('../services/productListingSync.service');
-    scheduleSync(this._id).catch((err) => console.error('[ProductListing] sync', err.message));
-  } catch (_) {}
+    return require('../services/productListingSync.service');
+  } catch (e) {
+    return null;
+  }
+};
+
+/* =========================
+   SAFE SYNC CALLER
+   (important for bulk jobs)
+========================= */
+const triggerSync = (productId) => {
+  const service = getSyncService();
+  if (!service?.scheduleSync) return;
+
+  // don't crash main thread
+  setImmediate(() => {
+    try {
+      service.scheduleSync(productId);
+    } catch (err) {
+      console.error('[ProductListing] sync error:', err.message);
+    }
+  });
+};
+
+/* =========================
+   HOOK: CREATE / SAVE
+========================= */
+vendorProductSchema.post('save', function (doc) {
+  if (!doc?._id) return;
+  triggerSync(doc._id);
 });
 
+/* =========================
+   HOOK: DELETE
+========================= */
 vendorProductSchema.post('findOneAndDelete', async function (doc) {
-  if (!doc) return;
+  if (!doc?._id) return;
+
   try {
     const ProductListing = require('../models/productListing.model');
     await ProductListing.deleteOne({ productId: doc._id });
   } catch (err) {
-    console.error('[ProductListing] Vendor delete cleanup error', err.message);
+    console.error('[ProductListing] delete error:', err.message);
   }
 });
 
-vendorProductSchema.post('findOneAndUpdate', async function (doc) {
+/* =========================
+   HOOK: UPDATE (IMPORTANT FIX)
+   ⚠️ NOTE: bulk operations bypass this
+========================= */
+vendorProductSchema.post('findOneAndUpdate', function (doc) {
   if (!doc?._id) return;
-  try {
-    const { scheduleSync } = require('../services/productListingSync.service');
-     scheduleSync(doc._id);
-  } catch (err) {
-    console.error('[ProductListing] Vendor update sync error', err.message);
-  }
+  triggerSync(doc._id);
 });
 
-
-
-
+/* =========================
+   MODEL EXPORT
+========================= */
 const VendorProduct = mongoose.model('VendorProduct', vendorProductSchema);
 
 module.exports = VendorProduct;
