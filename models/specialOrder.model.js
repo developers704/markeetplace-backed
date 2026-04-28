@@ -6,6 +6,7 @@ const TYPE_OF_REQUEST = [
   'STULLER_ITEM',
   'QG_ITEM',
   'CUSTOM_JEWELRY_PIECE',
+  'OTHERS',
 ];
 
 const METAL_QUALITY = [
@@ -45,7 +46,21 @@ const STATUS = [
   'WIP',
   'COMPLETED',
   'CLOSED',
+  'FINALIZED',
 ];
+
+const spoChatMessageSchema = new mongoose.Schema(
+  {
+    text: { type: String, required: true, maxlength: 4000 },
+    role: { type: String, enum: ['user', 'admin'], required: true },
+    senderId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    senderName: { type: String, default: '' },
+    replyToMessageId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    replyToText: { type: String, default: '' },
+    replyToSenderName: { type: String, default: '' },
+  },
+  { timestamps: { createdAt: true, updatedAt: false } }
+);
 
 const specialOrderSchema = new mongoose.Schema(
   {
@@ -67,6 +82,7 @@ const specialOrderSchema = new mongoose.Schema(
     status: { type: String, enum: STATUS, default: 'SUBMITTED', index: true },
     notes: { type: String, default: '' },
     eta: { type: Date, default: null },
+    chatMessages: { type: [spoChatMessageSchema], default: [] },
     requestedBy: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
     requestedByModel: { type: String, enum: ['Customer', 'User'], required: true },
   },

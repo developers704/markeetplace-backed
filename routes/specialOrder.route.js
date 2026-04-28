@@ -9,6 +9,9 @@ const {
   listAdminSpecialOrders,
   getSpecialOrderById,
   updateSpecialOrder,
+  finalizeSpecialOrder,
+  listSpoChatMessages,
+  postSpoChatMessage,
 } = require('../controllers/specialOrder.controller');
 
 const checkSuperuser = (req, res, next) => {
@@ -21,7 +24,11 @@ router.use(authMiddleware);
 router.post('/', uploadSpoAttachments, createSpecialOrder);
 router.get('/', listMySpecialOrders);
 router.get('/admin', checkSuperuser, listAdminSpecialOrders);
-router.get('/:id', checkSuperuser, getSpecialOrderById);
+
+router.patch('/:id/finalize', finalizeSpecialOrder);
+router.get('/:id/chat-messages', listSpoChatMessages);
+router.post('/:id/chat-messages', postSpoChatMessage);
+router.get('/:id', getSpecialOrderById);
 router.patch('/:id', checkSuperuser, updateSpecialOrder);
 
 module.exports = router;

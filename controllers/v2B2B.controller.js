@@ -759,10 +759,68 @@ const getPurchaseStatus = async (req, res) => {
  * - status=PENDING_DM,PENDING_CM,... (admin only)
  * - storeWarehouseId=<id> (admin only)
  */
+// const listPurchaseRequests = async (req, res) => {
+//   try {
+//     const actor = req.b2bActor;
+//     const role = String(actor?.roleName || '').toLowerCase().trim();
+
+//     const view = String(req.query.view || 'approvals').toLowerCase().trim();
+//     const statusParam = String(req.query.status || '').trim();
+//     const statusList = statusParam
+//       ? statusParam
+//           .split(',')
+//           .map((s) => s.trim().toUpperCase())
+//           .filter(Boolean)
+//       : [];
+
+//     const filter = {};
+
+//     if (actor?.isSuperUser || role === 'admin') {
+//       // Admin can view everything; default to PENDING_ADMIN if no explicit status
+//       if (statusList.length) filter.status = { $in: statusList };
+//       else filter.status = 'PENDING_ADMIN';
+
+//       if (req.query.storeWarehouseId && isObjectId(req.query.storeWarehouseId)) {
+//         filter.storeWarehouseId = req.query.storeWarehouseId;
+//       }
+//     } else if (role === 'district manager') {
+//       filter.status = 'PENDING_DM';
+//       filter.dmUserId = actor.id;
+//     } else if (role === 'corporate manager') {
+//       filter.status = 'PENDING_CM';
+//       filter.cmUserId = actor.id;
+//     } else {
+//       // Store manager (or any other role): show own requests
+//       filter.requestedBy = actor.id;
+//       if (statusList.length) filter.status = { $in: statusList };
+//     }
+
+//     const requests = await B2BPurchaseRequest.find(filter)
+//       .sort({ createdAt: -1 })
+//       .populate('vendorProductId', 'vendorModel title brand category')
+//       .populate('skuId', 'sku price currency metalColor metalType size attributes images')
+//       .populate('storeWarehouseId', 'name isMain')
+//       .lean();
+
+//     const withRequester = await resolveRequestedByDetails(requests);
+
+//     return res.status(200).json({
+//       success: true,
+//       message: 'Purchase requests retrieved successfully',
+//       data: withRequester,
+//     });
+//   } catch (error) {
+//     return res.status(500).json({ success: false, message: 'Failed to list purchase requests', error: error.message });
+//   }
+// };
+
 const listPurchaseRequests = async (req, res) => {
   try {
     const actor = req.b2bActor;
     const role = String(actor?.roleName || '').toLowerCase().trim();
+
+    const view = String(req.query.view || 'approvals').toLowerCase().trim();
+    // view = "my-orders" | "approvals"
 
     const statusParam = String(req.query.status || '').trim();
     const statusList = statusParam
@@ -774,30 +832,41 @@ const listPurchaseRequests = async (req, res) => {
 
     const filter = {};
 
-    if (actor?.isSuperUser || role === 'admin') {
-      // Admin can view everything; default to PENDING_ADMIN if no explicit status
-      if (statusList.length) filter.status = { $in: statusList };
-      else filter.status = 'PENDING_ADMIN';
-
-      if (req.query.storeWarehouseId && isObjectId(req.query.storeWarehouseId)) {
-        filter.storeWarehouseId = req.query.storeWarehouseId;
-      }
-    } else if (role === 'district manager') {
-      filter.status = 'PENDING_DM';
-      filter.dmUserId = actor.id;
-    } else if (role === 'corporate manager') {
-      filter.status = 'PENDING_CM';
-      filter.cmUserId = actor.id;
-    } else {
-      // Store manager (or any other role): show own requests
+    if (view === 'my-orders') {
+      // Any role can see own created orders
       filter.requestedBy = actor.id;
-      if (statusList.length) filter.status = { $in: statusList };
+
+      if (statusList.length) {
+        filter.status = { $in: statusList };
+      }
+    } else {
+      // Approval queue
+      if (actor?.isSuperUser || role === 'admin') {
+        if (statusList.length) filter.status = { $in: statusList };
+        else filter.status = 'PENDING_ADMIN';
+
+        if (req.query.storeWarehouseId && isObjectId(req.query.storeWarehouseId)) {
+          filter.storeWarehouseId = req.query.storeWarehouseId;
+        }
+      } else if (role === 'district manager') {
+        filter.status = statusList.length ? { $in: statusList } : 'PENDING_DM';
+        filter.dmUserId = actor.id;
+      } else if (role === 'corporate manager') {
+        filter.status = statusList.length ? { $in: statusList } : 'PENDING_CM';
+        filter.cmUserId = actor.id;
+      } else {
+        filter.requestedBy = actor.id;
+
+        if (statusList.length) {
+          filter.status = { $in: statusList };
+        }
+      }
     }
 
     const requests = await B2BPurchaseRequest.find(filter)
       .sort({ createdAt: -1 })
       .populate('vendorProductId', 'vendorModel title brand category')
-      .populate('skuId', 'sku price currency metalColor metalType size')
+      .populate('skuId', 'sku price currency metalColor metalType size attributes images')
       .populate('storeWarehouseId', 'name isMain')
       .lean();
 
@@ -809,7 +878,11 @@ const listPurchaseRequests = async (req, res) => {
       data: withRequester,
     });
   } catch (error) {
-    return res.status(500).json({ success: false, message: 'Failed to list purchase requests', error: error.message });
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to list purchase requests',
+      error: error.message,
+    });
   }
 };
 

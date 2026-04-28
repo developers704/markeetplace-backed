@@ -2,8 +2,23 @@ const { sendEmail } = require('../config/sendMails');
 const SpecialOrder = require('../models/specialOrder.model');
 const mongoose = require('mongoose');
 const specialOrderReceiverModel = require('../models/specialOrderReceiver.model');
+const { emitSpoChatMessage } = require('../socket/spoChat.socket');
+const { notifySpoRequesterSms } = require('../utils/spoRequesterSms');
 
 const isObjectId = (v) => mongoose.isValidObjectId(String(v || '').trim());
+const MAX_REPLY_PREVIEW = 88;
+
+function getRequesterId(order) {
+  const rb = order.requestedBy;
+  if (!rb) return '';
+  return String(rb._id || rb);
+}
+
+function canAccessSpecialOrderDoc(req, order) {
+  if (!order) return false;
+  if (req.user?.is_superuser) return true;
+  return getRequesterId(order) === String(req.user._id);
+}
 
 /**
  * POST /api/special-orders
@@ -38,6 +53,7 @@ const createSpecialOrder = async (req, res) => {
       receiptNumber,
       customerNumber,
       typeOfRequest,
+      eta,
       referenceSkuNumber,
       metalQuality,
       diamondType,
@@ -78,7 +94,7 @@ const createSpecialOrder = async (req, res) => {
       canvasDrawing: canvasDrawingPath || '',
       status: 'SUBMITTED',
       notes: notes || '',
-      eta: null,
+      eta: eta ? new Date(eta) : null,
       requestedBy: userId,
       requestedByModel: userModel,
     });
@@ -226,10 +242,14 @@ const getSpecialOrderById = async (req, res) => {
 
     const order = await SpecialOrder.findById(id)
       .populate('storeId', 'name')
-      .populate('requestedBy', 'username email')
+      .populate('requestedBy', 'username email phone_number')
       .lean();
 
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    if (!canAccessSpecialOrderDoc(req, order)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
 
     return res.status(200).json({
       success: true,
@@ -254,6 +274,13 @@ const updateSpecialOrder = async (req, res) => {
     if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid ID' });
 
     const { status, assignedTo, eta, notes } = req.body || {};
+
+    if (status === 'FINALIZED') {
+      return res.status(400).json({
+        success: false,
+        message: 'FINALIZED is set only when the requester confirms receipt.',
+      });
+    }
 
     const update = {};
     if (status != null) update.status = status;
@@ -285,10 +312,192 @@ const updateSpecialOrder = async (req, res) => {
   }
 };
 
+/**
+ * PATCH /api/special-orders/:id/finalize — requester marks a delivered (CLOSED) order as finalized.
+ */
+const finalizeSpecialOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid ID' });
+
+    const order = await SpecialOrder.findById(id);
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    if (String(order.requestedBy) !== String(req.user._id)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    if (order.status !== 'CLOSED') {
+      return res.status(400).json({
+        success: false,
+        message: 'You can finalize only after the order is marked delivered by the team.',
+      });
+    }
+
+    order.status = 'FINALIZED';
+    await order.save();
+
+    const populated = await SpecialOrder.findById(order._id)
+      .populate('storeId', 'name')
+      .populate('requestedBy', 'username email phone_number')
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Order finalized',
+      data: populated,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to finalize order',
+      error: error.message,
+    });
+  }
+};
+
+const listSpoChatMessages = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid ID' });
+
+    const order = await SpecialOrder.findById(id)
+      .populate('requestedBy', 'username email')
+      .select('requestedBy chatMessages status')
+      .lean();
+
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (!canAccessSpecialOrderDoc(req, order)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: order.chatMessages || [],
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to load messages',
+      error: error.message,
+    });
+  }
+};
+
+const postSpoChatMessage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid ID' });
+
+    const text = String(req.body?.text || '').trim();
+    const replyToMessageIdRaw = req.body?.replyToMessageId;
+    if (!text) {
+      return res.status(400).json({ success: false, message: 'Message text is required' });
+    }
+    if (text.length > 4000) {
+      return res.status(400).json({ success: false, message: 'Message too long' });
+    }
+
+    const order = await SpecialOrder.findById(id).populate(
+      'requestedBy',
+      'username email phone_number'
+    );
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    const orderLean = order.toObject();
+    if (!canAccessSpecialOrderDoc(req, orderLean)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const isAdmin = !!req.user.is_superuser;
+    const role = isAdmin ? 'admin' : 'user';
+
+    if (order.status === 'FINALIZEDs') {
+      return res.status(400).json({
+        success: false,
+        message: 'This order is finalized. Chat is read-only.',
+      });
+    }
+
+    const senderName =
+      req.user.username ||
+      req.user.email ||
+      (isAdmin ? 'Admin' : 'User');
+
+    let replyToMessageId = null;
+    let replyToText = '';
+    let replyToSenderName = '';
+    if (replyToMessageIdRaw && isObjectId(replyToMessageIdRaw)) {
+      const ref = order.chatMessages.id(replyToMessageIdRaw);
+      if (ref) {
+        replyToMessageId = ref._id;
+        replyToSenderName = ref.senderName || (ref.role === 'admin' ? 'Admin' : 'User');
+        const compact = String(ref.text || '').replace(/\s+/g, ' ').trim();
+        replyToText =
+          compact.length > MAX_REPLY_PREVIEW
+            ? `${compact.slice(0, MAX_REPLY_PREVIEW)}...`
+            : compact;
+      }
+    }
+
+    order.chatMessages.push({
+      text,
+      role,
+      senderId: req.user._id,
+      senderName,
+      replyToMessageId,
+      replyToText,
+      replyToSenderName,
+    });
+
+    await order.save();
+    const last = order.chatMessages[order.chatMessages.length - 1];
+    const payload = {
+      _id: last._id,
+      text: last.text,
+      role: last.role,
+      senderId: last.senderId,
+      senderName: last.senderName,
+      replyToMessageId: last.replyToMessageId || null,
+      replyToText: last.replyToText || '',
+      replyToSenderName: last.replyToSenderName || '',
+      createdAt: last.createdAt,
+    };
+
+    emitSpoChatMessage(String(order._id), payload);
+
+    if (role === 'admin' && order.requestedBy) {
+      const rb = order.requestedBy;
+      const phone = rb.phone_number || rb.phone;
+      if (phone) {
+        void notifySpoRequesterSms({
+          to: phone,
+          ticketNumber: order.ticketNumber,
+          snippet: text,
+        });
+      }
+    }
+
+    return res.status(201).json({
+      success: true,
+      data: payload,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to send message',
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createSpecialOrder,
   listMySpecialOrders,
   listAdminSpecialOrders,
   getSpecialOrderById,
   updateSpecialOrder,
+  finalizeSpecialOrder,
+  listSpoChatMessages,
+  postSpoChatMessage,
 };
