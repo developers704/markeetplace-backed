@@ -371,6 +371,7 @@ function transformJewelmanteCSV(rows) {
         subsubcategory: r.subsubcategory || "",
         tags: r.tags || "",
         prices: r.prices || "",
+        tagPrice:r.tagPrice,
         lifecycleStage: r.lifecycleStage || "",
         description: r.description || "",
         meta_title: r.meta_title || "",
@@ -584,6 +585,7 @@ const importBulkProducts = async (req, res) => {
           variants,
           lifecycleStage: lifecycleStage,
           tags,
+          tagPrice:row.tagPrice || 0,
           variationId:
             row.variationId ||
             `VAR-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,

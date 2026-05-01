@@ -1178,6 +1178,8 @@ module.exports = {
   rejectPurchaseRequest,
   listStoreInventory,
   listMyStoreInventory,
+  sumSkuInventory,
+  deductSkuInventory,
 };
 
 

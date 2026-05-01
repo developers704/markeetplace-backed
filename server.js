@@ -28,8 +28,10 @@ dotenv.config();
 try {
   const { initImportProgressSocket } = require('./socket/importProgress.socket');
   const { initSpoChatSocket } = require('./socket/spoChat.socket');
+  const { initB2bStoreTransferChatSocket } = require('./socket/b2bStoreTransferChat.socket');
   initImportProgressSocket(server);
   initSpoChatSocket(server);
+  initB2bStoreTransferChatSocket(server);
 } catch (e) {
   console.error('Socket.IO init failed:', e.message);
 }

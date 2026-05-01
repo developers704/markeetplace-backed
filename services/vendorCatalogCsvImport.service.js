@@ -2,7 +2,6 @@
  * Worker-side vendor catalog CSV import (parse + category resolution + bulk writes + ProductListing sync).
  * Idempotent: safe to retry BullMQ jobs.
  */
-
 const path = require('path');
 const fs = require('fs');
 const csv = require('csv-parser');
@@ -70,9 +69,24 @@ async function streamParseVendorCatalog(csvFilePath) {
           const metalColor = String(pick(row, ['metalcolor', 'color'])).trim();
           const metalType = String(pick(row, ['metaltype'])).trim();
           const size = String(pick(row, ['size'])).trim();
-          const price = parseNumber(pick(row, ['tagprice', 'price', 'tag']));
+          const cpPrice = parseNumber(pick(row, ['cpprice', 'cp-price']));
+          const tagPrice = parseNumber(pick(row, ['tagprice', 'tag-price', 'price', 'tag']));
 
-          if (price === null || price < 0) {
+          if (cpPrice === null || cpPrice < 0) {
+            errors.push({
+              row: rowNumber,
+              error: 'Invalid CP Price (must be a non-negative number)',
+              data: raw,
+            });
+            errorRowsForCsv.push({
+              rowNumber,
+              ...raw,
+              errorReason: 'Invalid CP Price (must be a non-negative number)',
+            });
+            return;
+          }
+
+          if (tagPrice === null || tagPrice < 0) {
             errors.push({
               row: rowNumber,
               error: 'Invalid Tag Price (must be a non-negative number)',
@@ -130,7 +144,9 @@ async function streamParseVendorCatalog(csvFilePath) {
             metalColor,
             metalType,
             size,
-            price,
+            cpPrice,
+            price: cpPrice,
+            tagPrice,
             currency: 'USD',
             images,
             gallery,
@@ -160,7 +176,8 @@ async function streamParseVendorCatalog(csvFilePath) {
           category: g.category || '',
           subcategory: g.subcategory || '',
           subsubcategory: g.subsubcategory || '',
-          tagPrice: r.price,
+          cpPrice: r.cpPrice,
+          // tagPrice: r.tagPrice,
           metalColor: r.metalColor,
           metalType: r.metalType,
           size: r.size,
@@ -343,6 +360,7 @@ async function bulkUpsertVendorChunk(groups, vendorKeys, now) {
               metalType: r.metalType,
               size: r.size,
               price: r.price,
+              tagPrice: r.tagPrice,
               currency: r.currency || 'USD',
               images: r.images || [],
               gallery: r.gallery || [],

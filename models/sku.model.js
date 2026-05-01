@@ -27,6 +27,7 @@ const skuSchema = new mongoose.Schema(
 
     // Price per SKU (base/tag price)
     price: { type: Number, required: true, min: 0 },
+    tagPrice: { type: Number, required: true, min: 0 },
     currency: { type: String, default: 'USD', trim: true },
 
     // Images for the selected SKU (first image typically used for card)
