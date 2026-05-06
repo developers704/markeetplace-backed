@@ -25,6 +25,22 @@ function initImportProgressSocket(httpServer) {
   });
 
   io.on('connection', (socket) => {
+    // Join per-user room for RBAC real-time updates (reuses same Socket.IO server; idempotent per connection).
+    (async () => {
+      try {
+        const token =
+          socket.handshake.auth?.token || socket.handshake.query?.token;
+        if (token) {
+          const user = await resolveUserFromToken(token);
+          if (user?._id) {
+            socket.join(`user-${String(user._id)}`);
+          }
+        }
+      } catch (_) {
+        /* invalid or missing token — skip room join */
+      }
+    })();
+
     socket.on('subscribeVendorImport', async (payload, ack) => {
       const reply = (err, data) => {
         if (typeof ack === 'function') {
@@ -93,8 +109,15 @@ function getImportProgressIo() {
   return io;
 }
 
+/** Push to room `user-<userId>` when role/permissions change (see permissionCache.service). */
+function emitPermissionsUpdated(userId, payload) {
+  if (!io || !userId) return;
+  io.to(`user-${String(userId)}`).emit('permissions-updated', payload);
+}
+
 module.exports = {
   initImportProgressSocket,
   emitImportJobProgress,
   getImportProgressIo,
+  emitPermissionsUpdated,
 };

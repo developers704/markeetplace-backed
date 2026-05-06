@@ -29,9 +29,11 @@ try {
   const { initImportProgressSocket } = require('./socket/importProgress.socket');
   const { initSpoChatSocket } = require('./socket/spoChat.socket');
   const { initB2bStoreTransferChatSocket } = require('./socket/b2bStoreTransferChat.socket');
+  const { initB2bPurchaseChatSocket } = require('./socket/b2bPurchaseChat.socket');
   initImportProgressSocket(server);
   initSpoChatSocket(server);
   initB2bStoreTransferChatSocket(server);
+  initB2bPurchaseChatSocket(server);
 } catch (e) {
   console.error('Socket.IO init failed:', e.message);
 }

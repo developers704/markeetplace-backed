@@ -79,4 +79,3 @@ b2bCartSchema.methods.calculateSubtotal = function () {
 const B2BCart = mongoose.model('B2BCart', b2bCartSchema);
 
 module.exports = B2BCart;
-

@@ -11,9 +11,31 @@ const IPAccess = require("../models/IPAccess.model");
 const TermsAndConditions = require("../models/TermsAndConditions.model");
 const Warehouse = require("../models/warehouse.model");
 const LoginLog = require("../models/loginLog.model");
+const permissionCache = require("../services/permissionCache.service");
 
 
 const generateSixDigitOTP = () => crypto.randomInt(100000, 1000000);
+
+/** RBAC: latest roles/permissions from DB (with Redis cache); JWT is identity only. */
+const getAuthPermissions = async (req, res) => {
+  try {
+    const userId = req.user._id || req.user.id;
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+    const data = await permissionCache.getPermissionsForUserId(userId);
+    if (!data) {
+      return res.status(404).json({ message: "Unable to resolve permissions" });
+    }
+    return res.status(200).json({
+      roles: data.roles,
+      permissions: data.permissions,
+      isAdmin: data.isAdmin,
+    });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
 
 const userLogin = async (req, res) => {
   try {
@@ -817,6 +839,7 @@ const customerResetPassword = async (req, res) => {
 module.exports = {
   userLogin,
   customerLogin,
+  getAuthPermissions,
   refreshToken,
   signout,
   userRequestPasswordReset,

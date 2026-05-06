@@ -14,6 +14,9 @@ const AdminNotification = require('../models/adminNotification.model');
 const { sendEmail } = require('../config/sendMails');
 const B2BCart = require('../models/b2bCart.model');
 const InventoryWallet = require('../models/inventoryWallet.model');
+const { emitB2bPurchaseChatMessage, emitB2bPurchaseChatSeen } = require('../socket/b2bPurchaseChat.socket');
+
+const MAX_B2B_PURCHASE_REPLY_PREVIEW = 88;
 
 const isObjectId = (value) => mongoose.isValidObjectId(String(value || '').trim());
 
@@ -102,7 +105,24 @@ const deductSkuInventory = async ({ skuId, warehouseId, quantity, session }) => 
   return deductions;
 };
 
-
+/** Add SKU qty at store warehouse (same pattern as store-to-store transfer). */
+async function incrementSkuInventoryAtWarehouse({ skuId, warehouseId, quantity, session }) {
+  const filter = {
+    skuId: new mongoose.Types.ObjectId(String(skuId)),
+    warehouse: new mongoose.Types.ObjectId(String(warehouseId)),
+    city: null,
+  };
+  const opts = { upsert: true };
+  if (session) opts.session = session;
+  await SkuInventory.updateOne(
+    filter,
+    {
+      $inc: { quantity },
+      $setOnInsert: { city: null },
+    },
+    opts
+  );
+}
 
 const resolveRequestedByDetails = async (requests) => {
   const customerIds = [];
@@ -722,25 +742,42 @@ const createPurchaseRequest = async (req, res) => {
 const getPurchaseStatus = async (req, res) => {
   try {
     const actor = req.b2bActor;
+    const role = String(actor?.roleName || '').toLowerCase().trim();
     const { purchaseId } = req.params;
     if (!isObjectId(purchaseId)) return res.status(400).json({ success: false, message: 'Invalid purchaseId' });
 
-    const request = await B2BPurchaseRequest.findById(purchaseId).lean();
+    const request = await B2BPurchaseRequest.findById(purchaseId)
+      .populate('vendorProductId', 'vendorModel title brand category')
+      .populate('skuId', 'sku price currency metalColor metalType size attributes images')
+      .populate('storeWarehouseId', 'name isMain')
+      .populate('vendorWarehouseId', 'name')
+      .populate('dmUserId', 'username email')
+      .populate('cmUserId', 'username email')
+      .lean();
+
     if (!request) return res.status(404).json({ success: false, message: 'Purchase request not found' });
 
+    const isAdminViewer =
+      !!actor?.isSuperUser ||
+      role === 'admin' ||
+      role === 'super admin' ||
+      role === 'superuser';
+
     const canView =
-      actor?.isSuperUser ||
+      isAdminViewer ||
       String(request.requestedBy) === String(actor.id) ||
-      String(request.dmUserId) === String(actor.id) ||
-      String(request.cmUserId) === String(actor.id);
+      String(request.dmUserId?._id || request.dmUserId) === String(actor.id) ||
+      String(request.cmUserId?._id || request.cmUserId) === String(actor.id);
 
     if (!canView) return res.status(403).json({ success: false, message: 'Access denied' });
+
+    const [withRequester] = await resolveRequestedByDetails([request]);
 
     return res.status(200).json({
       success: true,
       message: 'Status retrieved',
-      status: request.status,
-      data: request,
+      status: withRequester.status,
+      data: withRequester,
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to fetch purchase status', error: error.message });
@@ -981,6 +1018,13 @@ const approvePurchaseRequest = async (req, res) => {
         storeInvOpts
       );
 
+      await incrementSkuInventoryAtWarehouse({
+        skuId: fresh.skuId,
+        warehouseId: fresh.storeWarehouseId,
+        quantity: fresh.quantity,
+        session,
+      });
+
       // Deduct wallet balance (InventoryWallet for B2B purchases)
       const itemTotal = (fresh.cartItemPrice || 0) * fresh.quantity;
       if (itemTotal > 0) {
@@ -1019,6 +1063,9 @@ const approvePurchaseRequest = async (req, res) => {
 
       fresh.approvals.admin = { userId: actor.id, userModel: actor.model, approvedAt: now };
       fresh.status = 'APPROVED';
+      fresh.fulfillmentStatus = 'SUBMITTED';
+      fresh.shippedAt = null;
+      fresh.completedAt = null;
       await fresh.save(session ? { session } : {});
 
       // Notify Store Manager, DM, CM (non-blocking, after save)
@@ -1170,6 +1217,301 @@ const listMyStoreInventory = async (req, res) => {
   }
 };
 
+function canViewPurchaseRequestDoc(req, order) {
+  const actor = req.b2bActor;
+  const role = String(actor?.roleName || '').toLowerCase().trim();
+  const isAdminViewer =
+    !!actor?.isSuperUser ||
+    role === 'admin' ||
+    role === 'super admin' ||
+    role === 'superuser';
+  if (isAdminViewer) return true;
+  if (String(order.requestedBy) === String(actor.id)) return true;
+  if (String(order.dmUserId?._id || order.dmUserId) === String(actor.id)) return true;
+  if (String(order.cmUserId?._id || order.cmUserId) === String(actor.id)) return true;
+  return false;
+}
+
+function sanitizeChatAttachments(rawAttachments) {
+  if (!Array.isArray(rawAttachments)) return [];
+  return rawAttachments
+    .slice(0, 4)
+    .map((a) => ({
+      name: String(a?.name || '').slice(0, 180),
+      url: String(a?.url || '').trim(),
+      mimeType: String(a?.mimeType || '').slice(0, 120),
+      size: Number(a?.size || 0),
+    }))
+    .filter((a) => a.url);
+}
+
+function sanitizeChatVoice(rawVoice) {
+  if (!rawVoice || typeof rawVoice !== 'object') return null;
+  const url = String(rawVoice.url || '').trim();
+  if (!url) return null;
+  return {
+    name: String(rawVoice.name || '').slice(0, 180),
+    url,
+    mimeType: String(rawVoice.mimeType || '').slice(0, 120),
+    size: Number(rawVoice.size || 0),
+    durationMs: Number(rawVoice.durationMs || 0),
+  };
+}
+
+function toChatPayload(message) {
+  return {
+    _id: message._id,
+    text: message.text,
+    role: message.role,
+    senderId: message.senderId,
+    senderName: message.senderName,
+    replyToMessageId: message.replyToMessageId || null,
+    replyToText: message.replyToText || '',
+    replyToSenderName: message.replyToSenderName || '',
+    attachments: Array.isArray(message.attachments) ? message.attachments : [],
+    voice: message.voice || null,
+    seenBy: Array.isArray(message.seenBy) ? message.seenBy : [],
+    createdAt: message.createdAt,
+  };
+}
+
+/**
+ * PATCH /api/v2/b2b/requests/:purchaseId/fulfillment
+ * Admin sets shipping / fulfillment status (including rollback).
+ */
+const patchPurchaseFulfillment = async (req, res) => {
+  try {
+    const actor = req.b2bActor;
+    const role = String(actor?.roleName || '').toLowerCase().trim();
+    const isAdmin =
+      actor.isSuperUser ||
+      role === 'admin' ||
+      role === 'super admin' ||
+      role === 'superuser' ||
+      !!req.user?.is_superuser;
+    if (!isAdmin) return res.status(403).json({ success: false, message: 'Admin only' });
+
+    const { purchaseId } = req.params;
+    if (!isObjectId(purchaseId)) return res.status(400).json({ success: false, message: 'Invalid id' });
+
+    const next = String(req.body?.fulfillmentStatus || '').trim().toUpperCase();
+    const allowed = ['SUBMITTED', 'IN_PROCESS', 'SHIPPED', 'COMPLETED'];
+    if (!allowed.includes(next)) {
+      return res.status(400).json({ success: false, message: `Use one of: ${allowed.join(', ')}` });
+    }
+
+    const order = await B2BPurchaseRequest.findById(purchaseId);
+    if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+    if (order.status !== 'APPROVED') {
+      return res.status(400).json({ success: false, message: 'Fulfillment only for approved requests' });
+    }
+
+    order.fulfillmentStatus = next;
+    if (next === 'SHIPPED') {
+      order.shippedAt = new Date();
+    } else {
+      order.shippedAt = null;
+    }
+    if (next === 'COMPLETED') {
+      order.completedAt = new Date();
+    } else {
+      order.completedAt = null;
+    }
+    await order.save();
+
+    const populated = await B2BPurchaseRequest.findById(order._id)
+      .populate('vendorProductId', 'vendorModel title brand category')
+      .populate('skuId', 'sku price currency metalColor metalType size attributes images')
+      .populate('storeWarehouseId', 'name isMain')
+      .lean();
+    const [withR] = await resolveRequestedByDetails([populated]);
+
+    return res.status(200).json({ success: true, data: withR });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * POST /api/v2/b2b/requests/:purchaseId/mark-received
+ * Requester confirms receipt → COMPLETED (only when fulfillment is SHIPPED).
+ */
+const markPurchaseReceived = async (req, res) => {
+  try {
+    const actor = req.b2bActor;
+    const { purchaseId } = req.params;
+    if (!isObjectId(purchaseId)) return res.status(400).json({ success: false, message: 'Invalid id' });
+
+    const order = await B2BPurchaseRequest.findById(purchaseId);
+    if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+    if (String(order.requestedBy) !== String(actor.id)) {
+      return res.status(403).json({ success: false, message: 'Only the requester can confirm receipt' });
+    }
+    if (order.status !== 'APPROVED') {
+      return res.status(400).json({ success: false, message: 'Only approved orders' });
+    }
+    const fs = order.fulfillmentStatus || 'SUBMITTED';
+    if (fs !== 'SHIPPED') {
+      return res.status(400).json({
+        success: false,
+        message: 'Confirm receipt only after the order is marked shipped',
+      });
+    }
+
+    order.fulfillmentStatus = 'COMPLETED';
+    order.completedAt = new Date();
+    await order.save();
+
+    const populated = await B2BPurchaseRequest.findById(order._id)
+      .populate('vendorProductId', 'vendorModel title brand category')
+      .populate('skuId', 'sku price currency metalColor metalType size attributes images')
+      .populate('storeWarehouseId', 'name isMain')
+      .lean();
+    const [withR] = await resolveRequestedByDetails([populated]);
+
+    return res.status(200).json({ success: true, message: 'Marked complete', data: withR });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const listB2bPurchaseChatMessages = async (req, res) => {
+  try {
+    const { purchaseId } = req.params;
+    if (!isObjectId(purchaseId)) return res.status(400).json({ success: false, message: 'Invalid id' });
+
+    const order = await B2BPurchaseRequest.findById(purchaseId).select('requestedBy dmUserId cmUserId chatMessages status').lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+    if (!canViewPurchaseRequestDoc(req, order)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const messages = Array.isArray(order.chatMessages)
+      ? order.chatMessages.map((m) => toChatPayload(m))
+      : [];
+    return res.status(200).json({ success: true, data: messages });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const postB2bPurchaseChatMessage = async (req, res) => {
+  try {
+    const { purchaseId } = req.params;
+    if (!isObjectId(purchaseId)) return res.status(400).json({ success: false, message: 'Invalid id' });
+
+    const text = String(req.body?.text || '').trim();
+    const replyToMessageIdRaw = req.body?.replyToMessageId;
+    const attachments = sanitizeChatAttachments(req.body?.attachments);
+    const voice = sanitizeChatVoice(req.body?.voice);
+    if (!text) return res.status(400).json({ success: false, message: 'Message required' });
+    if (text.length > 4000) return res.status(400).json({ success: false, message: 'Message too long' });
+
+    const order = await B2BPurchaseRequest.findById(purchaseId);
+    if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+    if (!canViewPurchaseRequestDoc(req, order.toObject())) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    if (order.status === 'REJECTED') {
+      return res.status(400).json({ success: false, message: 'Chat closed for rejected requests' });
+    }
+
+    const actor = req.b2bActor;
+    const role = String(actor?.roleName || '').toLowerCase().trim();
+    const isAdmin =
+      !!actor?.isSuperUser ||
+      !!req.user?.is_superuser ||
+      role === 'admin' ||
+      role === 'super admin' ||
+      role === 'superuser';
+    const chatRole = isAdmin ? 'admin' : 'user';
+    const senderName =
+      req.user.username || req.user.email || (isAdmin ? 'Admin' : 'User');
+
+    let replyToMessageId = null;
+    let replyToText = '';
+    let replyToSenderName = '';
+    if (replyToMessageIdRaw && isObjectId(replyToMessageIdRaw)) {
+      const ref = order.chatMessages.id(replyToMessageIdRaw);
+      if (ref) {
+        replyToMessageId = ref._id;
+        replyToSenderName = ref.senderName || (ref.role === 'admin' ? 'Admin' : 'User');
+        const compact = String(ref.text || '').replace(/\s+/g, ' ').trim();
+        replyToText =
+          compact.length > MAX_B2B_PURCHASE_REPLY_PREVIEW
+            ? `${compact.slice(0, MAX_B2B_PURCHASE_REPLY_PREVIEW)}...`
+            : compact;
+      }
+    }
+
+    order.chatMessages.push({
+      text,
+      role: chatRole,
+      senderId: req.user._id,
+      senderName,
+      replyToMessageId,
+      replyToText,
+      replyToSenderName,
+      attachments,
+      voice,
+      seenBy: [{ userId: req.user._id, userModel: actor.model || 'User', seenAt: new Date() }],
+    });
+    await order.save();
+    const last = order.chatMessages[order.chatMessages.length - 1];
+    const payload = toChatPayload(last);
+
+    emitB2bPurchaseChatMessage(String(order._id), payload);
+
+    return res.status(201).json({ success: true, data: payload });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const markB2bPurchaseChatSeen = async (req, res) => {
+  try {
+    const { purchaseId } = req.params;
+    if (!isObjectId(purchaseId)) return res.status(400).json({ success: false, message: 'Invalid id' });
+
+    const order = await B2BPurchaseRequest.findById(purchaseId);
+    if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+    if (!canViewPurchaseRequestDoc(req, order.toObject())) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const actorModel = req.b2bActor?.model || 'User';
+    const actorId = String(req.user?._id || '');
+    if (!actorId) return res.status(400).json({ success: false, message: 'Invalid actor' });
+    const now = new Date();
+
+    let touched = false;
+    for (const msg of order.chatMessages || []) {
+      if (String(msg.senderId || '') === actorId) continue;
+      const exists = (msg.seenBy || []).some(
+        (s) =>
+          String(s?.userId || '') === actorId &&
+          String(s?.userModel || '').toLowerCase() === String(actorModel).toLowerCase(),
+      );
+      if (!exists) {
+        msg.seenBy.push({ userId: req.user._id, userModel: actorModel, seenAt: now });
+        touched = true;
+      }
+    }
+
+    if (touched) await order.save();
+    if (touched) {
+      emitB2bPurchaseChatSeen(String(order._id), {
+        viewerId: String(req.user._id),
+        viewerModel: actorModel,
+        seenAt: now.toISOString(),
+      });
+    }
+    return res.status(200).json({ success: true, data: { updated: touched } });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   createPurchaseRequest,
   getPurchaseStatus,
@@ -1178,6 +1520,11 @@ module.exports = {
   rejectPurchaseRequest,
   listStoreInventory,
   listMyStoreInventory,
+  patchPurchaseFulfillment,
+  markPurchaseReceived,
+  listB2bPurchaseChatMessages,
+  postB2bPurchaseChatMessage,
+  markB2bPurchaseChatSeen,
   sumSkuInventory,
   deductSkuInventory,
 };

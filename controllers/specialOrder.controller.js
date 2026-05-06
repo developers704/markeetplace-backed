@@ -14,9 +14,19 @@ function getRequesterId(order) {
   return String(rb._id || rb);
 }
 
+/** Dashboard admins who may manage SPO without superuser flag */
+function isPrivilegedSpecialOrderAdmin(req) {
+  if (!req.user) return false;
+  if (req.user.is_superuser) return true;
+  const r = String(req.user.role || '')
+    .toLowerCase()
+    .trim();
+  return r === 'admin' || r === 'super admin' || r === 'superuser';
+}
+
 function canAccessSpecialOrderDoc(req, order) {
   if (!order) return false;
-  if (req.user?.is_superuser) return true;
+  if (isPrivilegedSpecialOrderAdmin(req)) return true;
   return getRequesterId(order) === String(req.user._id);
 }
 
@@ -409,10 +419,10 @@ const postSpoChatMessage = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
-    const isAdmin = !!req.user.is_superuser;
+    const isAdmin = isPrivilegedSpecialOrderAdmin(req);
     const role = isAdmin ? 'admin' : 'user';
 
-    if (order.status === 'FINALIZEDs') {
+    if (order.status === 'FINALIZED' && !isAdmin) {
       return res.status(400).json({
         success: false,
         message: 'This order is finalized. Chat is read-only.',
@@ -500,4 +510,5 @@ module.exports = {
   finalizeSpecialOrder,
   listSpoChatMessages,
   postSpoChatMessage,
+  isPrivilegedSpecialOrderAdmin,
 };

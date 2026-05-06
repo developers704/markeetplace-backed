@@ -177,8 +177,9 @@ const listAdminStoreTransferOrders = async (req, res) => {
 
     const rows = await B2bStoreTransferOrder.find(filter)
       .sort({ createdAt: -1 })
-      .populate('vendorProductId', 'vendorModel title brand')
-      .populate('skuId', 'sku price currency metalColor metalType size')
+      .select('-chatMessages')
+      .populate('vendorProductId', 'vendorModel ')
+      .populate('skuId', 'sku price attributes')
       .populate('sourceWarehouseId', 'name')
       .populate('destWarehouseId', 'name')
       .populate('requestedBy', 'username email')
@@ -200,6 +201,7 @@ const getStoreTransferOrder = async (req, res) => {
       .populate('skuId', 'sku price currency metalColor metalType size images attributes')
       .populate('sourceWarehouseId', 'name')
       .populate('destWarehouseId', 'name')
+      .populate('requestedBy', 'username email')
       .lean();
 
     if (!order) return res.status(404).json({ success: false, message: 'Not found' });
@@ -217,7 +219,13 @@ const patchStoreTransferStatus = async (req, res) => {
   try {
     const actor = req.b2bActor;
     const role = String(actor?.roleName || '').toLowerCase().trim();
-    const isAdmin = actor.isSuperUser || role === 'admin' || role === 'super admin';
+    const isAdmin =
+      actor.isSuperUser ||
+      role === 'admin' ||
+      role === 'super admin' ||
+      role === 'superuser' ||
+      role === 'Super User' ||
+      !!req.user?.is_superuser;
     if (!isAdmin) return res.status(403).json({ success: false, message: 'Admin only' });
 
     const { id } = req.params;
@@ -225,16 +233,55 @@ const patchStoreTransferStatus = async (req, res) => {
 
     const nextStatus = String(req.body?.status || '').trim().toUpperCase();
     const reason = String(req.body?.reason || '').trim();
-    const allowed = ['WIP', 'TRANSFER', 'DELIVERED', 'REJECTED'];
-    if (!allowed.includes(nextStatus)) {
-      return res.status(400).json({ success: false, message: `Invalid status. Use one of: ${allowed.join(', ')}` });
-    }
 
     const order = await B2bStoreTransferOrder.findById(id);
     if (!order) return res.status(404).json({ success: false, message: 'Not found' });
 
-    if (order.status === 'RECEIVED' || order.status === 'REJECTED') {
+    const closed = order.status === 'RECEIVED' || order.status === 'REJECTED';
+    if (closed && !isAdmin) {
       return res.status(400).json({ success: false, message: 'Order is closed' });
+    }
+
+    /** Admin-only reopen from terminal states (inventory correction is manual / exceptional). */
+    if (closed && isAdmin) {
+      const fromRejected = ['WIP', 'TRANSFER', 'SUBMITTED'];
+      const fromReceived = ['WIP', 'TRANSFER', 'SUBMITTED', 'DELIVERED'];
+      const ok =
+        order.status === 'REJECTED' ? fromRejected.includes(nextStatus) : fromReceived.includes(nextStatus);
+      if (!ok) {
+        return res.status(400).json({
+          success: false,
+          message:
+            order.status === 'REJECTED'
+              ? `From REJECTED, admin can set: ${fromRejected.join(', ')}`
+              : `From RECEIVED, admin can set: ${fromReceived.join(', ')}`,
+        });
+      }
+      if (order.status === 'REJECTED') {
+        order.rejection = { reason: '', rejectedAt: null, rejectedBy: null, rejectedByModel: null };
+      }
+      if (order.status === 'RECEIVED') {
+        order.receivedAt = null;
+        if (nextStatus !== 'DELIVERED') {
+          order.deliveredAt = null;
+        }
+      }
+      order.status = nextStatus;
+      await order.save();
+
+      const populated = await B2bStoreTransferOrder.findById(order._id)
+        .populate('vendorProductId', 'vendorModel title')
+        .populate('skuId', 'sku price')
+        .populate('sourceWarehouseId', 'name')
+        .populate('destWarehouseId', 'name')
+        .lean();
+
+      return res.status(200).json({ success: true, data: populated });
+    }
+
+    const allowed = ['WIP', 'TRANSFER', 'DELIVERED', 'REJECTED'];
+    if (!allowed.includes(nextStatus)) {
+      return res.status(400).json({ success: false, message: `Invalid status. Use one of: ${allowed.join(', ')}` });
     }
 
     if (nextStatus === 'REJECTED') {
@@ -284,7 +331,13 @@ const approveStoreTransferOrder = async (req, res) => {
   try {
     const actor = req.b2bActor;
     const role = String(actor?.roleName || '').toLowerCase().trim();
-    const isAdmin = actor.isSuperUser || role === 'admin' || role === 'super admin';
+    const isAdmin =
+      actor.isSuperUser ||
+      role === 'admin' ||
+      role === 'super admin' ||
+      role === 'superuser' ||
+      role === 'Super User' ||
+      !!req.user?.is_superuser;
     if (!isAdmin) return res.status(403).json({ success: false, message: 'Admin only' });
 
     const { id } = req.params;
@@ -458,10 +511,6 @@ const postStoreTransferChatMessage = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
-    if (order.status === 'REJECTED' || order.status === 'RECEIVED') {
-      return res.status(400).json({ success: false, message: 'Chat closed for this order' });
-    }
-
     const actor = req.b2bActor;
     const rname = String(actor?.roleName || '').toLowerCase().trim();
     const isAdmin =
@@ -470,6 +519,10 @@ const postStoreTransferChatMessage = async (req, res) => {
       rname === 'admin' ||
       rname === 'super admin' ||
       rname === 'superuser';
+
+    if ((order.status === 'REJECTED' || order.status === 'RECEIVED') && !isAdmin) {
+      return res.status(400).json({ success: false, message: 'Chat closed for this order' });
+    }
     const role = isAdmin ? 'admin' : 'user';
     const senderName =
       req.user.username || req.user.email || (isAdmin ? 'Admin' : 'User');

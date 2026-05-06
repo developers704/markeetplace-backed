@@ -1,5 +1,53 @@
 const mongoose = require('mongoose');
 
+const FULFILLMENT_STATUSES = ['NONE', 'SUBMITTED', 'IN_PROCESS', 'SHIPPED', 'COMPLETED'];
+
+const b2bPurchaseChatAttachmentSchema = new mongoose.Schema(
+  {
+    name: { type: String, default: '' },
+    url: { type: String, required: true },
+    mimeType: { type: String, default: '' },
+    size: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
+const b2bPurchaseChatVoiceSchema = new mongoose.Schema(
+  {
+    name: { type: String, default: '' },
+    url: { type: String, required: true },
+    mimeType: { type: String, default: '' },
+    size: { type: Number, default: 0 },
+    durationMs: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
+const b2bPurchaseChatSeenSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    userModel: { type: String, enum: ['Customer', 'User'], required: true },
+    seenAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
+const b2bPurchaseChatMessageSchema = new mongoose.Schema(
+  {
+    text: { type: String, required: true, maxlength: 4000 },
+    role: { type: String, enum: ['user', 'admin'], required: true },
+    senderId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    senderName: { type: String, default: '' },
+    replyToMessageId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    replyToText: { type: String, default: '' },
+    replyToSenderName: { type: String, default: '' },
+    attachments: { type: [b2bPurchaseChatAttachmentSchema], default: [] },
+    voice: { type: b2bPurchaseChatVoiceSchema, default: null },
+    seenBy: { type: [b2bPurchaseChatSeenSchema], default: [] },
+  },
+  { timestamps: { createdAt: true, updatedAt: false } }
+);
+
 const approvalStepSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, required: false },
@@ -67,6 +115,18 @@ const b2bPurchaseRequestSchema = new mongoose.Schema(
     cartId: { type: mongoose.Schema.Types.ObjectId, ref: 'B2BCart', default: null, index: true },
     cartItemPrice: { type: Number, default: null }, // Price at time of request creation
     cartItemCurrency: { type: String, default: 'USD' },
+
+    /** Post-approval fulfillment (shipping) — only when status is APPROVED */
+    fulfillmentStatus: {
+      type: String,
+      enum: FULFILLMENT_STATUSES,
+      default: 'NONE',
+      index: true,
+    },
+    shippedAt: { type: Date, default: null },
+    completedAt: { type: Date, default: null },
+
+    chatMessages: { type: [b2bPurchaseChatMessageSchema], default: [] },
   },
   { timestamps: true }
 );
@@ -77,5 +137,6 @@ b2bPurchaseRequestSchema.index({ storeWarehouseId: 1, status: 1, createdAt: -1 }
 const B2BPurchaseRequest = mongoose.model('B2BPurchaseRequest', b2bPurchaseRequestSchema);
 
 module.exports = B2BPurchaseRequest;
+module.exports.FULFILLMENT_STATUSES = FULFILLMENT_STATUSES;
 
 

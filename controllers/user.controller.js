@@ -13,6 +13,10 @@ const Department = require('../models/department.model.js');
 const fsSync = require('fs');
 const csv = require('csv-parser');
 const { deleteFile } = require('../config/fileOperations.js');
+const {
+  invalidateUsersForRole,
+  invalidateLinkedAccounts,
+} = require('../services/permissionCache.service');
 
 const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -66,6 +70,8 @@ const updateUserRole = async (req, res) => {
         if (!updatedRole) {
             return res.status(404).json({ message: 'User role not found' });
         }
+        // RBAC: invalidate Redis permission cache + notify connected clients
+        await invalidateUsersForRole(id);
         res.status(200).json({ message: 'User role updated successfully', updatedRole });
     } catch (error) {
         res.status(400).json({ message: error.message });
@@ -76,6 +82,7 @@ const updateUserRole = async (req, res) => {
 const deleteUserRole = async (req, res) => {
     try {
         const { id } = req.params;
+        await invalidateUsersForRole(id);
         await UserRole.findByIdAndDelete(id);
         res.status(200).json({ message: 'User role deleted successfully' });
     } catch (error) {
@@ -93,6 +100,9 @@ const bulkDeleteUserRoles = async (req, res) => {
             return res.status(400).json({ message: 'Please provide an array of user role IDs to delete' });
         }
 
+        for (const rid of ids) {
+            await invalidateUsersForRole(rid);
+        }
         // Perform bulk delete using the array of IDs
         const result = await UserRole.deleteMany({ _id: { $in: ids } });
 
@@ -563,6 +573,10 @@ const updateUser = async (req, res) => {
         const updatedUser = await User.findByIdAndUpdate(id, updates, { new: true });
         if (customer) {
             await Customer.findByIdAndUpdate(customer._id, updates, { new: true });
+        
+        if (updates.role) {
+            await invalidateLinkedAccounts(id, customer?._id);
+        }
 
             if (initialBalance !== undefined) {
                 await Wallet.findOneAndUpdate(

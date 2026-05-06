@@ -15,7 +15,8 @@ const {
   // new route
   getAcceptedTermsUsers,
   getUserTermsDetails,
-  getTermsAcceptanceStats
+  getTermsAcceptanceStats,
+  getAuthPermissions
 } = require("../controllers/auth.controller");
 const authMiddleware = require("../middlewares/authMiddleware");
 
@@ -33,6 +34,9 @@ router.post('/customer/resend-otp', resendCustomerOTP);
 
 //signout api for admin and customer
 router.post("/signout", authMiddleware, signout);
+
+// Current user's permissions (DB + Redis cache; not from JWT)
+router.get('/permissions', authMiddleware, getAuthPermissions);
 
 //for refreshing token
 router.post("/refresh-token", refreshToken);

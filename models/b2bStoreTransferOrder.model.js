@@ -66,7 +66,7 @@ const b2bStoreTransferOrderSchema = new mongoose.Schema(
     /** Set when APPROVED applies inventory + wallet (idempotent guard) */
     inventoryAppliedAt: { type: Date, default: null },
 
-    requestedBy: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    requestedBy: { type: mongoose.Schema.Types.ObjectId,  refPath: 'requestedByModel' , required: true, index: true },
     requestedByModel: { type: String, enum: ['Customer', 'User'], required: true },
 
     chatMessages: { type: [b2bStoChatMessageSchema], default: [] },

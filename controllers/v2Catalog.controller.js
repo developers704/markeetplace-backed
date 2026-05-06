@@ -820,7 +820,7 @@ const sortVp = {
     { path: 'category', select: '_id name' },
     { path: 'subcategory', select: '_id name' },
     { path: 'subsubcategory', select: '_id name' },
-    { path: 'defaultSku', select: '_id sku price currency images gallery metalColor metalType size attributes' }
+    { path: 'defaultSku', select: '_id sku price tagPrice currency images gallery metalColor metalType size attributes' }
     ])
     .lean();
     // Map products by _id
