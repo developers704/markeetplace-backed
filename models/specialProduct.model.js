@@ -15,7 +15,7 @@ const specialProductSchema = new mongoose.Schema({
     },
     type: {
         type: String,
-        enum: ['supplies', 'GWP', 'marketing', 'tool finding'],
+        // enum: ['supplies', 'GWP', 'marketing', 'tool finding'],
         required: true
     },
     unitSize: {

@@ -57,6 +57,11 @@ function listingCacheKey(gen, params) {
 }
 
 const escapeRegex = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** SKU-level text search: stock keeping unit code or vendor model number on SKU attributes. */
+const skuSearchMatchFromRegex = (searchRegex) => ({
+  $or: [{ sku: searchRegex }, { 'attributes.modelno': searchRegex }],
+});
 const parseMulti = (value) =>
   String(value || '')
     .split(',')
@@ -283,8 +288,8 @@ const listVendorProductsAdmin = async (req, res) => {
         { category: searchRegex },
       ];
 
-      // Also search in SKUs - find SKUs matching search, then match products
-      const matchingSkus = await Sku.find({ sku: searchRegex }).select('productId').lean();
+      // Also search in SKUs - find SKUs matching SKU code or model number, then match products
+      const matchingSkus = await Sku.find(skuSearchMatchFromRegex(searchRegex)).select('productId').lean();
       if (matchingSkus.length > 0) {
         const productIds = matchingSkus.map((s) => s.productId).filter(Boolean);
         if (productIds.length > 0) {
@@ -767,10 +772,13 @@ const sortVp = {
     if (subsubcategoryId) match.subsubcategory = { $in: [subsubcategoryId, subsubcategoryId.toString()] };
     if (search) {
       const searchRegex = new RegExp(escapeRegex(search), 'i');
+      const matchingSkus = await Sku.find(skuSearchMatchFromRegex(searchRegex)).select('productId').lean();
+      const productIdsFromSku = matchingSkus.map((s) => s.productId).filter(Boolean);
       match.$or = [
         { title: searchRegex },
         { brand: searchRegex },
         { vendorModel: searchRegex },
+        ...(productIdsFromSku.length > 0 ? [{ _id: { $in: productIdsFromSku } }] : []),
       ];
     }
     // const sortVp = (sortRule === 'new-arrivals')
@@ -1620,7 +1628,7 @@ const exportVendorProductsCsv = async (req, res) => {
 
     if (search) {
       const searchRegex = new RegExp(escapeRegex(search), 'i');
-      const matchingSkus = await Sku.find({ sku: searchRegex }).select('productId').lean();
+      const matchingSkus = await Sku.find(skuSearchMatchFromRegex(searchRegex)).select('productId').lean();
       const productIdsFromSku = matchingSkus.map((s) => s.productId).filter(Boolean);
       match.$or = [
         { vendorModel: searchRegex },

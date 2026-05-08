@@ -17,13 +17,30 @@ function getRequesterId(order) {
   return String(rb._id || rb);
 }
 
+function getOrderDestWarehouseId(order) {
+  const dw = order?.destWarehouseId;
+  if (!dw) return '';
+  return String(dw._id || dw);
+}
+
 function canAccessOrder(req, orderLean) {
   if (!orderLean) return false;
   const actor = req.b2bActor;
   const role = String(actor?.roleName || '').toLowerCase().trim();
   if (actor?.isSuperUser || role === 'admin' || role === 'super admin' || role === 'superuser') return true;
   if (req.user?.is_superuser) return true;
-  return getRequesterId(orderLean) === String(req.user._id);
+  if (getRequesterId(orderLean) === String(req.user._id)) return true;
+
+  const orderDestWarehouseId = getOrderDestWarehouseId(orderLean);
+  if (!orderDestWarehouseId) return false;
+
+  const selectedWarehouse = req.user?.selectedWarehouse ? String(req.user.selectedWarehouse) : '';
+  if (selectedWarehouse && selectedWarehouse === orderDestWarehouseId) return true;
+
+  const userWarehouses = Array.isArray(req.user?.warehouse)
+    ? req.user.warehouse.map((w) => String(w))
+    : [];
+  return userWarehouses.includes(orderDestWarehouseId);
 }
 
 async function incrementSkuInventoryAtWarehouse({ skuId, warehouseId, quantity, session }) {
@@ -153,12 +170,31 @@ const createStoreTransferOrder = async (req, res) => {
 const listMyStoreTransferOrders = async (req, res) => {
   try {
     const actor = req.b2bActor;
-    const rows = await B2bStoreTransferOrder.find({ requestedBy: actor.id })
+    const scope = String(req.query?.scope || 'mine').toLowerCase() === 'store' ? 'store' : 'mine';
+    const filter = {};
+
+    if (scope === 'store') {
+      const selectedWarehouse = req.user?.selectedWarehouse ? String(req.user.selectedWarehouse) : '';
+      const userWarehouses = Array.isArray(req.user?.warehouse)
+        ? req.user.warehouse.map((w) => String(w))
+        : [];
+      const scopeWarehouseIds = selectedWarehouse ? [selectedWarehouse] : userWarehouses;
+
+      if (scopeWarehouseIds.length === 0) {
+        return res.status(200).json({ success: true, data: [] });
+      }
+      filter.destWarehouseId = { $in: scopeWarehouseIds };
+    } else {
+      filter.requestedBy = actor.id;
+    }
+
+    const rows = await B2bStoreTransferOrder.find(filter)
       .sort({ createdAt: -1 })
       .populate('vendorProductId', 'vendorModel title')
       .populate('skuId', 'sku price images')
       .populate('sourceWarehouseId', 'name')
       .populate('destWarehouseId', 'name')
+      .populate('requestedBy', 'username userId')
       .lean();
 
     return res.status(200).json({ success: true, data: rows });
@@ -201,7 +237,7 @@ const getStoreTransferOrder = async (req, res) => {
       .populate('skuId', 'sku price currency metalColor metalType size images attributes')
       .populate('sourceWarehouseId', 'name')
       .populate('destWarehouseId', 'name')
-      .populate('requestedBy', 'username email')
+      .populate('requestedBy', 'username userId')
       .lean();
 
     if (!order) return res.status(404).json({ success: false, message: 'Not found' });
@@ -483,7 +519,9 @@ const listStoreTransferChatMessages = async (req, res) => {
     const { id } = req.params;
     if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
 
-    const order = await B2bStoreTransferOrder.findById(id).select('requestedBy chatMessages status').lean();
+    const order = await B2bStoreTransferOrder.findById(id)
+      .select('requestedBy destWarehouseId chatMessages status')
+      .lean();
     if (!order) return res.status(404).json({ success: false, message: 'Not found' });
     if (!canAccessOrder(req, order)) {
       return res.status(403).json({ success: false, message: 'Access denied' });

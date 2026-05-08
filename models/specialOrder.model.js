@@ -83,7 +83,7 @@ const specialOrderSchema = new mongoose.Schema(
     notes: { type: String, default: '' },
     eta: { type: Date, default: null },
     chatMessages: { type: [spoChatMessageSchema], default: [] },
-    requestedBy: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    requestedBy: { type: mongoose.Schema.Types.ObjectId, required: true, index: true, refPath: 'requestedByModel', },
     requestedByModel: { type: String, enum: ['Customer', 'User'], required: true },
   },
   { timestamps: true }

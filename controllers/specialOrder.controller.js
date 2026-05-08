@@ -14,6 +14,31 @@ function getRequesterId(order) {
   return String(rb._id || rb);
 }
 
+function normalizeRefId(ref) {
+  if (ref == null) return '';
+  if (typeof ref === 'object' && ref._id != null) return String(ref._id);
+  return String(ref);
+}
+
+/** JWT-selected warehouse / store — same scope as GET /special-orders?view=store */
+function userSelectedWarehouseId(req) {
+  const w = req.user?.selectedWarehouse;
+  return normalizeRefId(w);
+}
+
+function orderStoreId(order) {
+  if (!order?.storeId) return '';
+  return normalizeRefId(order.storeId);
+}
+
+/** Same-store teammates can view / chat on orders for their warehouse (not only the requester). */
+function userSharesOrderStore(req, order) {
+  const wid = userSelectedWarehouseId(req);
+  const sid = orderStoreId(order);
+  if (!wid || !sid) return false;
+  return wid === sid;
+}
+
 /** Dashboard admins who may manage SPO without superuser flag */
 function isPrivilegedSpecialOrderAdmin(req) {
   if (!req.user) return false;
@@ -27,7 +52,9 @@ function isPrivilegedSpecialOrderAdmin(req) {
 function canAccessSpecialOrderDoc(req, order) {
   if (!order) return false;
   if (isPrivilegedSpecialOrderAdmin(req)) return true;
-  return getRequesterId(order) === String(req.user._id);
+  if (getRequesterId(order) === String(req.user._id)) return true;
+  if (userSharesOrderStore(req, order)) return true;
+  return false;
 }
 
 /**
@@ -183,14 +210,39 @@ const createSpecialOrder = async (req, res) => {
 const listMySpecialOrders = async (req, res) => {
   try {
     const userId = req.user._id;
-    const orders = await SpecialOrder.find({ requestedBy: userId })
-      .populate('storeId', 'name')
-      .sort({ createdAt: -1 })
-      .lean();
+    const selectedWarehouse = req.user.selectedWarehouse;
 
+    const view = String(req.query.view || 'mine').toLocaleLowerCase();
+    let filter ={};
+
+    if (view === 'store'){
+      if(!selectedWarehouse){
+        return res.status(400).json({
+          success: false,
+          message : "no warehouse assigned to this user",
+        });
+      }
+      filter = {
+        $or:[
+          {storeId: selectedWarehouse}
+        ],
+      };
+
+    } else {
+      filter = {
+        requestedBy: userId,
+      }
+    }
+
+    const orders = await SpecialOrder.find(filter)
+    .populate('storeId', 'name')
+    .populate('requestedBy', 'username email userId')
+    .sort({ createdAt: -1 })
+    .lean();
+    
     return res.status(200).json({
       success: true,
-      message: 'Special orders retrieved',
+      message: view === "store" ? 'Store special orders retrieved' :"My special orders retrieved",
       data: orders,
     });
   } catch (error) {
@@ -252,7 +304,7 @@ const getSpecialOrderById = async (req, res) => {
 
     const order = await SpecialOrder.findById(id)
       .populate('storeId', 'name')
-      .populate('requestedBy', 'username email phone_number')
+      .populate('requestedBy', 'username email userId')
       .lean();
 
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
@@ -333,7 +385,13 @@ const finalizeSpecialOrder = async (req, res) => {
     const order = await SpecialOrder.findById(id);
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    if (String(order.requestedBy) !== String(req.user._id)) {
+    const orderLean = order.toObject();
+    const canFinalize =
+      isPrivilegedSpecialOrderAdmin(req) ||
+      String(order.requestedBy) === String(req.user._id) ||
+      userSharesOrderStore(req, orderLean);
+
+    if (!canFinalize) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
@@ -373,7 +431,7 @@ const listSpoChatMessages = async (req, res) => {
 
     const order = await SpecialOrder.findById(id)
       .populate('requestedBy', 'username email')
-      .select('requestedBy chatMessages status')
+      .select('requestedBy storeId chatMessages status')
       .lean();
 
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });

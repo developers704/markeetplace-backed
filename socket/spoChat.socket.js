@@ -11,15 +11,28 @@ async function resolveUserFromToken(token) {
   const decoded = jwt.verify(token, process.env.JWT_SECRET);
   let user = await Customer.findById(decoded.id);
   if (!user) user = await User.findById(decoded.id);
-  return user ? user.toObject({ getters: true }) : null;
+  if (!user) return null;
+  const u = user.toObject({ getters: true });
+  if (decoded.warehouse != null) u.selectedWarehouse = decoded.warehouse;
+  return u;
+}
+
+function normId(ref) {
+  if (ref == null) return '';
+  if (typeof ref === 'object' && ref._id != null) return String(ref._id);
+  return String(ref);
 }
 
 async function canAccessSpoOrder(user, orderId) {
   if (!user?._id || !orderId) return false;
-  const order = await SpecialOrder.findById(orderId).select('requestedBy').lean();
+  const order = await SpecialOrder.findById(orderId).select('requestedBy storeId').lean();
   if (!order) return false;
   if (user.is_superuser) return true;
-  return String(order.requestedBy) === String(user._id);
+  if (String(order.requestedBy) === String(user._id)) return true;
+  const wid = normId(user.selectedWarehouse);
+  const sid = normId(order.storeId);
+  if (wid && sid && wid === sid) return true;
+  return false;
 }
 
 function emitSpoChatMessage(orderId, message) {

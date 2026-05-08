@@ -73,15 +73,25 @@ async function syncProductListing(productId, bumpCacheVersion = true) {
     if (bumpCacheVersion) await incrListingCacheVersion();
     return;
   }
+
+  const readSkuAttr = (s, key) => {
+    const attrs = s?.attributes;
+    if (!attrs) return '';
+    if (attrs instanceof Map) return attrs.get(key);
+    return attrs[key];
+  };
+
   const allSkuDescriptionNames = skus
-  .map((s) => {
-    if (s?.attributes instanceof Map) {
-      return s.attributes.get('descriptionname');
-    }
-    return s?.attributes?.descriptionname;
-  })
-  .filter(Boolean)
-  .join(' ');
+    .map((s) => readSkuAttr(s, 'descriptionname'))
+    .filter(Boolean)
+    .join(' ');
+
+  const allModelNos = skus
+    .map((s) => readSkuAttr(s, 'modelno'))
+    .filter(Boolean)
+    .map((v) => String(v).trim())
+    .filter(Boolean)
+    .join(' ');
 
   // Collect all SKU codes (optional but recommended)
   const allSkuCodes = skus
@@ -145,8 +155,9 @@ async function syncProductListing(productId, bumpCacheVersion = true) {
   vp.title,
   vp.brand,
   vp.vendorModel,
-  allSkuDescriptionNames,   // 👈 SKU description search
-  allSkuCodes               // 👈 SKU code search
+  allSkuDescriptionNames,
+  allSkuCodes,
+  allModelNos,
 ]
   .filter(Boolean)
   .join(' ');

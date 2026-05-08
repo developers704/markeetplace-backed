@@ -20,6 +20,15 @@ const MAX_B2B_PURCHASE_REPLY_PREVIEW = 88;
 
 const isObjectId = (value) => mongoose.isValidObjectId(String(value || '').trim());
 
+/** JWT-selected warehouse id (same shape as special-order / cart flows) */
+function selectedWarehouseObjectId(user) {
+  const sw = user?.selectedWarehouse;
+  if (!sw) return null;
+  const id = typeof sw === 'object' && sw._id != null ? sw._id : sw;
+  const s = String(id || '').trim();
+  return isObjectId(s) ? s : null;
+}
+
 const sumSkuInventory = async (skuId, warehouseId, session) => {
   if (!skuId || !warehouseId) return 0;
 
@@ -134,8 +143,8 @@ const resolveRequestedByDetails = async (requests) => {
   }
 
   const [customers, users] = await Promise.all([
-    customerIds.length ? Customer.find({ _id: { $in: customerIds } }).select('_id username email phone_number').lean() : [],
-    userIds.length ? User.find({ _id: { $in: userIds } }).select('_id username email phone_number').lean() : [],
+    customerIds.length ? Customer.find({ _id: { $in: customerIds } }).select('_id username email userId').lean() : [],
+    userIds.length ? User.find({ _id: { $in: userIds } }).select('_id username email userId').lean() : [],
   ]);
 
   const customerMap = new Map(customers.map((c) => [String(c._id), c]));
@@ -787,14 +796,17 @@ const getPurchaseStatus = async (req, res) => {
 /**
  * GET /api/v2/b2b/requests
  *
- * Role-based:
- * - DM: only PENDING_DM for assigned stores
- * - CM: only PENDING_CM for assigned stores
- * - Admin: default PENDING_ADMIN, but can request any status via ?status=
+ * view=my-orders:
+ *   - scope=mine (default): requestedBy = actor
+ *   - scope=store: storeWarehouseId = JWT selected warehouse
  *
- * Optional query:
- * - status=PENDING_DM,PENDING_CM,... (admin only)
- * - storeWarehouseId=<id> (admin only)
+ * view=approvals:
+ *   - DM: all requests where dmUserId = actor (any status unless ?status= narrows)
+ *   - CM: all requests where cmUserId = actor
+ *   - Admin: all requests (any status unless ?status=), optional storeWarehouseId
+ *
+ * Optional: status=PENDING_DM,PENDING_ADMIN,... (comma-separated)
+ * Optional (admin): storeWarehouseId=<id>
  */
 // const listPurchaseRequests = async (req, res) => {
 //   try {
@@ -870,8 +882,20 @@ const listPurchaseRequests = async (req, res) => {
     const filter = {};
 
     if (view === 'my-orders') {
-      // Any role can see own created orders
-      filter.requestedBy = actor.id;
+      const scope = String(req.query.scope || 'mine').toLowerCase().trim();
+      if (scope === 'store') {
+        const wid = selectedWarehouseObjectId(req.user);
+        if (!wid) {
+          return res.status(400).json({
+            success: false,
+            message: 'No warehouse selected. Choose a store warehouse to view store-wide orders.',
+          });
+        }
+        filter.storeWarehouseId = wid;
+      } else {
+        // mine — only orders this user created
+        filter.requestedBy = actor.id;
+      }
 
       if (statusList.length) {
         filter.status = { $in: statusList };
@@ -879,18 +903,22 @@ const listPurchaseRequests = async (req, res) => {
     } else {
       // Approval queue
       if (actor?.isSuperUser || role === 'admin') {
-        if (statusList.length) filter.status = { $in: statusList };
-        else filter.status = 'PENDING_ADMIN';
-
+        if (statusList.length) {
+          filter.status = { $in: statusList };
+        }
         if (req.query.storeWarehouseId && isObjectId(req.query.storeWarehouseId)) {
           filter.storeWarehouseId = req.query.storeWarehouseId;
         }
       } else if (role === 'district manager') {
-        filter.status = statusList.length ? { $in: statusList } : 'PENDING_DM';
         filter.dmUserId = actor.id;
+        if (statusList.length) {
+          filter.status = { $in: statusList };
+        }
       } else if (role === 'corporate manager') {
-        filter.status = statusList.length ? { $in: statusList } : 'PENDING_CM';
         filter.cmUserId = actor.id;
+        if (statusList.length) {
+          filter.status = { $in: statusList };
+        }
       } else {
         filter.requestedBy = actor.id;
 

@@ -9,7 +9,7 @@ const specialCategorySchema = new mongoose.Schema({
     },
     type: {
         type: String,
-        enum: ['inventory', 'supplies', 'packages-gws', 'marketing', 'tool finding'],
+        // enum: ['inventory', 'supplies', 'packages-gws', 'marketing', 'tool finding'],
         required: true
     },
     description: {
