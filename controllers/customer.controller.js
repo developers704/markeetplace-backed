@@ -11,6 +11,7 @@ const { Parser } = require('json2csv');
 const WarehouseWallet = require('../models/warehouseWallet.model');
 const warehouse = require('../models/warehouse.model');
 const SecuritySettings = require('../models/securitySettings.model');
+const UserRole = require('../models/userRole.model');
 
 
 const generateUniqueBarcode = async (phone_number) => {
@@ -495,11 +496,27 @@ const getAllCustomers = async (req, res) => {
 
 const getAllCustomersForStore = async (req, res) => {
   try {
-    const customers = await Customer.find()
-      .select('_id username') // sirf _id aur username
+    const dmCmRoles = await UserRole.find({
+      $or: [
+        { role_name: new RegExp('^district manager$', 'i') },
+        { role_name: new RegExp('^corporate manager$', 'i') },
+      ],
+    })
+      .select('_id')
+      .lean();
+
+    const roleIds = dmCmRoles.map((r) => r._id);
+    if (roleIds.length === 0) {
+      return res.status(200).json([]);
+    }
+
+    const filter = { role: { $in: roleIds } };
+
+    const customers = await Customer.find(filter)
+      .select('_id username')
       .populate({
         path: 'role',
-        select: 'role_name' // role ka sirf name
+        select: 'role_name',
       })
       .sort({ updatedAt: -1, createdAt: -1 });
 

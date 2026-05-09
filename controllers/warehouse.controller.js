@@ -151,6 +151,18 @@ const createWarehouse = async (req, res) => {
 const getAllWarehouses = async (req, res) => {
     try {
         const warehouses = await Warehouse.find()
+            .populate([
+                {
+                    path: 'districtManager',
+                    select: '_id username role',
+                    populate: { path: 'role', select: 'role_name' },
+                },
+                {
+                    path: 'corporateManager',
+                    select: '_id username role',
+                    populate: { path: 'role', select: 'role_name' },
+                },
+            ])
             .sort({ updatedAt: -1 })
             .lean(); // Using lean for better performance
 
@@ -206,7 +218,19 @@ const getAllWarehouses = async (req, res) => {
 
 const getWarehouseById = async (req, res) => {
     try {
-        const warehouse = await Warehouse.findById(req.params.id);
+        const warehouse = await Warehouse.findById(req.params.id)
+            .populate([
+                {
+                    path: 'districtManager',
+                    select: '_id username role',
+                    populate: { path: 'role', select: 'role_name' },
+                },
+                {
+                    path: 'corporateManager',
+                    select: '_id username role',
+                    populate: { path: 'role', select: 'role_name' },
+                },
+            ]);
         if (!warehouse) return res.status(404).json({ message: 'Warehouse not found' });
 
         // Get all wallet types for this warehouse
