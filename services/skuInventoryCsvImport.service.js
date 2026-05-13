@@ -21,6 +21,7 @@ const {
 const { patchImportJob } = require('./importJobProgress.service');
 const { rebuildInventoryRedisForSkuIds } = require('./inventoryRedis.service');
 const { syncProductListingsInChunks } = require('./productListingSync.service');
+const { enqueueProductListingSync } = require('../queues/productListingSync.queue');
 const skuInventoryBulkImportGuard = require('./skuInventoryBulkImportGuard');
 
 const isObjectIdLike = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || '').trim());
@@ -33,6 +34,8 @@ const normalizeName = (name) => {
 const FETCH_BATCH = 100;
 const WRITE_BATCH = Number(process.env.SKU_INVENTORY_WRITE_BATCH) || 500;
 const LISTING_SYNC_CONCURRENCY = Number(process.env.SKU_IMPORT_LISTING_SYNC_CONCURRENCY) || 80;
+const SKU_IMPORT_INLINE_LISTING_SYNC =
+  String(process.env.SKU_IMPORT_INLINE_LISTING_SYNC || 'false').toLowerCase() === 'true';
 
 async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw }) {
   const startedAt = Date.now();
@@ -399,7 +402,13 @@ async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw })
         ...new Set(uniqueRows.map((r) => (r.productId ? String(r.productId) : null)).filter(Boolean)),
       ];
       if (productIds.length > 0) {
-        await syncProductListingsInChunks(productIds, LISTING_SYNC_CONCURRENCY);
+        if (SKU_IMPORT_INLINE_LISTING_SYNC) {
+          await syncProductListingsInChunks(productIds, LISTING_SYNC_CONCURRENCY);
+        } else {
+          // Fast path: enqueue listing sync jobs and let dedicated worker process them.
+          // This keeps CSV import completion/error-report generation from waiting on listing rebuilds.
+          await enqueueProductListingSync(productIds);
+        }
       }
     } catch (postErr) {
       errors.push({ row: null, error: `Post-import Redis/listing: ${postErr.message}` });

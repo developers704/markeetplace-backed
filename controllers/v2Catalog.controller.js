@@ -27,7 +27,7 @@ const normalizeKey = (value) => String(value || '').trim().toUpperCase();
 const RESERVED_QUERY_KEYS = new Set([
   'page', 'limit', 'cursor', 'lastProductId', 'search', 'brand', 'category', 'subcategory', 'subsubcategory',
   'categoryId', 'subcategoryId', 'subsubcategoryId', 'minPrice', 'maxPrice', 'sort', 'srule', 'minQuantity',
-  'metalColor', 'metalType', 'size', 'stonetype', 'centerclarity',
+  'metalColor', 'metalType', 'size', 'stonetype', 'centerclarity', 'warehouseIds',
 ]);
 const ATTRIBUTE_SKIP_KEYS = ['featureimageslink', 'galleryimagelink', 'descriptionname', 'stonetype', 'centerclarity'];
 
@@ -50,6 +50,7 @@ function listingCacheKey(gen, params) {
     stonetype: (params?.stonetype || '').trim(),
     centerclarity: (params?.centerclarity || '').trim(),
     warehouseId: params?.warehouseId ? String(params.warehouseId) : '',
+    warehouseIds: (params?.warehouseIds || []).slice().sort().join(','),
     attr: params.attributeFilters ? JSON.stringify(Object.keys(params?.attributeFilters).sort().map((k) => [k, params?.attributeFilters[k]].sort())) : '',
   };
   const hash = crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex').slice(0, 24);
@@ -535,6 +536,9 @@ const listVendorProducts = async (req, res) => {
     const sizeRaw = req.query.size;
     const stonetypeRaw = req.query.stonetype;
     const centerclarityRaw = req.query.centerclarity;
+    const warehouseIdsRaw = req.query.warehouseIds;
+    const warehouseIds = parseMulti(warehouseIdsRaw)
+      .filter((id) => mongoose.Types.ObjectId.isValid(id));
     const attributeFilters = {};
     Object.keys(req.query || {}).forEach((key) => {
       if (RESERVED_QUERY_KEYS.has(key)) return;
@@ -580,6 +584,7 @@ const listVendorProducts = async (req, res) => {
       stonetype: stonetypeRaw ? String(stonetypeRaw).trim() : '',
       centerclarity: centerclarityRaw ? String(centerclarityRaw).trim() : '',
       warehouseId: selectedWarehouseId,
+      warehouseIds,
       attributeFilters,
     };
     const redis = getRedis();
@@ -629,6 +634,10 @@ async function buildListingPayload(query, context = {}) {
   const sizeRaw = query.size;
   const stonetypeRaw = query.stonetype;
   const centerclarityRaw = query.centerclarity;
+  const warehouseIdsRaw = query.warehouseIds;
+  const warehouseIds = parseMulti(warehouseIdsRaw)
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
   const attributeFilters = {};
   Object.keys(query || {}).forEach((key) => {
     if (RESERVED_QUERY_KEYS.has(key)) return;
@@ -724,6 +733,42 @@ const sortVp = {
     if (sizeRaw && String(sizeRaw).trim()) listingMatch.sizeKeys = { $in: [normalizeKey(sizeRaw)] };
     // if (sizeRaw && String(sizeRaw).trim()) listingMatch.sizeKeys = normalizeKey(sizeRaw);
     if (search) listingMatch.searchText = new RegExp(escapeRegex(search), 'i');
+
+    // ── Multi-warehouse filter: show only products that have inventory in any of the selected warehouses ──
+    if (warehouseIds.length > 0 && !isOwnInventorySort) {
+      const warehouseInvAgg = await SkuInventory.aggregate([
+        { $match: { warehouse: { $in: warehouseIds }, quantity: { $gt: 0 } } },
+        {
+          $lookup: {
+            from: 'skus',
+            localField: 'skuId',
+            foreignField: '_id',
+            as: 'skuDoc',
+          },
+        },
+        { $unwind: '$skuDoc' },
+        {
+          $group: {
+            _id: '$skuDoc.productId',
+            totalQty: { $sum: '$quantity' },
+          },
+        },
+        ...(minQuantity != null && minQuantity > 0
+          ? [{ $match: { totalQty: { $gte: minQuantity } } }]
+          : []),
+      ]);
+      const warehouseFilterProductIds = warehouseInvAgg
+        .map((row) => row?._id)
+        .filter((id) => mongoose.Types.ObjectId.isValid(id));
+      // Intersect with existing productId filter if already set (e.g. from isOwnInventory)
+      if (listingMatch.productId && listingMatch.productId.$in) {
+        const existingSet = new Set(listingMatch.productId.$in.map(String));
+        listingMatch.productId.$in = warehouseFilterProductIds.filter((id) => existingSet.has(String(id)));
+      } else {
+        listingMatch.productId = { $in: warehouseFilterProductIds };
+      }
+    }
+
     // if (stonetypeRaw && String(stonetypeRaw).trim()) listingMatch['defaultSku.attributes.stonetype'] = String(stonetypeRaw).trim();
     // if (centerclarityRaw && String(centerclarityRaw).trim()) listingMatch['defaultSku.attributes.centerclarity'] = String(centerclarityRaw).trim();
     if (stonetypeRaw && String(stonetypeRaw).trim()) {
@@ -763,7 +808,8 @@ const sortVp = {
     total = await ProductListing.countDocuments(listingMatch);
   }
 
-  if (productIds.length === 0 && sortRule !== 'ismain' && !isOwnInventorySort) {
+  // Skip fallback when warehouseIds filter is active — empty result = no products in those warehouses
+  if (productIds.length === 0 && sortRule !== 'ismain' && !isOwnInventorySort && warehouseIds.length === 0) {
     const match = {};
     if (brandKeys.length === 1) match.brand = new RegExp(`^${escapeRegex(brandKeys[0])}$`, 'i');
     else if (brandKeys.length > 1) match.brand = { $in: brandKeys.map((b) => new RegExp(`^${escapeRegex(b)}$`, 'i')) };
@@ -849,6 +895,9 @@ const sortVp = {
     } else if (isMainInventorySort) {
       const mainWarehouses = await Warehouse.find({ isMain: true }).select('_id').lean();
       scopedWarehouseIds = mainWarehouses.map((w) => w._id).filter(Boolean);
+    } else if (warehouseIds.length > 0) {
+      // Scope inventory totals + skuCount to only selected warehouses
+      scopedWarehouseIds = warehouseIds;
     }
 
     let totalInventoryByProduct = new Map();
@@ -942,6 +991,14 @@ const getVendorProductById = async (req, res) => {
     const isFilterMain = filterMain === 'true';
     const isFilterOwn = filterOwn === 'true';
     const selectedWarehouseId = isFilterOwn ? getSelectedWarehouseIdFromRequest(req) : null;
+
+    // Multi-warehouse filter: comma-separated warehouse IDs
+    const warehouseIdsRaw = req.query.warehouseIds;
+    const filterWarehouseIds = parseMulti(warehouseIdsRaw)
+      .filter((wid) => mongoose.Types.ObjectId.isValid(wid))
+      .map((wid) => new mongoose.Types.ObjectId(wid));
+    const isFilterWarehouse = filterWarehouseIds.length > 0;
+
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({ success: false, message: 'Invalid product id' });
     }
@@ -981,14 +1038,23 @@ const getVendorProductById = async (req, res) => {
     const mainWarehouseIds = isFilterMain
       ? (await Warehouse.find({ isMain: true }).select('_id').lean()).map((w) => w._id)
       : [];
+    // Determine the effective warehouse scope for inventory aggregation
+    const effectiveWarehouseFilter = (() => {
+      if (isFilterWarehouse) {
+        return { warehouse: { $in: filterWarehouseIds } };
+      }
+      if (isFilterMain) {
+        return { warehouse: { $in: mainWarehouseIds.length ? mainWarehouseIds : [new mongoose.Types.ObjectId()] } };
+      }
+      if (isFilterOwn) {
+        return { warehouse: { $in: selectedWarehouseId ? [selectedWarehouseId] : [new mongoose.Types.ObjectId()] } };
+      }
+      return {};
+    })();
+
     const inventoryMatch = {
       skuId: { $in: skuIds },
-      ...(isFilterMain
-        ? { warehouse: { $in: mainWarehouseIds.length ? mainWarehouseIds : [new mongoose.Types.ObjectId()] } }
-        : {}),
-      ...(isFilterOwn
-        ? { warehouse: { $in: selectedWarehouseId ? [selectedWarehouseId] : [new mongoose.Types.ObjectId()] } }
-        : {}),
+      ...effectiveWarehouseFilter,
     };
 
     const inventoryAgg = skuIds.length
@@ -1011,11 +1077,13 @@ const getVendorProductById = async (req, res) => {
           .lean()
       : [];
 
-    // Filter inventories if isFilterMain=true
-    if (isFilterMain) {
+    // Filter inventories to the scoped warehouses
+    if (isFilterWarehouse) {
+      const allowedSet = new Set(filterWarehouseIds.map(String));
+      inventories = inventories.filter((inv) => allowedSet.has(String(inv?.warehouse?._id || inv?.warehouse || '')));
+    } else if (isFilterMain) {
       inventories = inventories.filter(inv => inv.warehouse?.isMain);
-    }
-    if (isFilterOwn) {
+    } else if (isFilterOwn) {
       const selectedWarehouseString = selectedWarehouseId ? String(selectedWarehouseId) : '';
       inventories = inventories.filter((inv) => String(inv?.warehouse?._id || '') === selectedWarehouseString);
     }
@@ -1041,6 +1109,7 @@ const getVendorProductById = async (req, res) => {
       inventories: inventoriesBySku.get(skuIdStr) || [],
       };
     }).filter((s) => {
+      if (isFilterWarehouse && s.inventories.length === 0) return false;
       if (isFilterMain && s.inventories.length === 0) return false;
       if (isFilterOwn && s.inventories.length === 0) return false;
       return true;
@@ -1106,6 +1175,14 @@ const getSkuById = async (req, res) => {
     const isFilterMain = filterMain === 'true';
     const isFilterOwn = filterOwn === 'true';
     const selectedWarehouseId = isFilterOwn ? getSelectedWarehouseIdFromRequest(req) : null;
+
+    // Multi-warehouse filter
+    const skuWarehouseIdsRaw = req.query.warehouseIds;
+    const skuFilterWarehouseIds = parseMulti(skuWarehouseIdsRaw)
+      .filter((wid) => mongoose.Types.ObjectId.isValid(wid))
+      .map((wid) => new mongoose.Types.ObjectId(wid));
+    const isSkuFilterWarehouse = skuFilterWarehouseIds.length > 0;
+
     if (!mongoose.isValidObjectId(skuId)) {
       return res.status(400).json({ success: false, message: 'Invalid sku id' });
     }
@@ -1115,16 +1192,26 @@ const getSkuById = async (req, res) => {
       return res.status(404).json({ success: false, message: 'SKU not found' });
     }
 
-     let inventories = await SkuInventory.find({ skuId: sku._id })
+    // Build inventory match to fetch only relevant warehouse docs
+    const invFindMatch = { skuId: sku._id };
+    if (isSkuFilterWarehouse) {
+      invFindMatch.warehouse = { $in: skuFilterWarehouseIds };
+    } else if (isFilterOwn && selectedWarehouseId) {
+      invFindMatch.warehouse = selectedWarehouseId;
+    }
+
+    let inventories = await SkuInventory.find(invFindMatch)
       .populate('warehouse', 'name isMain')
       .populate('city', 'name')
       .lean();
 
-    // Filter inventories if isFilterMain=true
-    if (isFilterMain) {
+    // Filter inventories by scope
+    if (isSkuFilterWarehouse) {
+      const allowedSet = new Set(skuFilterWarehouseIds.map(String));
+      inventories = inventories.filter((inv) => allowedSet.has(String(inv?.warehouse?._id || inv?.warehouse || '')));
+    } else if (isFilterMain) {
       inventories = inventories.filter(inv => inv.warehouse?.isMain);
-    }
-    if (isFilterOwn) {
+    } else if (isFilterOwn) {
       const selectedWarehouseString = selectedWarehouseId ? String(selectedWarehouseId) : '';
       inventories = inventories.filter((inv) => String(inv?.warehouse?._id || '') === selectedWarehouseString);
     }

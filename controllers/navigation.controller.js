@@ -1977,6 +1977,14 @@ const updateContentProgress = async (req, res) => {
       contentProgress.completed = true;
     }
 
+    // ── FIX: non-video content (text / rich-text / other) has no minimum watch
+    // time requirement. Mark it completed as soon as the user visits it so that
+    // calculateOverallProgress can count it correctly. This covers courses that
+    // have only text content with no video or quiz.
+    if (content.contentType !== 'video' && !contentProgress.completed) {
+      contentProgress.completed = true;
+    }
+
     contentProgress.lastAccessedAt = new Date();
 
     // =======================
@@ -2100,71 +2108,89 @@ const updateContentProgress = async (req, res) => {
 // 🆕 HELPER FUNCTION: Calculate Overall Progress
 function calculateOverallProgress(course, enrollmentIndex) {
   const userEnrollment = course.enrolledUsers[enrollmentIndex];
-  
+
   console.log('=== CALCULATING PROGRESS ===');
-  
+
   let totalItems = 0;
   let completedItems = 0;
-  
-  // ✅ SAFETY CHECK: Ensure chapters array exists
+
   if (!Array.isArray(course.chapters)) {
     console.log('No chapters array found');
     return 0;
   }
-  
-  // Count ONLY content items (videos/text). Quizzes are grading, not progression.
+
   course.chapters.forEach((chapter) => {
-    // ✅ SAFETY CHECK: Ensure sections array exists
     if (!Array.isArray(chapter.sections)) {
       console.log(`Chapter ${chapter._id} has no sections array`);
       return;
     }
-    
+
     chapter.sections.forEach((section) => {
-      // ✅ SAFETY CHECK: Ensure content array exists
-      if (!Array.isArray(section.content)) {
-        console.log(`Section ${section._id} has no content array`);
-        return;
-      }
-      
-      section.content.forEach((content) => {
+      const hasContent = Array.isArray(section.content) && section.content.length > 0;
+      const hasQuiz = !!section.quiz;
+
+      // ── CASE 1: Section has NO content AND NO quiz ────────────────────────
+      // These sections are completed via manualCompleteSection.
+      // Count the whole section as 1 unit.
+      if (!hasContent && !hasQuiz) {
         totalItems++;
 
-        const chapterProgress = userEnrollment.chapterProgress?.find(
+        const chapterProg = userEnrollment.chapterProgress?.find(
           (cp) => cp?.chapterId?.toString() === chapter._id.toString()
         );
-        const sectionProgress = chapterProgress?.sectionProgress?.find(
+        const sectionProg = chapterProg?.sectionProgress?.find(
           (sp) => sp?.sectionId?.toString() === section._id.toString()
         );
-        const contentProgress = sectionProgress?.contentProgress?.find(
-          (cp) => cp?.contentId?.toString() === content._id.toString()
-        );
 
-        if (!contentProgress) return;
-
-        if (content.contentType === 'video') {
-          const minWatchTime = content.minimumWatchTime || 0;
-          // ✅ CRITICAL FIX: Check both watchedDuration AND completed flag for videos
-          const meetsWatchTime = (contentProgress.watchedDuration || 0) >= minWatchTime;
-          const isMarkedCompleted = contentProgress.completed === true;
-          if (meetsWatchTime && isMarkedCompleted) {
-            completedItems++;
-          }
-          return;
-        }
-
-        // text/other content types
-        if (contentProgress.completed === true) {
+        if (sectionProg?.completed === true || sectionProg?.manualCompleted === true) {
           completedItems++;
         }
-      });
+        return; // handled — skip content loop below
+      }
+
+      // ── CASE 2: Section HAS content items ────────────────────────────────
+      // Count each content item individually.
+      if (hasContent) {
+        section.content.forEach((content) => {
+          totalItems++;
+
+          const chapterProg = userEnrollment.chapterProgress?.find(
+            (cp) => cp?.chapterId?.toString() === chapter._id.toString()
+          );
+          const sectionProg = chapterProg?.sectionProgress?.find(
+            (sp) => sp?.sectionId?.toString() === section._id.toString()
+          );
+          const contentProg = sectionProg?.contentProgress?.find(
+            (cp) => cp?.contentId?.toString() === content._id.toString()
+          );
+
+          if (!contentProg) return;
+
+          if (content.contentType === 'video') {
+            const minWatchTime = content.minimumWatchTime || 0;
+            const meetsWatchTime = (contentProg.watchedDuration || 0) >= minWatchTime;
+            const isMarkedCompleted = contentProg.completed === true;
+            if (meetsWatchTime && isMarkedCompleted) {
+              completedItems++;
+            }
+            return;
+          }
+
+          // text / rich-text / other non-video content
+          if (contentProg.completed === true) {
+            completedItems++;
+          }
+        });
+      }
     });
   });
-  
-  const calculatedProgress = totalItems > 0 ? Math.round((completedItems / totalItems) * 100) : 0;
-  
+
+  const calculatedProgress = totalItems > 0
+    ? Math.round((completedItems / totalItems) * 100)
+    : 0;
+
   console.log(`Progress calculation: ${completedItems}/${totalItems} = ${calculatedProgress}%`);
-  
+
   return calculatedProgress;
 }
 
