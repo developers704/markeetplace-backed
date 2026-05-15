@@ -77,6 +77,7 @@ const speciaOrderRecevierRoutes = require('../routes/specialOrderReceiver.route'
 const dashboardRoutes = require('../routes/dashboard.route');
 const sheetCategoryRoutes = require('../routes/sheetCategory.route');
 const fileManagerRoutes = require('../routes/fileManager.route');
+const rapnetRoutes      = require('../routes/rapnet.route');
 
 const router = express.Router();
 
@@ -157,5 +158,6 @@ router.use('/spo-users', speciaOrderRecevierRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/sheets', sheetCategoryRoutes);
 router.use('/file-manager', fileManagerRoutes);
+router.use('/rapnet',       rapnetRoutes);
 
 module.exports = router;
