@@ -2,6 +2,10 @@ const mongoose = require('mongoose');
 const SpecialProduct = require('../models/specialProduct.model');
 const SuppliesCart = require('../models/suppliesCart.model');
 const SuppliesOrder = require('../models/suppliesOrder.model');
+const SuppliesWallet = require('../models/suppliesWallet.model');
+const WarehouseSuppliesInventory = require('../models/warehouseSuppliesInventory.model');
+const Warehouse = require('../models/warehouse.model');
+const Customer = require('../models/customer.model');
 const isObjectId = (value) => mongoose.isValidObjectId(String(value || '').trim());
 
 function ticketSupply() {
@@ -24,21 +28,102 @@ async function ensureCustomer(actor, res) {
   return actor.id;
 }
 
+/** Login / JWT selected warehouse for store customer */
+async function resolveCustomerWarehouseId(req) {
+  const selected = req.user?.selectedWarehouse;
+  if (selected && isObjectId(selected)) return String(selected);
+
+  const wh = req.user?.warehouse;
+  if (Array.isArray(wh) && wh.length > 0) {
+    const first = wh[0];
+    const id = first?._id || first;
+    if (isObjectId(id)) return String(id);
+  }
+
+  if (req.user?._id) {
+    const customer = await Customer.findById(req.user._id).select('warehouse').lean();
+    const list = customer?.warehouse || [];
+    if (list.length > 0) {
+      const id = list[0]?._id || list[0];
+      if (isObjectId(id)) return String(id);
+    }
+  }
+
+  return null;
+}
+
+async function getMainWarehouse(session) {
+  const q = Warehouse.findOne({ isMain: true }).select('_id name');
+  if (session) q.session(session);
+  return q.lean();
+}
+
+/** Admin catalog stock on SpecialProduct (supplies products only). */
+async function getCatalogStockQty(productId, session) {
+  const q = SpecialProduct.findById(productId).select('stock type');
+  if (session) q.session(session);
+  const product = await q.lean();
+  if (!product || String(product.type || '').toLowerCase() !== 'supplies') return 0;
+  return Number(product.stock ?? 0);
+}
+
+/** Deduct from SpecialProduct catalog stock on admin approval. */
+async function deductCatalogStock(productId, qty, session) {
+  const updated = await SpecialProduct.findOneAndUpdate(
+    { _id: productId, stock: { $gte: qty } },
+    { $inc: { stock: -qty } },
+    { new: true, session },
+  );
+  if (!updated) {
+    throw new Error('Insufficient supplies catalog stock');
+  }
+  return updated;
+}
+
+/** Add purchased qty to the store warehouse supplies inventory collection. */
+async function addToWarehouseSuppliesInventory(productId, qty, warehouseId, line, orderId, session) {
+  await WarehouseSuppliesInventory.findOneAndUpdate(
+    { warehouse: warehouseId, specialProductId: productId },
+    {
+      $inc: { quantity: qty },
+      $set: {
+        sku: line.sku || '',
+        productName: line.name || '',
+        image: line.image || '',
+        lastOrderId: orderId,
+      },
+    },
+    { upsert: true, new: true, session },
+  );
+}
+
 const getSuppliesCart = async (req, res) => {
   try {
     const actor = req.b2bActor;
     const customerId = await ensureCustomer(actor, res);
     if (!customerId) return;
 
+    const warehouseId = await resolveCustomerWarehouseId(req);
+
     let cart = await SuppliesCart.findOne({ customer: customerId })
       .populate('items.specialProductId', 'name sku image stock type prices')
+      .populate('warehouse', 'name isMain')
       .lean();
 
     if (!cart) {
-      const doc = await SuppliesCart.create({ customer: customerId, items: [], subtotal: 0 });
+      const doc = await SuppliesCart.create({
+        customer: customerId,
+        warehouse: warehouseId || null,
+        items: [],
+        subtotal: 0,
+      });
       cart = await SuppliesCart.findById(doc._id)
         .populate('items.specialProductId', 'name sku image stock type prices')
+        .populate('warehouse', 'name isMain')
         .lean();
+    } else if (warehouseId) {
+      await SuppliesCart.updateOne({ _id: cart._id }, { warehouse: warehouseId });
+      cart.warehouse = warehouseId;
     }
 
     return res.status(200).json({ success: true, data: cart });
@@ -71,16 +156,34 @@ const addSuppliesCartItem = async (req, res) => {
     if (String(product.type || '').toLowerCase() !== 'supplies') {
       return res.status(400).json({ success: false, message: 'Only supplies products can be added here' });
     }
-    const stock = Number(product.stock ?? 0);
+
+    const stock = await getCatalogStockQty(product._id);
     if (stock < qty) {
-      return res.status(400).json({ success: false, message: 'Insufficient stock' });
+      return res.status(400).json({ success: false, message: `Insufficient stock (available: ${stock})` });
     }
 
     const price = resolveUnitPrice(product);
     const currency = 'USD';
 
+    const warehouseId = await resolveCustomerWarehouseId(req);
+    if (!warehouseId) {
+      return res.status(400).json({
+        success: false,
+        message: 'No warehouse selected. Please select your store warehouse first.',
+      });
+    }
+
     let cart = await SuppliesCart.findOne({ customer: customerId });
-    if (!cart) cart = await SuppliesCart.create({ customer: customerId, items: [], subtotal: 0 });
+    if (!cart) {
+      cart = await SuppliesCart.create({
+        customer: customerId,
+        warehouse: warehouseId,
+        items: [],
+        subtotal: 0,
+      });
+    } else {
+      cart.warehouse = warehouseId;
+    }
 
     const idx = cart.items.findIndex((it) => String(it.specialProductId) === String(specialProductId));
     const image = product.image || '';
@@ -107,6 +210,7 @@ const addSuppliesCartItem = async (req, res) => {
 
     const populated = await SuppliesCart.findById(cart._id)
       .populate('items.specialProductId', 'name sku image stock type prices')
+      .populate('warehouse', 'name isMain')
       .lean();
 
     return res.status(200).json({ success: true, message: 'Added', data: populated });
@@ -135,8 +239,10 @@ const updateSuppliesCartItem = async (req, res) => {
     if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
 
     const product = await SpecialProduct.findById(item.specialProductId).select('stock prices').lean();
-    const stock = Number(product?.stock ?? 0);
-    if (stock < qty) return res.status(400).json({ success: false, message: 'Insufficient stock' });
+    const stock = await getCatalogStockQty(item.specialProductId);
+    if (stock < qty) {
+      return res.status(400).json({ success: false, message: `Insufficient stock (available: ${stock})` });
+    }
 
     item.quantity = qty;
     if (product && resolveUnitPrice(product) > 0) {
@@ -197,82 +303,130 @@ const clearSuppliesCart = async (req, res) => {
 };
 
 const placeSuppliesOrder = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const actor = req.b2bActor;
     const customerId = await ensureCustomer(actor, res);
-    if (!customerId) return;
+    if (!customerId) {
+      await session.abortTransaction();
+      return;
+    }
 
-    const cart = await SuppliesCart.findOne({ customer: customerId });
+    const warehouseId = await resolveCustomerWarehouseId(req);
+    if (!warehouseId) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'No warehouse selected. Please select your store warehouse first.',
+      });
+    }
+
+    const storeWarehouse = await Warehouse.findById(warehouseId).select('_id name isActive').lean();
+    if (!storeWarehouse) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: 'Store warehouse not found' });
+    }
+    if (storeWarehouse.isActive === false) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: 'Store warehouse is not active' });
+    }
+
+    const cart = await SuppliesCart.findOne({ customer: customerId }).session(session);
     if (!cart || !cart.items?.length) {
+      await session.abortTransaction();
       return res.status(400).json({ success: false, message: 'Supplies cart is empty' });
     }
 
-    const orderItems = [];
-    let total = 0;
-    let currency = 'USD';
+    cart.warehouse = warehouseId;
+
+    const ordersPayload = [];
 
     for (const line of cart.items) {
-      const product = await SpecialProduct.findById(line.specialProductId).select(
-        'name sku image stock type prices isActive status',
-      );
+      const product = await SpecialProduct.findById(line.specialProductId)
+        .select('name sku image stock type prices isActive status')
+        .session(session);
+
       if (!product || product.isActive === false || String(product.type || '').toLowerCase() !== 'supplies') {
+        await session.abortTransaction();
         return res.status(400).json({ success: false, message: 'A product in your cart is no longer available' });
       }
-      const stock = Number(product.stock ?? 0);
+
+      const stock = await getCatalogStockQty(product._id, session);
       if (stock < line.quantity) {
+        await session.abortTransaction();
         return res.status(400).json({
           success: false,
-          message: `Insufficient stock for ${product.name || 'item'}`,
+          message: `Insufficient stock for ${product.name || 'item'} (available: ${stock})`,
         });
       }
+
       const unit = resolveUnitPrice(product);
       const lineTotal = unit * line.quantity;
-      total += lineTotal;
-      orderItems.push({
-        specialProductId: product._id,
-        name: product.name || line.productName || '',
-        sku: product.sku || line.sku || '',
-        quantity: line.quantity,
-        unitPrice: unit,
-        currency: line.currency || 'USD',
-        image: product.image || line.image || '',
-      });
-      currency = line.currency || currency;
-    }
+      const currency = line.currency || 'USD';
 
-    let ticket = ticketSupply();
-    let exists = await SuppliesOrder.findOne({ ticketNumber: ticket });
-    while (exists) {
-      ticket = ticketSupply();
+      let ticket = ticketSupply();
       /* eslint-disable-next-line no-await-in-loop */
-      exists = await SuppliesOrder.findOne({ ticketNumber: ticket });
+      let exists = await SuppliesOrder.findOne({ ticketNumber: ticket }).session(session);
+      while (exists) {
+        ticket = ticketSupply();
+        /* eslint-disable-next-line no-await-in-loop */
+        exists = await SuppliesOrder.findOne({ ticketNumber: ticket }).session(session);
+      }
+
+      ordersPayload.push({
+        ticketNumber: ticket,
+        customer: customerId,
+        warehouse: warehouseId,
+        requestedByModel: 'Customer',
+        items: [
+          {
+            specialProductId: product._id,
+            name: product.name || line.productName || '',
+            sku: product.sku || line.sku || '',
+            quantity: line.quantity,
+            unitPrice: unit,
+            currency,
+            image: product.image || line.image || '',
+          },
+        ],
+        totalAmount: lineTotal,
+        currency,
+        status: 'PENDING_ADMIN',
+      });
     }
 
-    const order = await SuppliesOrder.create({
-      ticketNumber: ticket,
-      customer: customerId,
-      requestedByModel: 'Customer',
-      items: orderItems,
-      totalAmount: total,
-      currency,
-      status: 'PENDING_ADMIN',
-    });
+    const created = await SuppliesOrder.insertMany(ordersPayload, { session });
 
     cart.items = [];
     cart.subtotal = 0;
-    await cart.save();
+    await cart.save({ session });
 
-    const populated = await SuppliesOrder.findById(order._id)
+    await session.commitTransaction();
+
+    const ids = created.map((o) => o._id);
+    const populated = await SuppliesOrder.find({ _id: { $in: ids } })
       .populate('customer', 'username email phone_number')
+      .populate('warehouse', 'name isMain')
+      .sort({ createdAt: 1 })
       .lean();
 
+    const n = populated.length;
     return res.status(201).json({
       success: true,
-      message: 'Supplies order submitted for approval',
+      message:
+        n === 1
+          ? 'Supplies order submitted for approval'
+          : `${n} supplies orders submitted for approval (one per item)`,
       data: populated,
+      orderCount: n,
     });
   } catch (error) {
+    await session.abortTransaction();
     return res.status(500).json({ success: false, message: error.message });
+  } finally {
+    session.endSession();
   }
 };
 
@@ -284,6 +438,7 @@ const listMySuppliesOrders = async (req, res) => {
 
     const rows = await SuppliesOrder.find({ customer: customerId })
       .sort({ createdAt: -1 })
+      .populate('warehouse', 'name isMain')
       .lean();
 
     return res.status(200).json({ success: true, data: rows });
@@ -310,6 +465,7 @@ const adminListSuppliesOrders = async (req, res) => {
     const rows = await SuppliesOrder.find(filter)
       .sort({ createdAt: -1 })
       .populate('customer', 'username email phone_number')
+      .populate('warehouse', 'name isMain')
       .lean();
 
     return res.status(200).json({ success: true, data: rows });
@@ -318,7 +474,7 @@ const adminListSuppliesOrders = async (req, res) => {
   }
 };
 
-const adminApproveSuppliesOrder = async (req, res) => {
+const adminGetSuppliesOrder = async (req, res) => {
   try {
     const role = String(req.b2bActor?.roleName || '').toLowerCase().trim();
     const isAdmin =
@@ -332,20 +488,159 @@ const adminApproveSuppliesOrder = async (req, res) => {
     const { id } = req.params;
     if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
 
-    const order = await SuppliesOrder.findById(id);
+    const order = await SuppliesOrder.findById(id)
+      .populate('customer', 'username email phone_number')
+      .populate('warehouse', 'name isMain')
+      .lean();
+
     if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+
+    return res.status(200).json({ success: true, data: order });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const adminApproveSuppliesOrder = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const role = String(req.b2bActor?.roleName || '').toLowerCase().trim();
+    const isAdmin =
+      !!req.b2bActor?.isSuperUser ||
+      !!req.user?.is_superuser ||
+      role === 'admin' ||
+      role === 'super admin' ||
+      role === 'superuser';
+    if (!isAdmin) {
+      await session.abortTransaction();
+      return res.status(403).json({ success: false, message: 'Admin only' });
+    }
+
+    const { id } = req.params;
+    if (!isObjectId(id)) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: 'Invalid id' });
+    }
+
+    const order = await SuppliesOrder.findById(id).session(session);
+    if (!order) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: 'Not found' });
+    }
     if (order.status !== 'PENDING_ADMIN') {
+      await session.abortTransaction();
       return res.status(400).json({ success: false, message: 'Order cannot be approved in current status' });
     }
 
-    order.status = 'APPROVED';
-    order.approvedAt = new Date();
-    await order.save();
+    const customerWarehouseId = order.warehouse;
+    if (!customerWarehouseId || !isObjectId(String(customerWarehouseId))) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Order is missing store warehouse. Customer must re-place the order.',
+      });
+    }
 
-    const populated = await SuppliesOrder.findById(order._id).populate('customer', 'username email').lean();
-    return res.status(200).json({ success: true, data: populated });
+    const mainWarehouse = await getMainWarehouse(session);
+    if (!mainWarehouse) {
+      await session.abortTransaction();
+      return res.status(500).json({ success: false, message: 'Main warehouse is not configured' });
+    }
+
+    const totalAmount = Number(order.totalAmount ?? 0);
+    if (totalAmount <= 0) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: 'Invalid order total' });
+    }
+
+    for (const line of order.items) {
+      const product = await SpecialProduct.findById(line.specialProductId)
+        .select('name sku stock type isActive status')
+        .session(session);
+
+      if (!product || product.isActive === false || String(product.type || '').toLowerCase() !== 'supplies') {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `Product ${line.name || line.sku || 'item'} is no longer available`,
+        });
+      }
+
+      const available = await getCatalogStockQty(product._id, session);
+      if (available < line.quantity) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient supplies stock for ${product.name || line.name} (available: ${available}, requested: ${line.quantity})`,
+        });
+      }
+    }
+
+    const customerWallet = await SuppliesWallet.findOne({ warehouse: customerWarehouseId }).session(session);
+    if (!customerWallet) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Supplies wallet not found for customer warehouse',
+      });
+    }
+    if (customerWallet.balance < totalAmount) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient supplies wallet balance. Available: ${customerWallet.balance}, Required: ${totalAmount}`,
+      });
+    }
+
+    let mainWallet = await SuppliesWallet.findOne({ warehouse: mainWarehouse._id }).session(session);
+    if (!mainWallet) {
+      mainWallet = new SuppliesWallet({ warehouse: mainWarehouse._id, balance: 0 });
+    }
+
+    const now = new Date();
+    customerWallet.balance -= totalAmount;
+    customerWallet.lastTransaction = now;
+    await customerWallet.save({ session });
+
+    mainWallet.balance += totalAmount;
+    mainWallet.lastTransaction = now;
+    await mainWallet.save({ session });
+
+    for (const line of order.items) {
+      await deductCatalogStock(line.specialProductId, line.quantity, session);
+      await addToWarehouseSuppliesInventory(
+        line.specialProductId,
+        line.quantity,
+        customerWarehouseId,
+        line,
+        order._id,
+        session,
+      );
+    }
+
+    order.status = 'APPROVED';
+    order.approvedAt = now;
+    await order.save({ session });
+
+    await session.commitTransaction();
+
+    const populated = await SuppliesOrder.findById(order._id)
+      .populate('customer', 'username email phone_number')
+      .populate('warehouse', 'name isMain')
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Supplies order approved. Wallet transferred, catalog stock deducted, warehouse supplies inventory updated.',
+      data: populated,
+    });
   } catch (error) {
+    await session.abortTransaction();
     return res.status(500).json({ success: false, message: error.message });
+  } finally {
+    session.endSession();
   }
 };
 
@@ -374,7 +669,10 @@ const adminRejectSuppliesOrder = async (req, res) => {
     order.rejection = { reason, rejectedAt: new Date() };
     await order.save();
 
-    const populated = await SuppliesOrder.findById(order._id).populate('customer', 'username email').lean();
+    const populated = await SuppliesOrder.findById(order._id)
+      .populate('customer', 'username email phone_number')
+      .populate('warehouse', 'name isMain')
+      .lean();
     return res.status(200).json({ success: true, data: populated });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
@@ -390,6 +688,7 @@ module.exports = {
   placeSuppliesOrder,
   listMySuppliesOrders,
   adminListSuppliesOrders,
+  adminGetSuppliesOrder,
   adminApproveSuppliesOrder,
   adminRejectSuppliesOrder,
 };

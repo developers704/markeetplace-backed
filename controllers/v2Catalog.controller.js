@@ -672,6 +672,8 @@ const sortVp = {
   'best-sellers': { /* can't use totalInventory here, optional */ createdAt: -1, _id: 1 },
   'featured': { updatedAt: -1, _id: 1 },
   'ismain': {_id : 1},
+  'sku-newest': { 'defaultSku.sku': -1, _id: 1 },
+  'sku-oldest': { 'defaultSku.sku': 1, _id: 1 },
 }[sortRule] || { updatedAt: -1, _id: 1 };
   // const sort = sortOpts[sortRule] || sortOpts['featured'];
 

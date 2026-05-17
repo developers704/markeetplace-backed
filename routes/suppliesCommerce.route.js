@@ -11,6 +11,7 @@ const {
   placeSuppliesOrder,
   listMySuppliesOrders,
   adminListSuppliesOrders,
+  adminGetSuppliesOrder,
   adminApproveSuppliesOrder,
   adminRejectSuppliesOrder,
 } = require('../controllers/suppliesCommerce.controller');
@@ -25,6 +26,7 @@ router.post('/orders/place', authMiddleware, attachRoleContext, placeSuppliesOrd
 router.get('/orders/mine', authMiddleware, attachRoleContext, listMySuppliesOrders);
 
 router.get('/orders/admin', authMiddleware, attachRoleContext, adminListSuppliesOrders);
+router.get('/orders/admin/:id', authMiddleware, attachRoleContext, adminGetSuppliesOrder);
 router.patch('/orders/admin/:id/approve', authMiddleware, attachRoleContext, adminApproveSuppliesOrder);
 router.patch('/orders/admin/:id/reject', authMiddleware, attachRoleContext, adminRejectSuppliesOrder);
 

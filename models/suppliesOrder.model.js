@@ -26,6 +26,12 @@ const suppliesOrderSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    warehouse: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Warehouse',
+      required: true,
+      index: true,
+    },
     requestedByModel: { type: String, enum: ['Customer'], default: 'Customer' },
     items: { type: [suppliesOrderItemSchema], default: [] },
     totalAmount: { type: Number, default: 0, min: 0 },

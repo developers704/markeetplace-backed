@@ -40,6 +40,27 @@ const createNotification = async (customerId, content, reviewId) => {
       res.status(500).json({ message: 'Error marking notification as read', error: error.message });
     }
   };
+
+  const markAllNotificationsAsRead = async (req, res) => {
+    try {
+      const userId = req.user._id;
+      const result = await Notification.updateMany(
+        { user: userId, read: false },
+        { $set: { read: true } }
+      );
+      return res.json({
+        success: true,
+        modifiedCount: result.modifiedCount ?? 0,
+        matchedCount: result.matchedCount ?? 0,
+      });
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: 'Error marking all notifications as read',
+        error: error.message,
+      });
+    }
+  };
   
  // Fetch notifications for the logged-in user
 const getNotifications = async (req, res) => {
@@ -71,4 +92,4 @@ cron.schedule('0 0 * * *', async () => {
   }
 });
 
-  module.exports = { createNotification, markNotificationAsRead, getNotifications };
+  module.exports = { createNotification, markNotificationAsRead, markAllNotificationsAsRead, getNotifications };

@@ -26,6 +26,12 @@ const suppliesCartSchema = new mongoose.Schema(
       unique: true,
       index: true,
     },
+    warehouse: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Warehouse',
+      default: null,
+      index: true,
+    },
     items: { type: [suppliesCartItemSchema], default: [] },
     subtotal: { type: Number, default: 0, min: 0 },
   },
