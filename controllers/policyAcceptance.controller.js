@@ -3,8 +3,222 @@ const Policy = require('../models/policy.model.js');
 const Customer = require('../models/customer.model.js');
 const path = require('path');
 const fs = require('fs');
+const { Parser } = require('json2csv');
 const { saveFileToDisk }  = require('../config/policyMulter.js');
 const Warehouse = require('../models/warehouse.model.js');
+
+function stripHtml(html) {
+    if (!html) return '';
+    return String(html)
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function getPublicBaseUrl(req) {
+    const fromEnv = process.env.PUBLIC_BASE_URL || process.env.BASE_API;
+    if (fromEnv) return String(fromEnv).replace(/\/$/, '');
+    return `${req.protocol}://${req.get('host')}`;
+}
+
+function toMediaUrl(req, pathValue) {
+    if (!pathValue) return '';
+    const s = String(pathValue);
+    if (s.startsWith('http://') || s.startsWith('https://')) return s;
+    if (s.startsWith('/')) return `${getPublicBaseUrl(req)}${s}`;
+    if (s.startsWith('uploads/')) return `${getPublicBaseUrl(req)}/${s}`;
+    return `${getPublicBaseUrl(req)}/uploads/${s}`;
+}
+
+async function buildPolicyAcceptanceFilter(query) {
+    const { policyId, customerId, fromDate, toDate, warehouse, department, search } = query || {};
+    const filter = {};
+
+    if (policyId) filter.policy = policyId;
+    if (customerId) filter.customer = customerId;
+    if (warehouse) filter.warehouse = warehouse;
+
+    const searchQ = search && String(search).trim() ? String(search).trim() : '';
+    if (department || searchQ) {
+        const customerFilter = {};
+        if (department) customerFilter.department = department;
+        if (searchQ) {
+            customerFilter.$or = [
+                { username: { $regex: searchQ, $options: 'i' } },
+                { email: { $regex: searchQ, $options: 'i' } },
+                { phone_number: { $regex: searchQ, $options: 'i' } },
+            ];
+        }
+        const customerIds = await Customer.find(customerFilter).distinct('_id');
+        const orConditions = [];
+        if (customerIds.length) {
+            orConditions.push({ customer: { $in: customerIds } });
+        }
+        if (searchQ) {
+            const policyIds = await Policy.find({ title: { $regex: searchQ, $options: 'i' } }).distinct('_id');
+            if (policyIds.length) {
+                orConditions.push({ policy: { $in: policyIds } });
+            }
+        }
+        if (!orConditions.length) {
+            return { filter: null, empty: true };
+        }
+        filter.$or = orConditions;
+    }
+
+    if (fromDate || toDate) {
+        filter.acceptedAt = {};
+        if (fromDate) filter.acceptedAt.$gte = new Date(fromDate);
+        if (toDate) filter.acceptedAt.$lte = new Date(toDate);
+    }
+
+    return { filter, empty: false };
+}
+
+const acceptancePopulate = [
+    {
+        path: 'customer',
+        select: 'username email phone_number role department',
+        populate: [
+            { path: 'role', model: 'UserRole', select: 'role_name permissions' },
+            { path: 'warehouse', select: 'name location address' },
+            { path: 'department', select: 'name description' },
+        ],
+    },
+    { path: 'warehouse', select: 'name location address' },
+    {
+        path: 'policy',
+        select: 'title version content isActive showFirst sequence applicableRoles applicableWarehouses picture',
+        populate: [
+            { path: 'applicableRoles', model: 'UserRole', select: 'role_name permissions' },
+            { path: 'applicableWarehouses', select: 'name location address' },
+        ],
+    },
+];
+
+function formatAcceptanceRecord(data, req) {
+    const documentPath = data.signedDocumentPath
+        ? (String(data.signedDocumentPath).startsWith('/')
+            ? data.signedDocumentPath
+            : `/uploads/${data.signedDocumentPath}`)
+        : null;
+    const photoRel = data.photoPath
+        ? (String(data.photoPath).startsWith('/')
+            ? data.photoPath
+            : `/uploads/${data.photoPath}`)
+        : null;
+
+    return {
+        id: data._id,
+        warehouse: data.warehouse
+            ? {
+                id: data.warehouse._id,
+                name: data.warehouse.name,
+                location: data.warehouse.location,
+                address: data.warehouse.address,
+            }
+            : null,
+        customer: data.customer
+            ? {
+                id: data.customer._id,
+                username: data.customer.username,
+                email: data.customer.email,
+                phone_number: data.customer.phone_number,
+                role: data.customer.role
+                    ? {
+                        id: data.customer.role._id,
+                        name: data.customer.role.role_name,
+                        permissions: data.customer.role.permissions,
+                    }
+                    : null,
+                warehouse: data.customer.warehouse
+                    ? {
+                        id: data.customer.warehouse._id,
+                        name: data.customer.warehouse.name,
+                        location: data.customer.warehouse.location,
+                        address: data.customer.warehouse.address,
+                    }
+                    : null,
+                department: data.customer.department
+                    ? {
+                        id: data.customer.department._id,
+                        name: data.customer.department.name,
+                        description: data.customer.department.description,
+                    }
+                    : null,
+            }
+            : null,
+        policy: data.policy
+            ? {
+                id: data.policy._id,
+                title: data.policy.title,
+                version: data.policy.version,
+                content: data.policy.content,
+                isActive: data.policy.isActive,
+                showFirst: data.policy.showFirst,
+                sequence: data.policy.sequence,
+                picture: data.policy.picture,
+                applicableRoles: (data.policy.applicableRoles || []).map((role) => ({
+                    id: role._id,
+                    name: role.role_name,
+                    permissions: role.permissions,
+                })),
+                applicableWarehouses: (data.policy.applicableWarehouses || []).map((wh) => ({
+                    id: wh._id,
+                    name: wh.name,
+                    location: wh.location,
+                    address: wh.address,
+                })),
+            }
+            : null,
+        acceptedAt: data.acceptedAt,
+        policyVersion: data.policyVersion,
+        policySnapshot: data.policySnapshot,
+        ipAddress: data.ipAddress,
+        userAgent: data.userAgent,
+        documentUrl: documentPath,
+        photoPath: photoRel,
+        signatureData: data.signatureData ? 'Available' : 'Not Available',
+    };
+}
+
+function acceptanceToCsvRow(record, req) {
+    const c = record.customer;
+    const p = record.policy;
+    const wh = record.warehouse;
+    const custWh = c?.warehouse;
+
+    return {
+        'Acceptance ID': String(record.id || ''),
+        'Customer Username': c?.username || '',
+        'Customer Email': c?.email || '',
+        'Customer Phone': c?.phone_number || '',
+        'Customer Role': c?.role?.name || '',
+        'Customer Department': c?.department?.name || '',
+        'Customer Store': custWh?.name || '',
+        'Customer Store Location': custWh?.location || '',
+        'Acceptance Store': wh?.name || '',
+        'Acceptance Store Location': wh?.location || '',
+        'Policy Title': p?.title || '',
+        'Policy Version': p?.version ?? record.policyVersion ?? '',
+        'Policy Picture URL': toMediaUrl(req, p?.picture),
+        'Accepted At': record.acceptedAt ? new Date(record.acceptedAt).toISOString() : '',
+        'Policy Version At Acceptance': record.policyVersion || '',
+        'IP Address': record.ipAddress || '',
+        'User Agent': record.userAgent || '',
+        'Signed Document URL': toMediaUrl(req, record.documentUrl),
+        'Employee Photo URL': toMediaUrl(req, record.photoPath),
+        'Signature': record.signatureData || '',
+        'Policy Content': stripHtml(p?.content),
+        'Policy Snapshot': stripHtml(record.policySnapshot),
+        'Applicable Roles': (p?.applicableRoles || []).map((r) => r.name).filter(Boolean).join('; '),
+        'Applicable Stores': (p?.applicableWarehouses || []).map((w) => w.name).filter(Boolean).join('; '),
+    };
+}
 
 
 const acceptPolicy = async (req, res) => {
@@ -620,6 +834,66 @@ const getPolicyAcceptanceStats = async (req, res) => {
     }
 };
 
+/** GET /api/policy-acceptance/export/csv — all matching rows (respects list filters) */
+const exportPolicyAcceptancesToCSV = async (req, res) => {
+    try {
+        const { filter, empty } = await buildPolicyAcceptanceFilter(req.query);
+
+        let acceptances = [];
+        if (!empty && filter) {
+            acceptances = await PolicyAcceptance.find(filter)
+                .populate(acceptancePopulate)
+                .sort({ acceptedAt: -1 })
+                .lean();
+        }
+
+        const formatted = acceptances.map((row) => formatAcceptanceRecord(row, req));
+        const csvRows = formatted.map((row) => acceptanceToCsvRow(row, req));
+
+        const fields = [
+            'Acceptance ID',
+            'Customer Username',
+            'Customer Email',
+            'Customer Phone',
+            'Customer Role',
+            'Customer Department',
+            'Customer Store',
+            'Customer Store Location',
+            'Acceptance Store',
+            'Acceptance Store Location',
+            'Policy Title',
+            'Policy Version',
+            'Policy Picture URL',
+            'Accepted At',
+            'Policy Version At Acceptance',
+            'IP Address',
+            'User Agent',
+            'Signed Document URL',
+            'Employee Photo URL',
+            'Signature',
+            'Policy Content',
+            'Policy Snapshot',
+            'Applicable Roles',
+            'Applicable Stores',
+        ];
+
+        const parser = new Parser({ fields });
+        const csv = parser.parse(csvRows.length ? csvRows : [{}]);
+
+        const stamp = new Date().toISOString().slice(0, 10);
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename=policy-acceptances-${stamp}.csv`);
+        return res.status(200).send('\uFEFF' + csv);
+    } catch (error) {
+        console.error('Error exporting policy acceptances:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to export policy acceptances',
+            error: error.message,
+        });
+    }
+};
+
 
         
 
@@ -631,7 +905,8 @@ module.exports = {
     getbyCustomerAcceptedPolicy,
     getAcceptancesByPolicy,
     getAllPolicyAcceptances,
-    getPolicyAcceptanceStats
+    getPolicyAcceptanceStats,
+    exportPolicyAcceptancesToCSV,
 }
 
 

@@ -12,6 +12,9 @@ router.post('/accept', authMiddleware, uploadMultiple, controller.acceptPolicy);
 // get all acceptances
 router.get('/', authMiddleware, controller.getAllPolicyAcceptances);
 
+// export all acceptances (CSV) — must be before /:policyId
+router.get('/export/csv', authMiddleware, controller.exportPolicyAcceptancesToCSV);
+
 // get acceptance statistics
 router.get('/stats', authMiddleware, controller.getPolicyAcceptanceStats);
 
