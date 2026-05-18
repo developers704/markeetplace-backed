@@ -5898,6 +5898,8 @@ const getAllUsersProgress = async (req, res) => {
       courseId,
       status,
       search,
+      warehouse,
+      department,
       sortBy = 'enrollmentDate',
       sortOrder = 'desc'
     } = req.query;
@@ -6068,6 +6070,19 @@ const getAllUsersProgress = async (req, res) => {
 
     console.log(`Processed ${processedUsers.length} users with enrollments`);
 
+    if (warehouse && mongoose.Types.ObjectId.isValid(warehouse)) {
+      const wh = String(warehouse);
+      processedUsers = processedUsers.filter(
+        (u) => u.warehouse?._id && String(u.warehouse._id) === wh,
+      );
+    }
+    if (department && mongoose.Types.ObjectId.isValid(department)) {
+      const dept = String(department);
+      processedUsers = processedUsers.filter(
+        (u) => u.department?._id && String(u.department._id) === dept,
+      );
+    }
+
     // Sort users (same logic)
     processedUsers.sort((a, b) => {
       let aValue, bValue;
@@ -6136,6 +6151,8 @@ const getAllUsersProgress = async (req, res) => {
           courseId: courseId || null,
           status: status || null,
           search: search || null,
+          warehouse: warehouse || null,
+          department: department || null,
           sortBy,
           sortOrder
         }
