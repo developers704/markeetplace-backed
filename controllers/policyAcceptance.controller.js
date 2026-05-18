@@ -342,12 +342,14 @@ const getAcceptancesByPolicy = async (req, res) => {
 const getAllPolicyAcceptances = async (req, res) => {
     try {
         // Pagination parameters
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 10;
-        const skip = (page - 1) * limit;
+        const page = parseInt(req.query.page, 10) || 1;
+        const limit = parseInt(req.query.limit, 10) || 15;
         
+        const pageNum = Math.max(1, page);
+        const limitNum = Math.min(100, Math.max(1, limit));
+
         // Filtering parameters
-        const { policyId, customerId, fromDate, toDate } = req.query;
+        const { policyId, customerId, fromDate, toDate, warehouse, department, search } = req.query;
         
         // Build filter object
         const filter = {};
@@ -358,6 +360,53 @@ const getAllPolicyAcceptances = async (req, res) => {
         
         if (customerId) {
             filter.customer = customerId;
+        }
+
+        if (warehouse) {
+            filter.warehouse = warehouse;
+        }
+
+        const searchQ = search && String(search).trim() ? String(search).trim() : '';
+        if (department || searchQ) {
+            const Customer = require('../models/customer.model');
+            const Policy = require('../models/policy.model');
+            const orConditions = [];
+
+            const customerFilter = {};
+            if (department) customerFilter.department = department;
+            if (searchQ) {
+                customerFilter.$or = [
+                    { username: { $regex: searchQ, $options: 'i' } },
+                    { email: { $regex: searchQ, $options: 'i' } },
+                    { phone_number: { $regex: searchQ, $options: 'i' } },
+                ];
+            }
+            const customerIds = await Customer.find(customerFilter).distinct('_id');
+            if (customerIds.length) {
+                orConditions.push({ customer: { $in: customerIds } });
+            }
+
+            if (searchQ) {
+                const policyIds = await Policy.find({ title: { $regex: searchQ, $options: 'i' } }).distinct('_id');
+                if (policyIds.length) {
+                    orConditions.push({ policy: { $in: policyIds } });
+                }
+            }
+
+            if (!orConditions.length) {
+                return res.status(200).json({
+                    success: true,
+                    message: 'Policy acceptances retrieved successfully',
+                    totalCount: 0,
+                    totalPages: 0,
+                    currentPage: pageNum,
+                    limit: limitNum,
+                    hasNextPage: false,
+                    acceptances: [],
+                });
+            }
+
+            filter.$or = orConditions;
         }
         
         // Date range filter
@@ -373,6 +422,8 @@ const getAllPolicyAcceptances = async (req, res) => {
             }
         }
         
+        const skip = (pageNum - 1) * limitNum;
+
         // Get total count for pagination
         const totalCount = await PolicyAcceptance.countDocuments(filter);
         
@@ -417,7 +468,7 @@ const getAllPolicyAcceptances = async (req, res) => {
             })
             .sort({ acceptedAt: -1 })
             .skip(skip)
-            .limit(limit);
+            .limit(limitNum);
         
         // Format the response
         const formattedAcceptances = acceptances.map(acceptance => {
@@ -488,8 +539,10 @@ const getAllPolicyAcceptances = async (req, res) => {
             success: true,
             message: 'Policy acceptances retrieved successfully',
             totalCount,
-            totalPages: Math.ceil(totalCount / limit),
-            currentPage: page,
+            totalPages: Math.ceil(totalCount / limitNum) || 0,
+            currentPage: pageNum,
+            limit: limitNum,
+            hasNextPage: pageNum * limitNum < totalCount,
             acceptances: formattedAcceptances
         });
     } catch (error) {

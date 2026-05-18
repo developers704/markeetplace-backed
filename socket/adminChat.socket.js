@@ -2,10 +2,10 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/user.model');
 const Customer = require('../models/customer.model');
 const UserRole = require('../models/userRole.model');
-const B2BPurchaseRequest = require('../models/b2bPurchaseRequest.model');
 const { getImportProgressIo, initImportProgressSocket } = require('./importProgress.socket');
 
-let b2bPurchaseHandlersAttached = false;
+const ADMIN_CHAT_ROOM = 'adminChatDashboard';
+let adminHandlersAttached = false;
 
 async function resolveUserFromToken(token) {
   if (!token) return null;
@@ -15,12 +15,8 @@ async function resolveUserFromToken(token) {
   return user ? user.toObject({ getters: true }) : null;
 }
 
-async function canAccessB2bPurchase(user, purchaseId) {
-  if (!user?._id || !purchaseId) return false;
-  const order = await B2BPurchaseRequest.findById(purchaseId)
-    .select('requestedBy dmUserId cmUserId')
-    .lean();
-  if (!order) return false;
+async function isPrivilegedAdminUser(user) {
+  if (!user?._id) return false;
   if (user.is_superuser) return true;
   const u = await User.findById(user._id).select('is_superuser role').lean();
   if (u?.is_superuser) return true;
@@ -29,32 +25,48 @@ async function canAccessB2bPurchase(user, purchaseId) {
     const rn = String(roleDoc?.role_name || '').toLowerCase().trim();
     if (rn === 'admin' || rn === 'super admin' || rn === 'superuser') return true;
   }
-  if (String(order.requestedBy) === String(user._id)) return true;
-  if (order.dmUserId && String(order.dmUserId) === String(user._id)) return true;
-  if (order.cmUserId && String(order.cmUserId) === String(user._id)) return true;
   return false;
 }
 
-function emitB2bPurchaseChatMessage(purchaseId, message) {
+/**
+ * Notify admin dashboards to refresh unread badges / list rows.
+ * @param {{ channel: 'b2b'|'spo'|'storeTransfer', orderId: string, action?: 'message'|'seen' }} payload
+ */
+function emitAdminChatUnreadChanged(payload) {
   const io = getImportProgressIo();
-  if (!io || !purchaseId || !message) return;
-  io.to(`b2bPurchase:${purchaseId}`).emit('b2bPurchaseChatMessage', message);
+  if (!io || !payload?.channel || !payload?.orderId) return;
+  io.to(ADMIN_CHAT_ROOM).emit('adminChatUnreadChanged', {
+    channel: payload.channel,
+    orderId: String(payload.orderId),
+    action: payload.action || 'message',
+    at: new Date().toISOString(),
+  });
 }
 
-function emitB2bPurchaseChatSeen(purchaseId, payload) {
-  const io = getImportProgressIo();
-  if (!io || !purchaseId || !payload) return;
-  io.to(`b2bPurchase:${purchaseId}`).emit('b2bPurchaseChatSeen', payload);
-}
-
-function initB2bPurchaseChatSocket(httpServer) {
+function initAdminChatSocket(httpServer) {
   initImportProgressSocket(httpServer);
   const io = getImportProgressIo();
-  if (!io || b2bPurchaseHandlersAttached) return io;
-  b2bPurchaseHandlersAttached = true;
+  if (!io || adminHandlersAttached) return io;
+  adminHandlersAttached = true;
 
   io.on('connection', (socket) => {
-    socket.on('subscribeB2bPurchase', async (payload, ack) => {
+    // Auto-join admin dashboard room when a privileged admin connects (no client subscribe required).
+    (async () => {
+      try {
+        const token =
+          socket.handshake.auth?.token || socket.handshake.query?.token;
+        if (!token) return;
+        const user = await resolveUserFromToken(token);
+        if (!user?._id) return;
+        if (await isPrivilegedAdminUser(user)) {
+          socket.join(ADMIN_CHAT_ROOM);
+        }
+      } catch (_) {
+        /* invalid token */
+      }
+    })();
+
+    socket.on('subscribeAdminChat', async (payload, ack) => {
       const reply = (err, data) => {
         if (typeof ack === 'function') {
           if (err) ack({ ok: false, error: err });
@@ -63,17 +75,10 @@ function initB2bPurchaseChatSocket(httpServer) {
       };
 
       try {
-        const purchaseId =
-          typeof payload === 'object' && payload !== null ? payload.orderId || payload.purchaseId : payload;
         const token =
           (typeof payload === 'object' && payload?.token) ||
           socket.handshake.auth?.token ||
           socket.handshake.query?.token;
-
-        if (!purchaseId) {
-          reply('purchaseId required');
-          return;
-        }
 
         const user = await resolveUserFromToken(token);
         if (!user?._id) {
@@ -81,21 +86,21 @@ function initB2bPurchaseChatSocket(httpServer) {
           return;
         }
 
-        const ok = await canAccessB2bPurchase(user, purchaseId);
+        const ok = await isPrivilegedAdminUser(user);
         if (!ok) {
           reply('Forbidden');
           return;
         }
 
-        socket.join(`b2bPurchase:${purchaseId}`);
-        reply(null, { room: `b2bPurchase:${purchaseId}` });
+        socket.join(ADMIN_CHAT_ROOM);
+        reply(null, { room: ADMIN_CHAT_ROOM });
       } catch (e) {
         reply(e.message || 'subscribe failed');
       }
     });
 
-    socket.on('unsubscribeB2bPurchase', (purchaseId) => {
-      if (purchaseId) socket.leave(`b2bPurchase:${purchaseId}`);
+    socket.on('unsubscribeAdminChat', () => {
+      socket.leave(ADMIN_CHAT_ROOM);
     });
   });
 
@@ -103,7 +108,7 @@ function initB2bPurchaseChatSocket(httpServer) {
 }
 
 module.exports = {
-  initB2bPurchaseChatSocket,
-  emitB2bPurchaseChatMessage,
-  emitB2bPurchaseChatSeen,
+  initAdminChatSocket,
+  emitAdminChatUnreadChanged,
+  ADMIN_CHAT_ROOM,
 };

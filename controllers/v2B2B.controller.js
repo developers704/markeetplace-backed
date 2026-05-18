@@ -8,6 +8,7 @@ const Customer = require('../models/customer.model');
 const User = require('../models/user.model');
 
 const B2BPurchaseRequest = require('../models/b2bPurchaseRequest.model');
+const { attachUnreadChatCount } = require('../utils/chatUnread');
 const StoreInventory = require('../models/storeInventory.model');
 const Notification = require('../models/notification.model');
 const AdminNotification = require('../models/adminNotification.model');
@@ -15,6 +16,8 @@ const { sendEmail } = require('../config/sendMails');
 const B2BCart = require('../models/b2bCart.model');
 const InventoryWallet = require('../models/inventoryWallet.model');
 const { emitB2bPurchaseChatMessage, emitB2bPurchaseChatSeen } = require('../socket/b2bPurchaseChat.socket');
+const { emitAdminChatUnreadChanged } = require('../socket/adminChat.socket');
+const { emitCustomerChatUnreadChanged } = require('../socket/customerChat.socket');
 
 const MAX_B2B_PURCHASE_REPLY_PREVIEW = 88;
 
@@ -928,19 +931,37 @@ const listPurchaseRequests = async (req, res) => {
       }
     }
 
-    const requests = await B2BPurchaseRequest.find(filter)
-      .sort({ createdAt: -1 })
-      .populate('vendorProductId', 'vendorModel title brand category')
-      .populate('skuId', 'sku price currency metalColor metalType size attributes images')
-      .populate('storeWarehouseId', 'name isMain')
-      .lean();
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const skip = (page - 1) * limit;
+
+    const [total, requests] = await Promise.all([
+      B2BPurchaseRequest.countDocuments(filter),
+      B2BPurchaseRequest.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('vendorProductId', 'vendorModel title brand category')
+        .populate('skuId', 'sku price currency metalColor metalType size attributes images')
+        .populate('storeWarehouseId', 'name isMain')
+        .lean(),
+    ]);
 
     const withRequester = await resolveRequestedByDetails(requests);
+    const viewerModel = req.b2bActor?.model || 'User';
+    const data = attachUnreadChatCount(withRequester, req.user._id, viewerModel);
 
     return res.status(200).json({
       success: true,
       message: 'Purchase requests retrieved successfully',
-      data: withRequester,
+      data,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 0,
+        hasNextPage: page * limit < total,
+      },
     });
   } catch (error) {
     return res.status(500).json({
@@ -1489,6 +1510,23 @@ const postB2bPurchaseChatMessage = async (req, res) => {
     const payload = toChatPayload(last);
 
     emitB2bPurchaseChatMessage(String(order._id), payload);
+    const storeWh = String(order.storeWarehouseId || '');
+    const requesterId = String(order.requestedBy || '');
+    if (chatRole === 'user') {
+      emitAdminChatUnreadChanged({
+        channel: 'b2b',
+        orderId: String(order._id),
+        action: 'message',
+      });
+    } else if (chatRole === 'admin') {
+      emitCustomerChatUnreadChanged({
+        channel: 'b2b',
+        orderId: String(order._id),
+        action: 'message',
+        userId: requesterId,
+        warehouseId: storeWh,
+      });
+    }
 
     return res.status(201).json({ success: true, data: payload });
   } catch (error) {
@@ -1532,6 +1570,18 @@ const markB2bPurchaseChatSeen = async (req, res) => {
         viewerId: String(req.user._id),
         viewerModel: actorModel,
         seenAt: now.toISOString(),
+      });
+      emitAdminChatUnreadChanged({
+        channel: 'b2b',
+        orderId: String(order._id),
+        action: 'seen',
+      });
+      emitCustomerChatUnreadChanged({
+        channel: 'b2b',
+        orderId: String(order._id),
+        action: 'seen',
+        userId: String(order.requestedBy || ''),
+        warehouseId: String(order.storeWarehouseId || ''),
       });
     }
     return res.status(200).json({ success: true, data: { updated: touched } });

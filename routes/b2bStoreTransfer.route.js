@@ -12,6 +12,7 @@ const {
   markStoreTransferReceived,
   listStoreTransferChatMessages,
   postStoreTransferChatMessage,
+  markStoreTransferChatSeen,
 } = require('../controllers/b2bStoreTransfer.controller');
 
 router.use(authMiddleware, attachRoleContext);
@@ -22,6 +23,7 @@ router.get('/admin', requireAdmin(), listAdminStoreTransferOrders);
 
 router.get('/:id/chat-messages', listStoreTransferChatMessages);
 router.post('/:id/chat-messages', postStoreTransferChatMessage);
+router.post('/:id/chat-messages/seen', markStoreTransferChatSeen);
 router.patch('/:id/status', requireAdmin(), patchStoreTransferStatus);
 router.post('/:id/approve', requireAdmin(), approveStoreTransferOrder);
 router.post('/:id/received', markStoreTransferReceived);

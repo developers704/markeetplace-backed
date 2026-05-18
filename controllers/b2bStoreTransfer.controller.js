@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const B2bStoreTransferOrder = require('../models/b2bStoreTransferOrder.model');
+const { attachUnreadChatCount, markChatMessagesSeen } = require('../utils/chatUnread');
 const VendorProduct = require('../models/vendorProduct.model');
 const Sku = require('../models/sku.model');
 const SkuInventory = require('../models/skuInventory.model');
@@ -7,6 +8,8 @@ const StoreInventory = require('../models/storeInventory.model');
 const InventoryWallet = require('../models/inventoryWallet.model');
 const { sumSkuInventory, deductSkuInventory } = require('./v2B2B.controller');
 const { emitB2bStoreTransferChatMessage } = require('../socket/b2bStoreTransferChat.socket');
+const { emitAdminChatUnreadChanged } = require('../socket/adminChat.socket');
+const { emitCustomerChatUnreadChanged } = require('../socket/customerChat.socket');
 
 const isObjectId = (v) => mongoose.isValidObjectId(String(v || '').trim());
 const MAX_REPLY_PREVIEW = 88;
@@ -197,7 +200,10 @@ const listMyStoreTransferOrders = async (req, res) => {
       .populate('requestedBy', 'username userId')
       .lean();
 
-    return res.status(200).json({ success: true, data: rows });
+    const viewerModel = req.b2bActor?.model || 'Customer';
+    const data = attachUnreadChatCount(rows, req.user._id, viewerModel);
+
+    return res.status(200).json({ success: true, data });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
@@ -211,17 +217,38 @@ const listAdminStoreTransferOrders = async (req, res) => {
       filter.status = String(status).trim().toUpperCase();
     }
 
-    const rows = await B2bStoreTransferOrder.find(filter)
-      .sort({ createdAt: -1 })
-      .select('-chatMessages')
-      .populate('vendorProductId', 'vendorModel ')
-      .populate('skuId', 'sku price attributes')
-      .populate('sourceWarehouseId', 'name')
-      .populate('destWarehouseId', 'name')
-      .populate('requestedBy', 'username email')
-      .lean();
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const skip = (page - 1) * limit;
 
-    return res.status(200).json({ success: true, data: rows });
+    const [total, rows] = await Promise.all([
+      B2bStoreTransferOrder.countDocuments(filter),
+      B2bStoreTransferOrder.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('vendorProductId', 'vendorModel ')
+        .populate('skuId', 'sku price attributes')
+        .populate('sourceWarehouseId', 'name')
+        .populate('destWarehouseId', 'name')
+        .populate('requestedBy', 'username email')
+        .lean(),
+    ]);
+
+    const viewerModel = req.b2bActor?.model || 'User';
+    const data = attachUnreadChatCount(rows, req.user._id, viewerModel);
+
+    return res.status(200).json({
+      success: true,
+      data,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 0,
+        hasNextPage: page * limit < total,
+      },
+    });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
@@ -527,7 +554,57 @@ const listStoreTransferChatMessages = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
-    return res.status(200).json({ success: true, data: order.chatMessages || [] });
+    const messages = (order.chatMessages || []).map((m) => ({
+      _id: m._id,
+      text: m.text,
+      role: m.role,
+      senderId: m.senderId,
+      senderName: m.senderName,
+      replyToMessageId: m.replyToMessageId || null,
+      replyToText: m.replyToText || '',
+      replyToSenderName: m.replyToSenderName || '',
+      seenBy: Array.isArray(m.seenBy) ? m.seenBy : [],
+      createdAt: m.createdAt,
+    }));
+
+    return res.status(200).json({ success: true, data: messages });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const markStoreTransferChatSeen = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
+
+    const order = await B2bStoreTransferOrder.findById(id);
+    if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+    if (!canAccessOrder(req, order.toObject())) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const viewerModel = req.b2bActor?.model || 'User';
+    const touched = markChatMessagesSeen(order, req.user._id, viewerModel);
+    if (touched) {
+      await order.save();
+      const destWh = String(order.destWarehouseId || '');
+      const requesterId = String(order.requestedBy || '');
+      emitAdminChatUnreadChanged({
+        channel: 'storeTransfer',
+        orderId: String(order._id),
+        action: 'seen',
+      });
+      emitCustomerChatUnreadChanged({
+        channel: 'storeTransfer',
+        orderId: String(order._id),
+        action: 'seen',
+        userId: requesterId,
+        warehouseId: destWh,
+      });
+    }
+
+    return res.status(200).json({ success: true, data: { updated: touched } });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
@@ -579,6 +656,7 @@ const postStoreTransferChatMessage = async (req, res) => {
       }
     }
 
+    const viewerModel = req.b2bActor?.model || 'User';
     order.chatMessages.push({
       text,
       role,
@@ -587,6 +665,7 @@ const postStoreTransferChatMessage = async (req, res) => {
       replyToMessageId,
       replyToText,
       replyToSenderName,
+      seenBy: [{ userId: req.user._id, userModel: viewerModel, seenAt: new Date() }],
     });
     await order.save();
     const last = order.chatMessages[order.chatMessages.length - 1];
@@ -599,10 +678,28 @@ const postStoreTransferChatMessage = async (req, res) => {
       replyToMessageId: last.replyToMessageId || null,
       replyToText: last.replyToText || '',
       replyToSenderName: last.replyToSenderName || '',
+      seenBy: Array.isArray(last.seenBy) ? last.seenBy : [],
       createdAt: last.createdAt,
     };
 
     emitB2bStoreTransferChatMessage(String(order._id), payload);
+    const destWh = String(order.destWarehouseId || '');
+    const requesterId = String(order.requestedBy || '');
+    if (role === 'user') {
+      emitAdminChatUnreadChanged({
+        channel: 'storeTransfer',
+        orderId: String(order._id),
+        action: 'message',
+      });
+    } else if (role === 'admin') {
+      emitCustomerChatUnreadChanged({
+        channel: 'storeTransfer',
+        orderId: String(order._id),
+        action: 'message',
+        userId: requesterId,
+        warehouseId: destWh,
+      });
+    }
 
     return res.status(201).json({ success: true, data: payload });
   } catch (error) {
@@ -620,4 +717,5 @@ module.exports = {
   markStoreTransferReceived,
   listStoreTransferChatMessages,
   postStoreTransferChatMessage,
+  markStoreTransferChatSeen,
 };

@@ -4,7 +4,7 @@ const Customer = require('../models/customer.model');
 const SpecialOrder = require('../models/specialOrder.model');
 const { getImportProgressIo, initImportProgressSocket } = require('./importProgress.socket');
 
-let handlersAttached = false;
+let spoHandlersAttached = false;
 
 async function resolveUserFromToken(token) {
   if (!token) return null;
@@ -47,8 +47,8 @@ function emitSpoChatMessage(orderId, message) {
 function initSpoChatSocket(httpServer) {
   initImportProgressSocket(httpServer);
   const io = getImportProgressIo();
-  if (!io || handlersAttached) return io;
-  handlersAttached = true;
+  if (!io || spoHandlersAttached) return io;
+  spoHandlersAttached = true;
 
   io.on('connection', (socket) => {
     socket.on('subscribeSpoOrder', async (payload, ack) => {

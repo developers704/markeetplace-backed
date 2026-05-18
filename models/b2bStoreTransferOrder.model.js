@@ -15,6 +15,15 @@ const STATUSES = [
   'RECEIVED',
 ];
 
+const b2bStoChatSeenSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    userModel: { type: String, enum: ['Customer', 'User'], required: true },
+    seenAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const b2bStoChatMessageSchema = new mongoose.Schema(
   {
     text: { type: String, required: true, maxlength: 4000 },
@@ -24,6 +33,7 @@ const b2bStoChatMessageSchema = new mongoose.Schema(
     replyToMessageId: { type: mongoose.Schema.Types.ObjectId, default: null },
     replyToText: { type: String, default: '' },
     replyToSenderName: { type: String, default: '' },
+    seenBy: { type: [b2bStoChatSeenSchema], default: [] },
   },
   { timestamps: { createdAt: true, updatedAt: false } }
 );

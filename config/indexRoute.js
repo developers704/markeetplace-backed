@@ -78,6 +78,7 @@ const dashboardRoutes = require('../routes/dashboard.route');
 const sheetCategoryRoutes = require('../routes/sheetCategory.route');
 const fileManagerRoutes = require('../routes/fileManager.route');
 const rapnetRoutes      = require('../routes/rapnet.route');
+const adminChatUnreadRoutes = require('../routes/adminChatUnread.route');
 
 const router = express.Router();
 
@@ -88,6 +89,7 @@ router.use('/v2/b2b/cart', v2B2BCartRoutes);
 router.use('/v2/b2b/store-transfers', b2bStoreTransferRoutes);
 router.use('/v2/supplies', suppliesCommerceRoutes);
 router.use('/special-orders', specialOrderRoutes);
+router.use('/admin', adminChatUnreadRoutes);
 router.use('/bulk-products', bulkProductImportRoutes);
 router.use('/bulk-other-products', bulkOtherProductImportRoutes);
 router.use('/adminProgress', adminProgressRoutes);

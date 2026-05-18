@@ -1,8 +1,11 @@
 const { sendEmail } = require('../config/sendMails');
 const SpecialOrder = require('../models/specialOrder.model');
+const { attachUnreadChatCount, markChatMessagesSeen } = require('../utils/chatUnread');
 const mongoose = require('mongoose');
 const specialOrderReceiverModel = require('../models/specialOrderReceiver.model');
 const { emitSpoChatMessage } = require('../socket/spoChat.socket');
+const { emitAdminChatUnreadChanged } = require('../socket/adminChat.socket');
+const { emitCustomerChatUnreadChanged } = require('../socket/customerChat.socket');
 const { notifySpoRequesterSms } = require('../utils/spoRequesterSms');
 
 const isObjectId = (v) => mongoose.isValidObjectId(String(v || '').trim());
@@ -239,11 +242,14 @@ const listMySpecialOrders = async (req, res) => {
     .populate('requestedBy', 'username email userId')
     .sort({ createdAt: -1 })
     .lean();
+
+    const viewerModel = req.b2bActor?.model || 'Customer';
+    const data = attachUnreadChatCount(orders, req.user._id, viewerModel);
     
     return res.status(200).json({
       success: true,
       message: view === "store" ? 'Store special orders retrieved' :"My special orders retrieved",
-      data: orders,
+      data,
     });
   } catch (error) {
     return res.status(500).json({
@@ -274,16 +280,35 @@ const listAdminSpecialOrders = async (req, res) => {
       ];
     }
 
-    const orders = await SpecialOrder.find(filter)
-      .populate('storeId', 'name')
-      .populate('requestedBy', 'username email')
-      .sort({ createdAt: -1 })
-      .lean();
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const skip = (page - 1) * limit;
+
+    const [total, orders] = await Promise.all([
+      SpecialOrder.countDocuments(filter),
+      SpecialOrder.find(filter)
+        .populate('storeId', 'name')
+        .populate('requestedBy', 'username email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+    ]);
+
+    const viewerModel = req.b2bActor?.model || 'User';
+    const data = attachUnreadChatCount(orders, req.user._id, viewerModel);
 
     return res.status(200).json({
       success: true,
       message: 'Special orders retrieved',
-      data: orders,
+      data,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 0,
+        hasNextPage: page * limit < total,
+      },
     });
   } catch (error) {
     return res.status(500).json({
@@ -439,14 +464,68 @@ const listSpoChatMessages = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
+    const messages = (order.chatMessages || []).map((m) => ({
+      _id: m._id,
+      text: m.text,
+      role: m.role,
+      senderId: m.senderId,
+      senderName: m.senderName,
+      replyToMessageId: m.replyToMessageId || null,
+      replyToText: m.replyToText || '',
+      replyToSenderName: m.replyToSenderName || '',
+      seenBy: Array.isArray(m.seenBy) ? m.seenBy : [],
+      createdAt: m.createdAt,
+    }));
+
     return res.status(200).json({
       success: true,
-      data: order.chatMessages || [],
+      data: messages,
     });
   } catch (error) {
     return res.status(500).json({
       success: false,
       message: 'Failed to load messages',
+      error: error.message,
+    });
+  }
+};
+
+const markSpoChatSeen = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid ID' });
+
+    const order = await SpecialOrder.findById(id);
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (!canAccessSpecialOrderDoc(req, order.toObject())) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const viewerModel = req.b2bActor?.model || 'User';
+    const touched = markChatMessagesSeen(order, req.user._id, viewerModel);
+    if (touched) {
+      await order.save();
+      const storeId = normalizeRefId(order.storeId);
+      const requesterId = getRequesterId(order);
+      emitAdminChatUnreadChanged({
+        channel: 'spo',
+        orderId: String(order._id),
+        action: 'seen',
+      });
+      emitCustomerChatUnreadChanged({
+        channel: 'spo',
+        orderId: String(order._id),
+        action: 'seen',
+        userId: requesterId,
+        warehouseId: storeId,
+      });
+    }
+
+    return res.status(200).json({ success: true, data: { updated: touched } });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to mark messages seen',
       error: error.message,
     });
   }
@@ -508,6 +587,7 @@ const postSpoChatMessage = async (req, res) => {
       }
     }
 
+    const viewerModel = req.b2bActor?.model || 'User';
     order.chatMessages.push({
       text,
       role,
@@ -516,6 +596,7 @@ const postSpoChatMessage = async (req, res) => {
       replyToMessageId,
       replyToText,
       replyToSenderName,
+      seenBy: [{ userId: req.user._id, userModel: viewerModel, seenAt: new Date() }],
     });
 
     await order.save();
@@ -529,10 +610,28 @@ const postSpoChatMessage = async (req, res) => {
       replyToMessageId: last.replyToMessageId || null,
       replyToText: last.replyToText || '',
       replyToSenderName: last.replyToSenderName || '',
+      seenBy: Array.isArray(last.seenBy) ? last.seenBy : [],
       createdAt: last.createdAt,
     };
 
     emitSpoChatMessage(String(order._id), payload);
+    const storeId = normalizeRefId(order.storeId);
+    const requesterId = getRequesterId(order);
+    if (role === 'user') {
+      emitAdminChatUnreadChanged({
+        channel: 'spo',
+        orderId: String(order._id),
+        action: 'message',
+      });
+    } else if (role === 'admin') {
+      emitCustomerChatUnreadChanged({
+        channel: 'spo',
+        orderId: String(order._id),
+        action: 'message',
+        userId: requesterId,
+        warehouseId: storeId,
+      });
+    }
 
     if (role === 'admin' && order.requestedBy) {
       const rb = order.requestedBy;
@@ -568,5 +667,6 @@ module.exports = {
   finalizeSpecialOrder,
   listSpoChatMessages,
   postSpoChatMessage,
+  markSpoChatSeen,
   isPrivilegedSpecialOrderAdmin,
 };

@@ -12,6 +12,7 @@ const {
   finalizeSpecialOrder,
   listSpoChatMessages,
   postSpoChatMessage,
+  markSpoChatSeen,
   isPrivilegedSpecialOrderAdmin,
 } = require('../controllers/specialOrder.controller');
 
@@ -29,6 +30,7 @@ router.get('/admin', checkSpecialOrderAdmin, listAdminSpecialOrders);
 router.patch('/:id/finalize', finalizeSpecialOrder);
 router.get('/:id/chat-messages', listSpoChatMessages);
 router.post('/:id/chat-messages', postSpoChatMessage);
+router.post('/:id/chat-messages/seen', markSpoChatSeen);
 router.get('/:id', getSpecialOrderById);
 router.patch('/:id', checkSpecialOrderAdmin, updateSpecialOrder);
 

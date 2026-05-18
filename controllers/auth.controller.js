@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const User = require("../models/user.model");
@@ -384,23 +385,39 @@ const acceptTermsAndConditions = async (req, res) => {
 // get details accept terms and conditions
 const getAcceptedTermsUsers = async (req, res) => {
   try {
-    const { page = 1, limit = 10 } = req.query;
-    
-    // Get customers who have accepted terms (termsAccepted = true)
-    const acceptedUsers = await Customer.find({ 
-      termsAccepted: true 
-    })
-    .select('username email phone_number termsAcceptedDate city gender profileImage role warehouse department')
-    .populate('role', 'role_name') // Populate role with role_name
-    .populate('warehouse', 'name location') // Populate warehouse with name and location
-    .populate('department', 'name code') // Populate department with name and code
-    .sort({ termsAcceptedDate: -1 })
-    .sort({ termsAcceptedDate: -1 })
-    .limit(parseInt(limit))
-    .skip((parseInt(page) - 1) * parseInt(limit));
-    
-    // Get total count
-    const totalAccepted = await Customer.countDocuments({ termsAccepted: true });
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 15));
+    const skip = (page - 1) * limit;
+
+    const filter = { termsAccepted: true };
+
+    if (req.query.warehouse && mongoose.Types.ObjectId.isValid(req.query.warehouse)) {
+      filter.warehouse = req.query.warehouse;
+    }
+    if (req.query.department && mongoose.Types.ObjectId.isValid(req.query.department)) {
+      filter.department = req.query.department;
+    }
+    if (req.query.search && String(req.query.search).trim()) {
+      const q = String(req.query.search).trim();
+      filter.$or = [
+        { username: { $regex: q, $options: 'i' } },
+        { email: { $regex: q, $options: 'i' } },
+        { phone_number: { $regex: q, $options: 'i' } },
+      ];
+    }
+
+    const [totalAccepted, acceptedUsers] = await Promise.all([
+      Customer.countDocuments(filter),
+      Customer.find(filter)
+        .select('username email phone_number termsAcceptedDate city gender profileImage role warehouse department')
+        .populate('role', 'role_name')
+        .populate('warehouse', 'name location')
+        .populate('department', 'name code')
+        .sort({ termsAcceptedDate: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+    ]);
     
     // Get current terms and conditions
     const currentTerms = await TermsAndConditions.findOne().sort({ createdAt: -1 });
@@ -412,9 +429,12 @@ const getAcceptedTermsUsers = async (req, res) => {
         totalAccepted,
         currentTerms,
         pagination: {
-          currentPage: parseInt(page),
-          totalPages: Math.ceil(totalAccepted / parseInt(limit)),
-          hasNext: parseInt(page) * parseInt(limit) < totalAccepted
+          currentPage: page,
+          totalPages: Math.ceil(totalAccepted / limit) || 0,
+          total: totalAccepted,
+          limit,
+          hasNext: page * limit < totalAccepted,
+          hasNextPage: page * limit < totalAccepted,
         }
       }
     });

@@ -4,7 +4,7 @@ const Customer = require('../models/customer.model');
 const B2bStoreTransferOrder = require('../models/b2bStoreTransferOrder.model');
 const { getImportProgressIo, initImportProgressSocket } = require('./importProgress.socket');
 
-let handlersAttached = false;
+let storeTransferHandlersAttached = false;
 
 async function resolveUserFromToken(token) {
   if (!token) return null;
@@ -33,8 +33,8 @@ function emitB2bStoreTransferChatMessage(orderId, message) {
 function initB2bStoreTransferChatSocket(httpServer) {
   initImportProgressSocket(httpServer);
   const io = getImportProgressIo();
-  if (!io || handlersAttached) return io;
-  handlersAttached = true;
+  if (!io || storeTransferHandlersAttached) return io;
+  storeTransferHandlersAttached = true;
 
   io.on('connection', (socket) => {
     socket.on('subscribeB2bStoreTransfer', async (payload, ack) => {

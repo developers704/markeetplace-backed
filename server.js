@@ -30,10 +30,14 @@ try {
   const { initSpoChatSocket } = require('./socket/spoChat.socket');
   const { initB2bStoreTransferChatSocket } = require('./socket/b2bStoreTransferChat.socket');
   const { initB2bPurchaseChatSocket } = require('./socket/b2bPurchaseChat.socket');
+  const { initAdminChatSocket } = require('./socket/adminChat.socket');
+  const { initCustomerChatSocket } = require('./socket/customerChat.socket');
   initImportProgressSocket(server);
   initSpoChatSocket(server);
   initB2bStoreTransferChatSocket(server);
   initB2bPurchaseChatSocket(server);
+  initAdminChatSocket(server);
+  initCustomerChatSocket(server);
 } catch (e) {
   console.error('Socket.IO init failed:', e.message);
 }
