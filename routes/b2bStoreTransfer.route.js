@@ -6,6 +6,7 @@ const {
   createStoreTransferOrder,
   listMyStoreTransferOrders,
   listAdminStoreTransferOrders,
+  exportAdminStoreTransferOrdersCsv,
   getStoreTransferOrder,
   patchStoreTransferStatus,
   approveStoreTransferOrder,
@@ -20,6 +21,7 @@ router.use(authMiddleware, attachRoleContext);
 router.post('/', createStoreTransferOrder);
 router.get('/mine', listMyStoreTransferOrders);
 router.get('/admin', requireAdmin(), listAdminStoreTransferOrders);
+router.get('/admin/export/csv', requireAdmin(), exportAdminStoreTransferOrdersCsv);
 
 router.get('/:id/chat-messages', listStoreTransferChatMessages);
 router.post('/:id/chat-messages', postStoreTransferChatMessage);

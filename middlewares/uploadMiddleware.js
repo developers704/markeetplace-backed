@@ -11,7 +11,7 @@ function generateUniqueFilename(file) {
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    cb(null, 'uploads/images/products'); // Save to the same folder
+    cb(null, 'uploads/products'); // Canonical product images folder
   },
   filename: function (req, file, cb) {
     cb(null, generateUniqueFilename(file));

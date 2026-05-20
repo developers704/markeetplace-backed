@@ -26,9 +26,56 @@ const normalizeKey = (value) => String(value || '').trim().toUpperCase();
 
 const RESERVED_QUERY_KEYS = new Set([
   'page', 'limit', 'cursor', 'lastProductId', 'search', 'brand', 'category', 'subcategory', 'subsubcategory',
-  'categoryId', 'subcategoryId', 'subsubcategoryId', 'minPrice', 'maxPrice', 'sort', 'srule', 'minQuantity',
-  'metalColor', 'metalType', 'size', 'stonetype', 'centerclarity', 'warehouseIds',
+  'categoryId', 'subcategoryId', 'subsubcategoryId', 'minPrice', 'maxPrice', 'sort', 'srule', 'skuOrder', 'skuSort',
+  'minQuantity', 'metalColor', 'metalType', 'size', 'stonetype', 'centerclarity', 'warehouseIds',
 ]);
+
+const SKU_SORT_VALUES = new Set(['sku-newest', 'sku-oldest']);
+
+/** Scopes that support a second `skuOrder` param (must match marketplace frontend scopesWithSkuSort). */
+const INVENTORY_SCOPES_WITH_SKU_ORDER = new Set([
+  'featured',
+  'ismain',
+  'own-inventory',
+  'best-sellers',
+  'new-arrivals',
+]);
+
+/** Inventory scope (sort) + optional SKU order (skuOrder) are separate query params. */
+function resolveListingSort(query) {
+  let scopeRule = String(query?.sort || query?.srule || 'featured').toLowerCase();
+  let skuOrder = String(query?.skuOrder || query?.skuSort || '').toLowerCase();
+
+  if (SKU_SORT_VALUES.has(scopeRule)) {
+    if (!skuOrder) skuOrder = scopeRule;
+    scopeRule = 'featured';
+  }
+  if (!SKU_SORT_VALUES.has(skuOrder)) skuOrder = '';
+  if (skuOrder && !INVENTORY_SCOPES_WITH_SKU_ORDER.has(scopeRule)) {
+    skuOrder = '';
+  }
+
+  return {
+    scopeRule,
+    skuOrder,
+    isOwnInventorySort: scopeRule === 'own-inventory',
+    isMainInventorySort: scopeRule === 'ismain',
+  };
+}
+
+function buildListingSortObject(scopeRule, skuOrder) {
+  if (skuOrder === 'sku-newest') return { 'defaultSku.sku': -1, _id: 1 };
+  if (skuOrder === 'sku-oldest') return { 'defaultSku.sku': 1, _id: 1 };
+  const byScope = {
+    'price-asc': { 'defaultSku.price': 1, _id: 1 },
+    'price-desc': { 'defaultSku.price': -1, _id: 1 },
+    'new-arrivals': { createdAt: -1, _id: 1 },
+    'best-sellers': { createdAt: -1, _id: 1 },
+    featured: { updatedAt: -1, _id: 1 },
+    ismain: { _id: 1 },
+  };
+  return byScope[scopeRule] || { updatedAt: -1, _id: 1 };
+}
 const ATTRIBUTE_SKIP_KEYS = ['featureimageslink', 'galleryimagelink', 'descriptionname', 'stonetype', 'centerclarity'];
 
 function listingCacheKey(gen, params) {
@@ -36,6 +83,7 @@ function listingCacheKey(gen, params) {
     limit: params?.limit,
     page: params?.page,
     sort: params?.sortRule,
+    skuOrder: params?.skuOrder || '',
     brand: (params?.brandKeys || []).slice().sort().join(','),
     category: params?.categoryId ? String(params?.categoryId) : '',
     subcategory: params?.subcategoryId ? String(params?.subcategoryId) : '',
@@ -525,8 +573,7 @@ const listVendorProducts = async (req, res) => {
     const subsubcategoryRaw = req?.query?.subsubcategory;
     const minPrice = parseFloat(req?.query?.minPrice) || null;
     const maxPrice = parseFloat(req?.query?.maxPrice) || null;
-    const sortRule = String(req.query.sort || req.query.srule || 'featured').toLowerCase();
-    const isOwnInventorySort = sortRule === 'own-inventory';
+    const { scopeRule: sortRule, skuOrder, isOwnInventorySort } = resolveListingSort(req.query);
     const selectedWarehouseId = isOwnInventorySort ? getSelectedWarehouseIdFromRequest(req) : null;
     const minQuantity = typeof req.query.minQuantity !== 'undefined' && req.query.minQuantity !== ''
       ? Math.max(0, parseInt(req.query.minQuantity, 10) || 0)
@@ -570,6 +617,7 @@ const listVendorProducts = async (req, res) => {
       limit,
       page,
       sortRule,
+      skuOrder,
       brandKeys,
       categoryId,
       subcategoryId,
@@ -622,9 +670,7 @@ async function buildListingPayload(query, context = {}) {
   const subsubcategoryRaw = query.subsubcategory;
   const minPrice = parseFloat(query.minPrice) || null;
   const maxPrice = parseFloat(query.maxPrice) || null;
-  const sortRule = String(query?.sort || query?.srule || 'featured').toLowerCase();
-  const isOwnInventorySort = sortRule === 'own-inventory';
-  const isMainInventorySort = sortRule === 'ismain';
+  const { scopeRule: sortRule, skuOrder, isOwnInventorySort, isMainInventorySort } = resolveListingSort(query);
   const selectedWarehouseId = isOwnInventorySort ? extractWarehouseId(context?.selectedWarehouseId) : null;
   const minQuantity = typeof query.minQuantity !== 'undefined' && query.minQuantity !== ''
     ? Math.max(0, parseInt(query.minQuantity, 10) || 0)
@@ -665,17 +711,7 @@ async function buildListingPayload(query, context = {}) {
       : null;
   const brandKeys = parseMulti(brandRaw).map(normalizeKey).filter(Boolean);
 
-const sortVp = {
-  'price-asc': { 'defaultSku.price': 1, _id: 1 },
-  'price-desc': { 'defaultSku.price': -1, _id: 1 },
-  'new-arrivals': { createdAt: -1, _id: 1 },
-  'best-sellers': { /* can't use totalInventory here, optional */ createdAt: -1, _id: 1 },
-  'featured': { updatedAt: -1, _id: 1 },
-  'ismain': {_id : 1},
-  'sku-newest': { 'defaultSku.sku': -1, _id: 1 },
-  'sku-oldest': { 'defaultSku.sku': 1, _id: 1 },
-}[sortRule] || { updatedAt: -1, _id: 1 };
-  // const sort = sortOpts[sortRule] || sortOpts['featured'];
+  const sortVp = buildListingSortObject(sortRule, skuOrder);
 
   let productIds = [];
   let total = 0;
@@ -840,13 +876,7 @@ const sortVp = {
     //   { $project: { _id: 1 } },
     // ];
 
-  const fallbackSort = {
-  'price-asc': { 'defaultSku.price': 1, _id: 1 },
-  'price-desc': { 'defaultSku.price': -1, _id: 1 },
-  'new-arrivals': { createdAt: -1, _id: 1 },
-  'best-sellers': { createdAt: -1, _id: 1 },
-  'featured': { updatedAt: -1, _id: 1 },
-  }[sortRule] || { updatedAt: -1, _id: 1 };
+  const fallbackSort = buildListingSortObject(sortRule, skuOrder);
 
   const idPipeline = [
   { $match: match },
@@ -1911,6 +1941,7 @@ const exportVendorProductsCsv = async (req, res) => {
 };
 
 module.exports = {
+  INVENTORY_SCOPES_WITH_SKU_ORDER,
   listVendorProductsAdmin,
   listVendorProducts,
   getVendorProductById,

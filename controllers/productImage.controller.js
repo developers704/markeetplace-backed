@@ -3,10 +3,12 @@ const path = require('path');
 const fs = require('fs').promises;
 const ProductImage = require('../models/productImage.model');
 const Product = require('../models/product.model');
+const { notifyProductImagesChanged } = require('../utils/aiImageIndexHook');
+const { productUploadPublicUrl } = require('../config/uploadPaths');
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, 'uploads/images/products/');
+        cb(null, 'uploads/products/');
     },
     filename: (req, file, cb) => {
         cb(null, file.originalname);
@@ -23,7 +25,7 @@ const bulkUploadImages = async (req, res) => {
 
         for (const file of uploadedFiles) {
             const sku = path.parse(file.originalname).name;
-            const imageUrl = `/uploads/images/products/${file.filename}`;
+            const imageUrl = productUploadPublicUrl(file.filename);
 
             // Check for an existing ProductImage entry
             let productImage = await ProductImage.findOne({ sku });
@@ -51,10 +53,15 @@ const bulkUploadImages = async (req, res) => {
             }
         }
 
+        const uploadedCount = results.filter((item) => item.status !== 'duplicate').length;
+        if (uploadedCount > 0) {
+            notifyProductImagesChanged();
+        }
+
         // Return the results with a skipped count
         res.status(200).json({
             message: 'Bulk upload completed',
-            successfullyUploaded: results.filter(item => item.status !== 'duplicate').length,
+            successfullyUploaded: uploadedCount,
             skipped: skippedCount,  // Number of skipped (duplicate) images
             results
         });
@@ -82,7 +89,7 @@ const bulkDeleteImages = async (req, res) => {
         for (const sku of skus) {
             const productImage = await ProductImage.findOne({ sku });
             if (productImage) {
-                const filePath = path.join('uploads/images/products/', path.basename(productImage.imageUrl));
+                const filePath = path.join('uploads/products/', path.basename(productImage.imageUrl));
                 await fs.unlink(filePath);
                 await ProductImage.deleteOne({ sku });
 
@@ -118,8 +125,8 @@ const updateImage = async (req, res) => {
         }
 
         // Determine the new image path and old image path
-        const oldImagePath = path.join('uploads/images/products/', path.basename(productImage.imageUrl));
-        const newImagePath = path.join('uploads/images/products/', `${sku}${path.extname(file.originalname)}`);
+        const oldImagePath = path.join('uploads/products/', path.basename(productImage.imageUrl));
+        const newImagePath = path.join('uploads/products/', `${sku}${path.extname(file.originalname)}`);
 
         // Rename the uploaded file to the new path
         await fs.rename(file.path, newImagePath);
@@ -129,7 +136,7 @@ const updateImage = async (req, res) => {
             await fs.unlink(oldImagePath);
         }
 
-        const newImageUrl = `/uploads/images/products/${sku}${path.extname(file.originalname)}`;
+        const newImageUrl = productUploadPublicUrl(`${sku}${path.extname(file.originalname)}`);
         productImage.imageUrl = newImageUrl;
 
         // Update the status: 'attached' if the product is linked

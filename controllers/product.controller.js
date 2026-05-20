@@ -23,6 +23,8 @@ const { Parser } = require('json2csv');
 const SpecialProduct = require('../models/specialProduct.model');
 const Customer = require('../models/customer.model');
 const Warehouse = require('../models/warehouse.model');
+const { notifyProductImagesChanged } = require('../utils/aiImageIndexHook');
+const { productUploadPublicUrl } = require('../config/uploadPaths');
 
 
 
@@ -352,22 +354,20 @@ const createProduct = async (req, res) => {
       ? req.files.image[0].filename
       : null;
 
-    const finalImageUrl = uploadedImage
-      ? `/uploads/images/products/${uploadedImage}`
-      : null;
+    const finalImageUrl = uploadedImage ? productUploadPublicUrl(uploadedImage) : null;
 
     const gallery = req.files?.gallery
-      ? req.files.gallery.map((file) => `/uploads/images/products/${file.filename}`)
+      ? req.files.gallery.map((file) => productUploadPublicUrl(file.filename))
       : [];
 
     if (!name) {
       if (req.files?.gallery) {
         await Promise.all(
-          req.files.gallery.map((file) => deleteFile(path.join("uploads", "images", "products", file.filename)))
+          req.files.gallery.map((file) => deleteFile(path.join("uploads", "products", file.filename)))
         );
       }
       if (uploadedImage) {
-        await deleteFile(path.join("uploads", "images", "products", uploadedImage));
+        await deleteFile(path.join("uploads", "products", uploadedImage));
       }
       return res.status(400).json({ message: "Name is required" });
     }
@@ -377,11 +377,11 @@ const createProduct = async (req, res) => {
       if (existingProduct) {
         if (gallery.length) {
           await Promise.all(
-            gallery.map((img) => deleteFile(path.join("uploads", "images", "products", path.basename(img))))
+            gallery.map((img) => deleteFile(path.join("uploads", "products", path.basename(img))))
           );
         }
         if (uploadedImage) {
-          await deleteFile(path.join("uploads", "images", "products", uploadedImage));
+          await deleteFile(path.join("uploads", "products", uploadedImage));
         }
         return res.status(400).json({ message: "A product with this SKU already exists" });
       }
@@ -396,11 +396,11 @@ const createProduct = async (req, res) => {
     if (uniqueCityIds.size !== cityIds.length) {
       if (req.files?.gallery) {
         await Promise.all(
-          req.files.gallery.map((file) => deleteFile(path.join("uploads", "images", "products", file.filename)))
+          req.files.gallery.map((file) => deleteFile(path.join("uploads", "products", file.filename)))
         );
       }
       if (uploadedImage) {
-        await deleteFile(path.join("uploads", "images", "products", uploadedImage));
+        await deleteFile(path.join("uploads", "products", uploadedImage));
       }
       return res.status(400).json({ message: "Each city should be included only once in prices." });
     }
@@ -445,6 +445,10 @@ const createProduct = async (req, res) => {
 
     await product.save();
 
+    if (req.files?.image?.length || req.files?.gallery?.length) {
+      notifyProductImagesChanged();
+    }
+
     res.status(201).json({
       message: "Product created successfully",
       product: product.toObject(),
@@ -452,7 +456,7 @@ const createProduct = async (req, res) => {
   } catch (error) {
     if (req.files) {
       const fileArrays = Object.values(req.files);
-      await Promise.all(fileArrays.flat().map((file) => deleteFile(path.join("uploads", "images", "products", file.filename))));
+      await Promise.all(fileArrays.flat().map((file) => deleteFile(path.join("uploads", "products", file.filename))));
     }
     res.status(400).json({ message: error.message });
   }
@@ -1727,13 +1731,11 @@ const updateProduct = async (req, res) => {
 
     const uploadedImage = req.files?.image ? req.files.image[0].filename : null;
 
-    const finalImageUrl = uploadedImage
-      ? `/uploads/images/products/${uploadedImage}`
-      : null;
+    const finalImageUrl = uploadedImage ? productUploadPublicUrl(uploadedImage) : null;
 
     const gallery = req.files?.gallery
       ? req.files.gallery.map(
-          (file) => `/uploads/images/products/${file.filename}`
+          (file) => productUploadPublicUrl(file.filename)
         )
       : [];
 
@@ -1743,14 +1745,14 @@ const updateProduct = async (req, res) => {
         await Promise.all(
           gallery.map((img) =>
             deleteFile(
-              path.join("uploads", "images", "products", path.basename(img))
+              path.join("uploads", "products", path.basename(img))
             )
           )
         );
       }
       if (uploadedImage) {
         await deleteFile(
-          path.join("uploads", "images", "products", uploadedImage)
+          path.join("uploads", "products", uploadedImage)
         );
       }
       return res.status(404).json({ message: "Product not found" });
@@ -1763,14 +1765,14 @@ const updateProduct = async (req, res) => {
           await Promise.all(
             gallery.map((img) =>
               deleteFile(
-                path.join("uploads", "images", "products", path.basename(img))
+                path.join("uploads", "products", path.basename(img))
               )
             )
           );
         }
         if (uploadedImage) {
           await deleteFile(
-            path.join("uploads", "images", "products", uploadedImage)
+            path.join("uploads", "products", uploadedImage)
           );
         }
         return res.status(400).json({ message: "SKU already exists" });
@@ -1788,14 +1790,14 @@ const updateProduct = async (req, res) => {
           await Promise.all(
             gallery.map((img) =>
               deleteFile(
-                path.join("uploads", "images", "products", path.basename(img))
+                path.join("uploads", "products", path.basename(img))
               )
             )
           );
         }
         if (uploadedImage) {
           await deleteFile(
-            path.join("uploads", "images", "products", uploadedImage)
+            path.join("uploads", "products", uploadedImage)
           );
         }
         return res
@@ -1817,14 +1819,14 @@ const updateProduct = async (req, res) => {
           await Promise.all(
             gallery.map((img) =>
               deleteFile(
-                path.join("uploads", "images", "products", path.basename(img))
+                path.join("uploads", "products", path.basename(img))
               )
             )
           );
         }
         if (uploadedImage) {
           await deleteFile(
-            path.join("uploads", "images", "products", uploadedImage)
+            path.join("uploads", "products", uploadedImage)
           );
         }
         return res
@@ -1846,14 +1848,14 @@ const updateProduct = async (req, res) => {
           await Promise.all(
             gallery.map((img) =>
               deleteFile(
-                path.join("uploads", "images", "products", path.basename(img))
+                path.join("uploads", "products", path.basename(img))
               )
             )
           );
         }
         if (uploadedImage) {
           await deleteFile(
-            path.join("uploads", "images", "products", uploadedImage)
+            path.join("uploads", "products", uploadedImage)
           );
         }
         return res
@@ -1871,14 +1873,14 @@ const updateProduct = async (req, res) => {
           await Promise.all(
             gallery.map((img) =>
               deleteFile(
-                path.join("uploads", "images", "products", path.basename(img))
+                path.join("uploads", "products", path.basename(img))
               )
             )
           );
         }
         if (uploadedImage) {
           await deleteFile(
-            path.join("uploads", "images", "products", uploadedImage)
+            path.join("uploads", "products", uploadedImage)
           );
         }
         return res
@@ -1908,14 +1910,14 @@ const updateProduct = async (req, res) => {
           await Promise.all(
             gallery.map((img) =>
               deleteFile(
-                path.join("uploads", "images", "products", path.basename(img))
+                path.join("uploads", "products", path.basename(img))
               )
             )
           );
         }
         if (uploadedImage) {
           await deleteFile(
-            path.join("uploads", "images", "products", uploadedImage)
+            path.join("uploads", "products", uploadedImage)
           );
         }
         return res.status(400).json({ message: "Invalid brand ID" });
@@ -1983,10 +1985,14 @@ const updateProduct = async (req, res) => {
       await Promise.all(
         oldGalleryPaths.map((img) =>
           deleteFile(
-            path.join("uploads", "images", "products", path.basename(img))
+            path.join("uploads", "products", path.basename(img))
           )
         )
       );
+    }
+
+    if (req.files?.image?.length || req.files?.gallery?.length) {
+      notifyProductImagesChanged();
     }
 
     res.status(200).json({
@@ -1996,7 +2002,7 @@ const updateProduct = async (req, res) => {
   } catch (error) {
     if (req.files) {
       const fileArrays = Object.values(req.files);
-      await Promise.all(fileArrays.flat().map((file) => deleteFile(path.join("uploads", "images", "products", file.filename))));
+      await Promise.all(fileArrays.flat().map((file) => deleteFile(path.join("uploads", "products", file.filename))));
     }
     res.status(400).json({ message: error.message });
   }

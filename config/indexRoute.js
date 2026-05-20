@@ -79,6 +79,7 @@ const sheetCategoryRoutes = require('../routes/sheetCategory.route');
 const fileManagerRoutes = require('../routes/fileManager.route');
 const rapnetRoutes      = require('../routes/rapnet.route');
 const adminChatUnreadRoutes = require('../routes/adminChatUnread.route');
+const aiImageSearchRoutes = require('../routes/aiImageSearch.route');
 
 const router = express.Router();
 
@@ -161,5 +162,6 @@ router.use('/dashboard', dashboardRoutes);
 router.use('/sheets', sheetCategoryRoutes);
 router.use('/file-manager', fileManagerRoutes);
 router.use('/rapnet',       rapnetRoutes);
+router.use('/ai-image-search', aiImageSearchRoutes);
 
 module.exports = router;

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { Parser } = require('json2csv');
 const B2bStoreTransferOrder = require('../models/b2bStoreTransferOrder.model');
 const { attachUnreadChatCount, markChatMessagesSeen } = require('../utils/chatUnread');
 const VendorProduct = require('../models/vendorProduct.model');
@@ -206,6 +207,140 @@ const listMyStoreTransferOrders = async (req, res) => {
     return res.status(200).json({ success: true, data });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const CSV_BASE_FIELDS = [
+  
+  'Ticket Number',
+  'Status',
+  'Vendor Model',
+  'SKU',
+  'Description',
+  'Quantity',
+  'Unit Price',
+  'Total',
+  // 'Currency',
+  'Source Warehouse',
+  'Destination Warehouse',
+  'Requested By',
+  'Requester Email',
+  'Requested By Model',
+  'Rejection Reason',
+  'Rejected At',
+  'Inventory Applied At',
+  'Shipped At',
+  'Received At',
+  'Created At',
+  'Updated At',
+  'Attributes Summary',
+];
+
+function csvDate(value) {
+  if (!value) return '';
+
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+
+  return d.toLocaleString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+// function buildAttributesSummary(attr) {
+//   if (!attr || typeof attr !== 'object') return '';
+//   return Object.entries(attr)
+//     .filter(([, v]) => v != null && String(v).trim() !== '')
+//     .map(([k, v]) => `${k}: ${v}`)
+//     .join(' | ');
+// }
+
+function storeTransferOrderToCsvRow(order) {
+  const attr = order.skuId?.attributes || {};
+  const qty = Number(order.quantity) || 0;
+  const unitPrice = Number(order.unitPrice) || 0;
+
+  const row = {
+    'Ticket Number': order.ticketNumber || '',
+    Status: order.status || '',
+    'Vendor Model': order.vendorProductId?.vendorModel || order.vendorProductId?.title || '',
+    SKU: order.skuId?.sku || '',
+    Description: attr.descriptionname != null ? String(attr.descriptionname) : '',
+    Quantity: qty,
+    'Cp-Price': unitPrice,
+    'Total': qty * unitPrice,
+    'Source Warehouse': order.sourceWarehouseId?.name || '',
+    'Destination Warehouse': order.destWarehouseId?.name || '',
+    'Requested By': order.requestedBy?.username || '-',
+    'Requester Email': order.requestedBy?.email || '-',
+    'Requested By Model': order.requestedByModel || '-',
+    'Rejection Reason': order.rejection?.reason || '-',
+    'Rejected At': csvDate(order.rejection?.rejectedAt),
+    'Inventory Applied At': csvDate(order.inventoryAppliedAt),
+    'Shipped At': csvDate(order.deliveredAt),
+    'Received At': csvDate(order.receivedAt),
+    'Created At': csvDate(order.createdAt),
+    'Updated At': csvDate(order.updatedAt),
+    // 'Attributes Summary': buildAttributesSummary(attr),
+  };
+
+  Object.entries(attr).forEach(([key, value]) => {
+    if (value == null || String(value).trim() === '') return;
+    row[key] = String(value);
+  });
+
+  return row;
+}
+
+const exportAdminStoreTransferOrdersCsv = async (req, res) => {
+  try {
+    const status = req.query.status;
+    const filter = {};
+    if (status && String(status).trim()) {
+      filter.status = String(status).trim().toUpperCase();
+    }
+
+    const rows = await B2bStoreTransferOrder.find(filter)
+      .sort({ createdAt: -1 })
+      .populate('vendorProductId', 'vendorModel title')
+      .populate('skuId', 'sku price attributes')
+      .populate('sourceWarehouseId', 'name')
+      .populate('destWarehouseId', 'name')
+      .populate('requestedBy', 'username email')
+      .lean();
+
+    const csvRows = rows.map(storeTransferOrderToCsvRow);
+    const fieldSet = new Set(CSV_BASE_FIELDS);
+    csvRows.forEach((row) => {
+      Object.keys(row).forEach((key) => fieldSet.add(key));
+    });
+    const attrFields = [...fieldSet]
+  .filter((f) => !CSV_BASE_FIELDS.includes(f))
+  .sort((a, b) => a.localeCompare(b));
+
+    const fields = [...CSV_BASE_FIELDS, ...attrFields];
+
+    const parser = new Parser({ fields });
+    const csv = parser.parse(csvRows.length ? csvRows : [{}]);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const suffix = filter.status ? `-${filter.status.toLowerCase()}` : '';
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=store-to-store-transfers${suffix}-${stamp}.csv`,
+    );
+    return res.status(200).send(`\uFEFF${csv}`);
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to export store transfers',
+    });
   }
 };
 
@@ -711,6 +846,7 @@ module.exports = {
   createStoreTransferOrder,
   listMyStoreTransferOrders,
   listAdminStoreTransferOrders,
+  exportAdminStoreTransferOrdersCsv,
   getStoreTransferOrder,
   patchStoreTransferStatus,
   approveStoreTransferOrder,

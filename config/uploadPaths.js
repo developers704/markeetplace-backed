@@ -84,9 +84,26 @@ function getUploadsStaticDir() {
   return path.join(PROJECT_ROOT, 'uploads');
 }
 
+/** Canonical product image folder (relative to project root). */
+const PRODUCT_UPLOADS_REL = 'uploads/products';
+
+function getProductUploadsDir() {
+  return path.join(PROJECT_ROOT, PRODUCT_UPLOADS_REL);
+}
+const UPLOADS_PUBLIC_PREFIX = 'uploads';
+
+function productUploadPublicUrl(filename) {
+  if (!filename) return null;
+  const base = path.basename(String(filename));
+  return `${UPLOADS_PUBLIC_PREFIX}/products/${base}`;
+}
+
 module.exports = {
   PROJECT_ROOT,
   UPLOADS_PUBLIC_PREFIX: '/uploads',
+  PRODUCT_UPLOADS_REL,
+  getProductUploadsDir,
+  productUploadPublicUrl,
   toStoredUploadRelative,
   resolveAbsoluteFsPath,
   filePathToPublicUrl,
