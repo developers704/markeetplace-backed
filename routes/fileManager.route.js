@@ -3,6 +3,7 @@ const authMiddleware = require('../middlewares/authMiddleware');
 const {
   listFileManager,
   downloadFile,
+  downloadFolder,
   createFolder,
   uploadMw,
   uploadFiles,
@@ -22,6 +23,7 @@ router.use(authMiddleware);
 router.use(requireSuperuser);
 
 router.get('/file', downloadFile);
+router.get('/folder/download', downloadFolder);
 router.get('/', listFileManager);
 router.post('/folder', createFolder);
 router.post('/upload', uploadMw.array('files', 4000), uploadFiles);
