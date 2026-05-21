@@ -15,8 +15,8 @@ const {
 } = require('../utils/fileManager.util');
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg']);
+const ZIP_MAX_UINT16 = 0xffff;
 const ZIP_MAX_UINT32 = 0xffffffff;
-const ZIP_MAX_ENTRIES = 0xffff;
 const ZIP_UTF8_FLAG = 0x0800;
 
 const CRC32_TABLE = new Uint32Array(256);
@@ -97,40 +97,88 @@ function createLocalZipHeader({ nameBuf, crc, size, mtime }) {
   return header;
 }
 
+function writeUInt64LE(buffer, value, offset) {
+  buffer.writeBigUInt64LE(BigInt(value), offset);
+}
+
+function createZip64Extra(values) {
+  const data = Buffer.alloc(values.length * 8);
+  values.forEach((value, index) => writeUInt64LE(data, value, index * 8));
+
+  const header = Buffer.alloc(4);
+  header.writeUInt16LE(0x0001, 0);
+  header.writeUInt16LE(data.length, 2);
+  return Buffer.concat([header, data]);
+}
+
 function createCentralZipHeader({ nameBuf, crc, size, mtime, offset, isDirectory }) {
   const { time, date } = getDosDateTime(mtime);
+  const needsZip64 = size > ZIP_MAX_UINT32 || offset > ZIP_MAX_UINT32;
+  const extraBuf = needsZip64 ? createZip64Extra([size, size, offset]) : Buffer.alloc(0);
+  const versionNeeded = needsZip64 ? 45 : 20;
+  const headerSize = needsZip64 ? ZIP_MAX_UINT32 : size;
+  const headerOffset = needsZip64 ? ZIP_MAX_UINT32 : offset;
   const header = Buffer.alloc(46);
   header.writeUInt32LE(0x02014b50, 0);
-  header.writeUInt16LE(20, 4);
-  header.writeUInt16LE(20, 6);
+  header.writeUInt16LE(versionNeeded, 4);
+  header.writeUInt16LE(versionNeeded, 6);
   header.writeUInt16LE(ZIP_UTF8_FLAG, 8);
   header.writeUInt16LE(0, 10);
   header.writeUInt16LE(time, 12);
   header.writeUInt16LE(date, 14);
   header.writeUInt32LE(crc, 16);
-  header.writeUInt32LE(size, 20);
-  header.writeUInt32LE(size, 24);
+  header.writeUInt32LE(headerSize, 20);
+  header.writeUInt32LE(headerSize, 24);
   header.writeUInt16LE(nameBuf.length, 28);
-  header.writeUInt16LE(0, 30);
+  header.writeUInt16LE(extraBuf.length, 30);
   header.writeUInt16LE(0, 32);
   header.writeUInt16LE(0, 34);
   header.writeUInt16LE(0, 36);
   header.writeUInt32LE(isDirectory ? 0x10 : 0, 38);
-  header.writeUInt32LE(offset, 42);
-  return Buffer.concat([header, nameBuf]);
+  header.writeUInt32LE(headerOffset, 42);
+  return Buffer.concat([header, nameBuf, extraBuf]);
 }
 
 function createEndOfCentralDirectory({ entryCount, centralSize, centralOffset }) {
+  const needsZip64 =
+    entryCount > ZIP_MAX_UINT16 ||
+    centralSize > ZIP_MAX_UINT32 ||
+    centralOffset > ZIP_MAX_UINT32;
+
+  const zip64EndOffset = needsZip64 ? centralOffset + centralSize : 0;
   const header = Buffer.alloc(22);
   header.writeUInt32LE(0x06054b50, 0);
   header.writeUInt16LE(0, 4);
   header.writeUInt16LE(0, 6);
-  header.writeUInt16LE(entryCount, 8);
-  header.writeUInt16LE(entryCount, 10);
-  header.writeUInt32LE(centralSize, 12);
-  header.writeUInt32LE(centralOffset, 16);
+  header.writeUInt16LE(needsZip64 ? ZIP_MAX_UINT16 : entryCount, 8);
+  header.writeUInt16LE(needsZip64 ? ZIP_MAX_UINT16 : entryCount, 10);
+  header.writeUInt32LE(needsZip64 ? ZIP_MAX_UINT32 : centralSize, 12);
+  header.writeUInt32LE(needsZip64 ? ZIP_MAX_UINT32 : centralOffset, 16);
   header.writeUInt16LE(0, 20);
-  return header;
+
+  if (!needsZip64) {
+    return header;
+  }
+
+  const zip64End = Buffer.alloc(56);
+  zip64End.writeUInt32LE(0x06064b50, 0);
+  writeUInt64LE(zip64End, 44, 4);
+  zip64End.writeUInt16LE(45, 12);
+  zip64End.writeUInt16LE(45, 14);
+  zip64End.writeUInt32LE(0, 16);
+  zip64End.writeUInt32LE(0, 20);
+  writeUInt64LE(zip64End, entryCount, 24);
+  writeUInt64LE(zip64End, entryCount, 32);
+  writeUInt64LE(zip64End, centralSize, 40);
+  writeUInt64LE(zip64End, centralOffset, 48);
+
+  const zip64Locator = Buffer.alloc(20);
+  zip64Locator.writeUInt32LE(0x07064b50, 0);
+  zip64Locator.writeUInt32LE(0, 4);
+  writeUInt64LE(zip64Locator, zip64EndOffset, 8);
+  zip64Locator.writeUInt32LE(1, 16);
+
+  return Buffer.concat([zip64End, zip64Locator, header]);
 }
 
 async function collectZipEntries(folderAbs, zipRootName) {
@@ -183,17 +231,14 @@ async function writeResponseChunk(res, chunk) {
 async function writeFolderZip(res, folderAbs) {
   const zipRootName = safeZipName(path.basename(folderAbs));
   const entries = await collectZipEntries(folderAbs, zipRootName);
-  if (entries.length > ZIP_MAX_ENTRIES) {
-    throw new Error('Folder has too many entries to download');
-  }
 
   const centralHeaders = [];
   let offset = 0;
 
   for (const entry of entries) {
     const data = entry.isDirectory ? Buffer.alloc(0) : await fs.readFile(entry.abs);
-    if (data.length > ZIP_MAX_UINT32 || offset > ZIP_MAX_UINT32) {
-      throw new Error('Folder is too large to download as a zip');
+    if (data.length > ZIP_MAX_UINT32) {
+      throw new Error(`File is too large to download as a zip: ${entry.zipPath}`);
     }
 
     const nameBuf = Buffer.from(entry.zipPath, 'utf8');
@@ -223,9 +268,6 @@ async function writeFolderZip(res, folderAbs) {
 
   const centralOffset = offset;
   for (const centralHeader of centralHeaders) {
-    if (offset > ZIP_MAX_UINT32) {
-      throw new Error('Folder is too large to download as a zip');
-    }
     await writeResponseChunk(res, centralHeader);
     offset += centralHeader.length;
   }
