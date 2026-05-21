@@ -1,4 +1,4 @@
-name: Deploy to VPS
+name: Deploy Backend to VPS
 
 on:
   push:
@@ -17,6 +17,12 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           password: ${{ secrets.VPS_PASSWORD }}
           script: |
+            export NODE_HOME="/root/.nvm/versions/node/v20.20.2"
+            export PATH="$NODE_HOME/bin:$PATH"
+
+            echo "Node: $(which node) - $(node -v)"
+            echo "NPM: $(which npm) - $(npm -v)"
+            echo "PM2: $(which pm2) - $(pm2 -v)"
             cd /var/www/marketplace/markeetplace-backed
             git pull origin main
             pm2 restart marketplace-backend --update-env
