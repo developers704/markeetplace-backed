@@ -37,11 +37,89 @@ const LISTING_SYNC_CONCURRENCY = Number(process.env.SKU_IMPORT_LISTING_SYNC_CONC
 const SKU_IMPORT_INLINE_LISTING_SYNC =
   String(process.env.SKU_IMPORT_INLINE_LISTING_SYNC || 'false').toLowerCase() === 'true';
 
+const inventoryMergeKey = (skuId, warehouseId, cityId) =>
+  `${skuId}_${warehouseId}_${cityId || 'null'}`;
+
+/**
+ * Reset mode: rows in CSV keep file qty; every other SkuInventory row → quantity 0 (no deletes).
+ */
+async function zeroInventoryNotInCsv(csvTouchedKeys, now) {
+  const zeroedSkuIds = new Set();
+  let zeroedCount = 0;
+  const pageSize = WRITE_BATCH * 2;
+  let lastId = null;
+
+  while (true) {
+    const filter = { quantity: { $gt: 0 } };
+    if (lastId) filter._id = { $gt: lastId };
+    const docs = await SkuInventory.find(filter)
+      .sort({ _id: 1 })
+      .limit(pageSize)
+      .select('_id skuId warehouse city')
+      .lean();
+    if (!docs.length) break;
+
+    const ops = [];
+    for (const inv of docs) {
+      lastId = inv._id;
+      const key = inventoryMergeKey(inv.skuId, inv.warehouse, inv.city);
+      if (csvTouchedKeys.has(key)) continue;
+      ops.push({
+        updateOne: {
+          filter: { _id: inv._id },
+          update: { $set: { quantity: 0, updatedAt: now, lastRestocked: now } },
+        },
+      });
+      zeroedSkuIds.add(String(inv.skuId));
+      zeroedCount += 1;
+    }
+    if (ops.length) {
+      await SkuInventory.bulkWrite(ops, { ordered: false });
+    }
+    if (docs.length < pageSize) break;
+  }
+
+  return { zeroedCount, zeroedSkuIds: [...zeroedSkuIds] };
+}
+
+/** Empty CSV + reset: zero every row that still has stock. */
+async function zeroAllInventoryQuantities(now) {
+  const affectedSkuIds = await SkuInventory.distinct('skuId', { quantity: { $gt: 0 } });
+  let affectedProductIds = [];
+  if (affectedSkuIds.length > 0) {
+    affectedProductIds = await Sku.distinct('productId', { _id: { $in: affectedSkuIds } });
+  }
+  const upd = await SkuInventory.updateMany(
+    { quantity: { $gt: 0 } },
+    { $set: { quantity: 0, updatedAt: now, lastRestocked: now } }
+  );
+  return {
+    zeroedCount: upd.modifiedCount ?? upd.matchedCount ?? 0,
+    affectedSkuIds,
+    affectedProductIds,
+  };
+}
+
+async function syncInventoryRedisAndListings(skuIds, productIds) {
+  const skuIdsForRedis = [...new Set((skuIds || []).map(String))].filter((id) => isObjectIdLike(id));
+  if (skuIdsForRedis.length > 0) {
+    await rebuildInventoryRedisForSkuIds(skuIdsForRedis);
+  }
+  const pids = [...new Set((productIds || []).map(String))].filter(Boolean);
+  if (pids.length === 0) return;
+  if (SKU_IMPORT_INLINE_LISTING_SYNC) {
+    await syncProductListingsInChunks(pids, LISTING_SYNC_CONCURRENCY);
+  } else {
+    await enqueueProductListingSync(pids);
+  }
+}
+
 async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw }) {
   const startedAt = Date.now();
   const now = new Date();
   const modeStr = String(modeRaw || 'merge').toLowerCase();
-  const mode = ['replace', 'increment', 'merge'].includes(modeStr) ? modeStr : 'merge';
+  const mode = ['replace', 'increment', 'merge', 'reset'].includes(modeStr) ? modeStr : 'merge';
+  const isFullReset = mode === 'reset';
 
   const jobMeta = await ImportJob.findById(importJobId).select('jobId csvPath').lean();
   const publicJobId = jobMeta?.jobId || String(importJobId);
@@ -116,6 +194,16 @@ async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw })
   });
 
   if (rows.length === 0) {
+    let zeroedCount = 0;
+    if (isFullReset) {
+      try {
+        const z = await zeroAllInventoryQuantities(now);
+        zeroedCount = z.zeroedCount;
+        await syncInventoryRedisAndListings(z.affectedSkuIds, z.affectedProductIds);
+      } catch (resetErr) {
+        errors.push({ row: null, error: `Inventory reset failed: ${resetErr.message}` });
+      }
+    }
     const errorReport = await writeErrorReportCsv({
       prefix: `sku-inventory-${publicJobId}`,
       errorRows: errorRowsForCsv,
@@ -129,7 +217,11 @@ async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw })
       errorReportPath: errorReport?.path || '',
       completedAt: new Date(),
     });
-    return { meta: { totalRows, resolvedRows: 0 }, errors: errors.slice(0, 100), errorReport };
+    return {
+      meta: { totalRows, resolvedRows: 0, mode, zeroedCount },
+      errors: errors.slice(0, 100),
+      errorReport,
+    };
   }
 
   const skuKeys = [...new Set(rows.map((r) => r.skuKey))];
@@ -234,7 +326,7 @@ async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw })
     if (quantityMap.has(mergeKey)) {
       if (mode === 'merge') {
         quantityMap.set(mergeKey, quantityMap.get(mergeKey) + r.quantity);
-      } else if (mode === 'replace') {
+      } else if (mode === 'replace' || mode === 'reset') {
         quantityMap.set(mergeKey, r.quantity);
       } else if (mode === 'increment') {
         quantityMap.set(mergeKey, quantityMap.get(mergeKey) + r.quantity);
@@ -266,6 +358,8 @@ async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw })
   let createdCount = 0;
   let updatedCount = 0;
   let mergedCount = 0;
+  let zeroedCount = 0;
+  let zeroedSkuIds = [];
 
   const validRows = uniqueRows.length;
   const failedRows = Math.max(0, totalRows - validRows);
@@ -283,6 +377,7 @@ async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw })
   const warehouseIdsForQuery = [...new Set(uniqueRows.map((r) => r.warehouseId))];
   const cityIdsForQuery = [...new Set(uniqueRows.map((r) => r.cityId).filter(Boolean))];
 
+  if (!isFullReset) {
   for (let i = 0; i < skuIdsAll.length; i += FETCH_BATCH) {
     const skuBatch = skuIdsAll.slice(i, i + FETCH_BATCH);
     const existing = await SkuInventory.find({
@@ -298,6 +393,7 @@ async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw })
       existingInventoryMap.set(key, inv);
     });
   }
+  }
 
   let processedRows = 0;
 
@@ -311,7 +407,7 @@ async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw })
       const existingKey = `${r.skuId}_${r.warehouseId}_${r.cityId || 'null'}`;
       const existing = existingInventoryMap.get(existingKey);
 
-      if (existing) {
+      if (existing && !isFullReset) {
         let newQuantity = r.quantity;
         if (mode === 'increment' || mode === 'merge') {
           newQuantity = existing.quantity + r.quantity;
@@ -390,26 +486,37 @@ async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw })
     skuInventoryBulkImportGuard.exit();
   }
 
+  if (isFullReset) {
+    try {
+      const csvTouchedKeys = new Set(uniqueRows.map((r) => r.mergeKey));
+      const z = await zeroInventoryNotInCsv(csvTouchedKeys, now);
+      zeroedCount = z.zeroedCount;
+      zeroedSkuIds = z.zeroedSkuIds;
+    } catch (zeroErr) {
+      errors.push({ row: null, error: `Zero untouched inventory failed: ${zeroErr.message}` });
+    }
+  }
+
   /** Single post-pass + guaranteed terminal job row (never leave `processing` at 100%). */
   let finalized = false;
   let finalizeErrorMsg = '';
   try {
     try {
-      if (skuIdsAll.length > 0) {
-        await rebuildInventoryRedisForSkuIds(skuIdsAll);
+      const csvProductIds = uniqueRows
+        .map((r) => (r.productId ? String(r.productId) : null))
+        .filter(Boolean);
+      let skuIdsForSync = skuIdsAll.map(String);
+      let productIdsForSync = [...new Set(csvProductIds)];
+      if (isFullReset && zeroedSkuIds.length > 0) {
+        skuIdsForSync = [...new Set([...skuIdsForSync, ...zeroedSkuIds])];
+        const zeroedProductIds = await Sku.distinct('productId', {
+          _id: { $in: zeroedSkuIds.filter((id) => isObjectIdLike(id)) },
+        });
+        productIdsForSync = [
+          ...new Set([...productIdsForSync, ...zeroedProductIds.map(String).filter(Boolean)]),
+        ];
       }
-      const productIds = [
-        ...new Set(uniqueRows.map((r) => (r.productId ? String(r.productId) : null)).filter(Boolean)),
-      ];
-      if (productIds.length > 0) {
-        if (SKU_IMPORT_INLINE_LISTING_SYNC) {
-          await syncProductListingsInChunks(productIds, LISTING_SYNC_CONCURRENCY);
-        } else {
-          // Fast path: enqueue listing sync jobs and let dedicated worker process them.
-          // This keeps CSV import completion/error-report generation from waiting on listing rebuilds.
-          await enqueueProductListingSync(productIds);
-        }
-      }
+      await syncInventoryRedisAndListings(skuIdsForSync, productIdsForSync);
     } catch (postErr) {
       errors.push({ row: null, error: `Post-import Redis/listing: ${postErr.message}` });
     }
@@ -458,6 +565,7 @@ async function runSkuInventoryCsvImport(importJobId, { csvPath, mode: modeRaw })
       createdCount,
       updatedCount,
       mergedCount,
+      zeroedCount,
       mode,
       durationMs: Date.now() - startedAt,
     },
