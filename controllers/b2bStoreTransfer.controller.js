@@ -477,7 +477,7 @@ const patchStoreTransferStatus = async (req, res) => {
       return res.status(200).json({ success: true, data: populated });
     }
 
-    const allowed = ['WIP', 'TRANSFER', 'DELIVERED', 'REJECTED'];
+    const allowed = ['SUBMITTED' , 'WIP', 'TRANSFER', 'DELIVERED', 'REJECTED'];
     if (!allowed.includes(nextStatus)) {
       return res.status(400).json({ success: false, message: `Invalid status. Use one of: ${allowed.join(', ')}` });
     }
