@@ -22,6 +22,15 @@ const categorySchema = new mongoose.Schema({
     isNotShowed: {
         type: Boolean,
         default: false // Default to false, meaning the category is shown
+    },
+    isDeleted: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+    allowedRoles: {
+        type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'UserRole' }],
+        default: []
     }
 }, {
     timestamps: true
@@ -48,6 +57,11 @@ const subCategorySchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Category',
         required: true
+    },
+    isDeleted: {
+        type: Boolean,
+        default: false,
+        index: true
     }
 }, {
     timestamps: true
@@ -75,6 +89,11 @@ const subSubCategorySchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'SubCategory',
         required: true
+    },
+    isDeleted: {
+        type: Boolean,
+        default: false,
+        index: true
     }
 }, {
     timestamps: true

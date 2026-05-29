@@ -8,11 +8,23 @@ const fss = require('fs');
 const { Parser } = require('json2csv');
 
 
+const notDeletedFilter = { isDeleted: { $ne: true } };
+
+const parseAllowedRoles = (value) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    if (Array.isArray(value)) return value.filter(Boolean);
+    try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) return parsed.filter(Boolean);
+    } catch (_) {}
+    return String(value).split(',').map((v) => v.trim()).filter(Boolean);
+};
 
 
 const createCategory = async (req, res) => {
   try {
     const { name, description } = req.body;
+    const allowedRoles = parseAllowedRoles(req.body.allowedRoles);
 
     // Log the entire req.file object
     //console.log('Uploaded File:', req.file);
@@ -31,14 +43,10 @@ const createCategory = async (req, res) => {
     // Log the extracted image filename to ensure it's correct
     //console.log('Image Filename:', image);
 
-    const formattedName = name
-      .trim()
-      .split(" ")
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-      .join(" ");
+    const formattedName = name.trim().toUpperCase();
 
     // Check for existing category with the formatted name
-    const existingCategory = await Category.findOne({ name: formattedName });
+    const existingCategory = await Category.findOne({ name: formattedName, ...notDeletedFilter });
     if (existingCategory) {
       if (image) {
         // Delete the uploaded image if duplicate category exists
@@ -54,6 +62,7 @@ const createCategory = async (req, res) => {
       name: formattedName,
       description,
       image,
+      allowedRoles: allowedRoles || [],
     });
     await category.save();
 
@@ -72,7 +81,7 @@ const createCategory = async (req, res) => {
 const getSubSubCategoriesBySubCategoryId = async (req, res) => {
     try {
         const subCategoryId = req.params.subCategoryId;
-        const subSubCategories = await SubSubCategory.find({ parentSubCategory: subCategoryId })
+    const subSubCategories = await SubSubCategory.find({ parentSubCategory: subCategoryId, ...notDeletedFilter })
             .populate('parentSubCategory');
 
         const subSubCategoriesWithCount = await Promise.all(subSubCategories.map(async (subSubCategory) => {
@@ -104,7 +113,7 @@ const bulkUploadCategories = async (req, res) => {
     };
 
     // First, get all existing category names
-    const existingCats = await Category.find({}, 'name');
+    const existingCats = await Category.find(notDeletedFilter, 'name');
     existingCats.forEach(cat => existingCategories.add(cat.name.toLowerCase().trim()));
 
     await new Promise((resolve, reject) => {
@@ -174,7 +183,7 @@ const createSubcategory = async (req, res) => {
         const image = req.file ? path.basename(req.file.path) : null; // Extract only the filename
 
        // Check if the parent category exists (optional)
-        const parentCategoryExists = await Category.findById(parentCategory);
+        const parentCategoryExists = await Category.findOne({ _id: parentCategory, ...notDeletedFilter });
         if (!parentCategoryExists) {
             if (req.file) await deleteFile(req.file.path);
             return res.status(400).json({ message: 'Parent Category does not exist' });
@@ -217,8 +226,8 @@ const bulkUploadSubCategories = async (req, res) => {
 
     // Fetch existing subcategory names and all categories with their IDs
     const [existingSubs, categories] = await Promise.all([
-        SubCategory.find({}, 'name').lean(),
-        Category.find({}, 'name').lean()
+        SubCategory.find(notDeletedFilter, 'name').lean(),
+        Category.find(notDeletedFilter, 'name').lean()
     ]);
 
     existingSubs.forEach(sub => existingSubCategories.add(sub.name.toLowerCase().trim()));
@@ -278,7 +287,7 @@ const bulkUploadSubCategories = async (req, res) => {
 
 const getAllCategories = async (req, res) => {
     try {
-        const categories = await Category.find();
+        const categories = await Category.find(notDeletedFilter).populate('allowedRoles', 'role_name');
         const categoriesWithCount = await Promise.all(categories.map(async (category) => {
             const productCount = await Product.countDocuments({ category: category._id });
             return {
@@ -295,7 +304,7 @@ const getAllCategories = async (req, res) => {
 const getSubcategoriesByCategoryId = async (req, res) => {
     try {
         const categoryId = req.params.categoryId;
-        const subcategories = await SubCategory.find({ parentCategory: categoryId });
+        const subcategories = await SubCategory.find({ parentCategory: categoryId, ...notDeletedFilter });
         res.status(200).json(subcategories);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -308,7 +317,7 @@ const getSubcategoriesByCategoryId = async (req, res) => {
 const getPublicCategories = async (req, res) => {
     try {
         // Find only the categories with `isNotShowed: false`
-        const categories = await Category.find({ isNotShowed: false });
+        const categories = await Category.find({ isNotShowed: false, ...notDeletedFilter }).populate('allowedRoles', 'role_name');
         
         // Calculate the product count for each public category
         const categoriesWithCount = await Promise.all(categories.map(async (category) => {
@@ -327,7 +336,7 @@ const getPublicCategories = async (req, res) => {
 
 const getAllSubcategories = async (req, res) => {
     try {
-        const subcategories = await SubCategory.find().populate('parentCategory');
+        const subcategories = await SubCategory.find(notDeletedFilter).populate('parentCategory');
         const subcategoriesWithCount = await Promise.all(subcategories.map(async (subcategory) => {
             const productCount = await Product.countDocuments({ subcategory: subcategory._id });
             return {
@@ -343,9 +352,9 @@ const getAllSubcategories = async (req, res) => {
 
 const getCategoriesWithSubcategories = async (req, res) => {
     try {
-        const categories = await Category.find({ isNotShowed: false }); // Only get categories that are not hidden
+        const categories = await Category.find({ isNotShowed: false, ...notDeletedFilter }); // Only get categories that are not hidden
         const categoriesWithSubs = await Promise.all(categories.map(async (category) => {
-            const subcategories = await SubCategory.find({ parentCategory: category._id });
+            const subcategories = await SubCategory.find({ parentCategory: category._id, ...notDeletedFilter });
             const productCount = await Product.find({ category: category._id }).countDocuments();
             return {
                 ...category.toObject(),
@@ -386,6 +395,7 @@ const updateCategory = async (req, res) => {
     try {
         const { id } = req.params;
         const { name, description } = req.body;
+        const allowedRoles = parseAllowedRoles(req.body.allowedRoles);
         const newImagePath = req.file ? path.basename(req.file.path) : undefined;
 
         // Find the category by ID
@@ -397,11 +407,9 @@ const updateCategory = async (req, res) => {
 
         // Validate and format the name if provided
         if (name && name !== category.name) {
-            const formattedName = name.trim().split(' ')
-                .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-                .join(' ');
+            const formattedName = name.trim().toUpperCase();
 
-            const existingCategory = await Category.findOne({ name: formattedName });
+            const existingCategory = await Category.findOne({ name: formattedName, _id: { $ne: id }, ...notDeletedFilter });
             if (existingCategory) {
                 if (newImagePath) await deleteFile(req.file.path); // Delete new image if name is duplicate
                 return res.status(400).json({ message: 'Category with this name already exists' });
@@ -412,6 +420,7 @@ const updateCategory = async (req, res) => {
 
         // Update description if provided
         if (description) category.description = description;
+        if (allowedRoles !== undefined) category.allowedRoles = allowedRoles;
 
         // Update the image if a new one is uploaded
         if (newImagePath) {
@@ -453,7 +462,7 @@ const updateSubcategory = async (req, res) => {
         }
 
         if (name && name !== subcategory.name) {
-            const existingSubcategory = await SubCategory.findOne({ name, parentCategory: subcategory.parentCategory });
+            const existingSubcategory = await SubCategory.findOne({ name, parentCategory: subcategory.parentCategory, _id: { $ne: id }, ...notDeletedFilter });
             if (existingSubcategory) {
                 if (newImagePath) await deleteFile(req.file.path);
                 return res.status(400).json({ message: 'Subcategory with this name already exists in the parent category' });
@@ -463,7 +472,7 @@ const updateSubcategory = async (req, res) => {
 
         if (description) subcategory.description = description;
         if (parentCategory) {
-            const parentCategoryExists = await Category.findById(parentCategory);
+            const parentCategoryExists = await Category.findOne({ _id: parentCategory, ...notDeletedFilter });
             if (!parentCategoryExists) {
                 if (newImagePath) await deleteFile(req.file.path);
                 return res.status(400).json({ message: 'Parent Category does not exist' });
@@ -492,41 +501,19 @@ const updateSubcategory = async (req, res) => {
 const deleteCategory = async (req, res) => {
     try {
         const { id } = req.params;
-        const category = await Category.findById(id);
+        const category = await Category.findOne({ _id: id, ...notDeletedFilter });
         if (!category) {
             return res.status(404).json({ message: 'Category not found' });
         }
 
-        // Delete category image if exists
-        if (category.image) {
-            const imagePath = path.join('uploads', 'images', category.image);
-            try {
-                await fs.access(imagePath);
-                await deleteFile(imagePath);
-            } catch (error) {
-                console.log(`Category image not found: ${imagePath}`);
-            }
+        const subcategoryIds = await SubCategory.find({ parentCategory: id, ...notDeletedFilter }).distinct('_id');
+        await Category.updateOne({ _id: id }, { $set: { isDeleted: true } });
+        await SubCategory.updateMany({ parentCategory: id }, { $set: { isDeleted: true } });
+        if (subcategoryIds.length) {
+            await SubSubCategory.updateMany({ parentSubCategory: { $in: subcategoryIds } }, { $set: { isDeleted: true } });
         }
 
-        // Find and delete all subcategories
-        const subcategories = await SubCategory.find({ parentCategory: id });
-        for (const subcategory of subcategories) {
-            if (subcategory.image) {
-                const imagePath = path.join('uploads', 'images', subcategory.image);
-                try {
-                    await fs.access(imagePath);
-                    await deleteFile(imagePath);
-                } catch (error) {
-                    console.log(`Subcategory image not found: ${imagePath}`);
-                }
-            }
-            await SubCategory.findByIdAndDelete(subcategory._id);
-        }
-
-        // Delete the category
-        await Category.findByIdAndDelete(id);
-
-        res.status(200).json({ message: 'Category and associated subcategories deleted successfully' });
+        res.status(200).json({ message: 'Category and associated subcategories soft deleted successfully' });
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
@@ -535,24 +522,14 @@ const deleteCategory = async (req, res) => {
 const deleteSubcategory = async (req, res) => {
     try {
         const { id } = req.params;
-        const subcategory = await SubCategory.findById(id);
+        const subcategory = await SubCategory.findOne({ _id: id, ...notDeletedFilter });
         if (!subcategory) {
             return res.status(404).json({ message: 'Subcategory not found' });
         }
 
-        if (subcategory.image) {
-            const imagePath = path.join('uploads', 'images', subcategory.image);
-            try {
-                await fs.access(imagePath);
-                await deleteFile(imagePath);
-            } catch (error) {
-                // File doesn't exist, no need to delete
-                console.log(`Image file not found: ${imagePath}`);
-            }
-        }
-
-        await SubCategory.findByIdAndDelete(id);
-        res.status(200).json({ message: 'Subcategory deleted successfully' });
+        await SubCategory.updateOne({ _id: id }, { $set: { isDeleted: true } });
+        await SubSubCategory.updateMany({ parentSubCategory: id }, { $set: { isDeleted: true } });
+        res.status(200).json({ message: 'Subcategory soft deleted successfully' });
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
@@ -565,44 +542,20 @@ const deleteCategoriesBulk = async (req, res) => {
             return res.status(400).json({ message: 'Invalid IDs provided' });
         }
 
-        // Find categories and delete
-        const categories = await Category.find({ _id: { $in: ids } });
+        const categories = await Category.find({ _id: { $in: ids }, ...notDeletedFilter });
         if (categories.length === 0) {
             return res.status(404).json({ message: 'No categories found' });
         }
 
-        for (const category of categories) {
-            // Delete category image if exists
-            if (category.image) {
-                const imagePath = path.join('uploads', 'images', category.image);
-                try {
-                    await fs.access(imagePath);
-                    await deleteFile(imagePath);
-                } catch (error) {
-                    console.log(`Category image not found: ${imagePath}`);
-                }
-            }
-
-            // Find and delete associated subcategories
-            const subcategories = await SubCategory.find({ parentCategory: category._id });
-            for (const subcategory of subcategories) {
-                if (subcategory.image) {
-                    const imagePath = path.join('uploads', 'images', subcategory.image);
-                    try {
-                        await fs.access(imagePath);
-                        await deleteFile(imagePath);
-                    } catch (error) {
-                        console.log(`Subcategory image not found: ${imagePath}`);
-                    }
-                }
-                await SubCategory.findByIdAndDelete(subcategory._id);
-            }
-
-            // Delete the category
-            await Category.findByIdAndDelete(category._id);
+        const categoryIds = categories.map((category) => category._id);
+        const subcategoryIds = await SubCategory.find({ parentCategory: { $in: categoryIds }, ...notDeletedFilter }).distinct('_id');
+        await Category.updateMany({ _id: { $in: categoryIds } }, { $set: { isDeleted: true } });
+        await SubCategory.updateMany({ parentCategory: { $in: categoryIds } }, { $set: { isDeleted: true } });
+        if (subcategoryIds.length) {
+            await SubSubCategory.updateMany({ parentSubCategory: { $in: subcategoryIds } }, { $set: { isDeleted: true } });
         }
 
-        res.status(200).json({ message: 'Categories and associated subcategories deleted successfully' });
+        res.status(200).json({ message: 'Categories and associated subcategories soft deleted successfully' });
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
@@ -615,26 +568,16 @@ const deleteSubcategoriesBulk = async (req, res) => {
             return res.status(400).json({ message: 'Invalid IDs provided' });
         }
 
-        // Find subcategories and delete
-        const subcategories = await SubCategory.find({ _id: { $in: ids } });
+        const subcategories = await SubCategory.find({ _id: { $in: ids }, ...notDeletedFilter });
         if (subcategories.length === 0) {
             return res.status(404).json({ message: 'No subcategories found' });
         }
 
-        for (const subcategory of subcategories) {
-            if (subcategory.image) {
-                const imagePath = path.join('uploads', 'images', subcategory.image);
-                try {
-                    await fs.access(imagePath);
-                    await deleteFile(imagePath);
-                } catch (error) {
-                    console.log(`Subcategory image not found: ${imagePath}`);
-                }
-            }
-            await SubCategory.findByIdAndDelete(subcategory._id);
-        }
+        const subcategoryIds = subcategories.map((subcategory) => subcategory._id);
+        await SubCategory.updateMany({ _id: { $in: subcategoryIds } }, { $set: { isDeleted: true } });
+        await SubSubCategory.updateMany({ parentSubCategory: { $in: subcategoryIds } }, { $set: { isDeleted: true } });
 
-        res.status(200).json({ message: 'Subcategories deleted successfully' });
+        res.status(200).json({ message: 'Subcategories soft deleted successfully' });
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
@@ -652,7 +595,7 @@ const createSubSubCategory = async (req, res) => {
         
         const image = req.file ? path.basename(req.file.path) : null;
         
-        const parentSubCategoryExists = await SubCategory.findById(parentSubCategory);
+        const parentSubCategoryExists = await SubCategory.findOne({ _id: parentSubCategory, ...notDeletedFilter });
         if (!parentSubCategoryExists) {
             if (req.file) await deleteFile(req.file.path);
             return res.status(400).json({ message: 'Parent SubCategory does not exist' });
@@ -679,25 +622,17 @@ const deleteSubSubCategoriesBulk = async (req, res) => {
             return res.status(400).json({ message: 'Invalid IDs provided' });
         }
 
-        const subSubCategories = await SubSubCategory.find({ _id: { $in: ids } });
+        const subSubCategories = await SubSubCategory.find({ _id: { $in: ids }, ...notDeletedFilter });
         if (subSubCategories.length === 0) {
             return res.status(404).json({ message: 'No sub-sub-categories found' });
         }
 
-        for (const subSubCategory of subSubCategories) {
-            if (subSubCategory.image) {
-                const imagePath = path.join('uploads', 'images', subSubCategory.image);
-                try {
-                    await fs.access(imagePath);
-                    await deleteFile(imagePath);
-                } catch (error) {
-                    console.log(`Sub-sub-category image not found: ${imagePath}`);
-                }
-            }
-            await SubSubCategory.findByIdAndDelete(subSubCategory._id);
-        }
+        await SubSubCategory.updateMany(
+            { _id: { $in: subSubCategories.map((subSubCategory) => subSubCategory._id) } },
+            { $set: { isDeleted: true } }
+        );
 
-        res.status(200).json({ message: 'Sub-sub-categories deleted successfully' });
+        res.status(200).json({ message: 'Sub-sub-categories soft deleted successfully' });
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
@@ -720,7 +655,7 @@ const updateSubSubCategory = async (req, res) => {
         if (description) subSubCategory.description = description;
         
         if (parentSubCategory) {
-            const parentSubCategoryExists = await SubCategory.findById(parentSubCategory);
+            const parentSubCategoryExists = await SubCategory.findOne({ _id: parentSubCategory, ...notDeletedFilter });
             if (!parentSubCategoryExists) {
                 if (newImagePath) await deleteFile(req.file.path);
                 return res.status(400).json({ message: 'Parent SubCategory does not exist' });
@@ -768,7 +703,7 @@ const updateSubSubCategory = async (req, res) => {
 
 const getAllSubSubCategories = async (req, res) => {
     try {
-        const subSubCategories = await SubSubCategory.find()
+        const subSubCategories = await SubSubCategory.find(notDeletedFilter)
             .populate({
                 path: 'parentSubCategory',
                 select: 'name',
@@ -805,8 +740,8 @@ const bulkUploadSubSubCategories = async (req, res) => {
     let totalProcessed = 0;
 
     const [existingSubSubs, subCategories] = await Promise.all([
-        SubSubCategory.find({}, 'name').lean(),
-        SubCategory.find({}, 'name').lean()
+        SubSubCategory.find(notDeletedFilter, 'name').lean(),
+        SubCategory.find(notDeletedFilter, 'name').lean()
     ]);
 
     existingSubSubs.forEach(sub => existingSubSubCategories.add(sub.name.toLowerCase().trim()));

@@ -203,6 +203,29 @@ function buildTitle(d) {
 }
 
 // ── Public: Search diamonds ───────────────────────────────────────────────────
+const parseMultiFilter = (value) =>
+  String(value || '')
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+
+const applyOrderedRangeFilter = (requestBody, filters, key, fromKey, toKey, order) => {
+  const selected = parseMultiFilter(filters[key]);
+  if (selected.length === 0) return;
+  const indexed = selected
+    .map((v) => ({ value: v, index: order.findIndex((o) => o.toLowerCase() === v.toLowerCase()) }))
+    .filter((x) => x.index >= 0)
+    .sort((a, b) => a.index - b.index);
+
+  if (indexed.length > 0) {
+    requestBody[fromKey] = indexed[0].value;
+    requestBody[toKey] = indexed[indexed.length - 1].value;
+  } else {
+    requestBody[fromKey] = selected[0];
+    requestBody[toKey] = selected[selected.length - 1];
+  }
+};
+
 async function searchDiamonds(filters = {}) {
   // Ensure token + accountId are ready
   await getToken();
@@ -221,30 +244,32 @@ async function searchDiamonds(filters = {}) {
   if (filters.caratTo)   requestBody.carat_to   = parseFloat(filters.caratTo);
 
   // Shapes — array
-  if (filters.shape) requestBody.shapes = [filters.shape];
+  const shapes = parseMultiFilter(filters.shape);
+  if (shapes.length > 0) requestBody.shapes = shapes;
 
-  // Color range
-  if (filters.color) {
-    requestBody.color_from = filters.color;
-    requestBody.color_to   = filters.color;
-  }
+  // Ordered ranges; multi-select becomes min/max range for RapNet API.
+  applyOrderedRangeFilter(requestBody, filters, 'color', 'color_from', 'color_to', [
+    'D','E','F','G','H','I','J','K','L','M','N',
+  ]);
+  applyOrderedRangeFilter(requestBody, filters, 'clarity', 'clarity_from', 'clarity_to', [
+    'FL','IF','VVS1','VVS2','VS1','VS2','SI1','SI2','I1','I2','I3',
+  ]);
+  applyOrderedRangeFilter(requestBody, filters, 'cut', 'cut_from', 'cut_to', [
+    'Ideal','Excellent','Very Good','Good','Fair','Poor',
+  ]);
+  applyOrderedRangeFilter(requestBody, filters, 'polish', 'polish_from', 'polish_to', [
+    'Ideal','Excellent','Very Good','Good','Fair','Poor',
+  ]);
+  applyOrderedRangeFilter(requestBody, filters, 'symmetry', 'symmetry_from', 'symmetry_to', [
+    'Ideal','Excellent','Very Good','Good','Fair','Poor',
+  ]);
 
-  // Clarity range
-  if (filters.clarity) {
-    requestBody.clarity_from = filters.clarity;
-    requestBody.clarity_to   = filters.clarity;
-  }
+  // Fluorescence / labs — arrays
+  const fluorescence = parseMultiFilter(filters.fluorescence);
+  if (fluorescence.length > 0) requestBody.fluorescence_intensities = fluorescence;
 
-  // Cut / Polish / Symmetry
-  if (filters.cut)      { requestBody.cut_from      = filters.cut;      requestBody.cut_to      = filters.cut;      }
-  if (filters.polish)   { requestBody.polish_from   = filters.polish;   requestBody.polish_to   = filters.polish;   }
-  if (filters.symmetry) { requestBody.symmetry_from = filters.symmetry; requestBody.symmetry_to = filters.symmetry; }
-
-  // Fluorescence — array
-  if (filters.fluorescence) requestBody.fluorescence_intensities = [filters.fluorescence];
-
-  // Labs — array
-  if (filters.lab) requestBody.labs = [filters.lab];
+  const labs = parseMultiFilter(filters.lab);
+  if (labs.length > 0) requestBody.labs = labs;
 
   // Price
   if (filters.priceFrom) requestBody.price_total_from = parseFloat(filters.priceFrom);

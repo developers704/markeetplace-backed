@@ -1495,9 +1495,29 @@ const downloadSkuInventoryTemplate = async (req, res) => {
  * GET /api/v2/categories
  * Get all categories with product counts
  */
+const categoryRoleFilter = (req) => {
+  const roleId = req.user?.role?._id || req.user?.role || null;
+  if (req.user?.is_superuser) return {};
+  if (!roleId) {
+    return {
+      $or: [
+        { allowedRoles: { $exists: false } },
+        { allowedRoles: { $size: 0 } },
+      ],
+    };
+  }
+  return {
+    $or: [
+      { allowedRoles: { $exists: false } },
+      { allowedRoles: { $size: 0 } },
+      { allowedRoles: roleId },
+    ],
+  };
+};
+
 const getV2Categories = async (req, res) => {
   try {
-    const categories = await Category.find({ isNotShowed: false })
+    const categories = await Category.find({ isNotShowed: false, isDeleted: { $ne: true }, ...categoryRoleFilter(req) })
       .sort({ createdAt: 1 })
       .lean();
 
@@ -1545,7 +1565,7 @@ const getV2SubcategoriesByCategory = async (req, res) => {
       });
     }
 
-    const subcategories = await SubCategory.find({ parentCategory: categoryId })
+    const subcategories = await SubCategory.find({ parentCategory: categoryId, isDeleted: { $ne: true } })
       .sort({ createdAt: 1 })
       .lean();
 
@@ -1590,7 +1610,7 @@ const getV2SubSubcategoriesBySubCategory = async (req, res) => {
       });
     }
 
-    const subSubcategories = await SubSubCategory.find({ parentSubCategory: subCategoryId })
+    const subSubcategories = await SubSubCategory.find({ parentSubCategory: subCategoryId, isDeleted: { $ne: true } })
       .sort({ createdAt: 1 })
       .lean();
 
@@ -1626,20 +1646,21 @@ const getV2SubSubcategoriesBySubCategory = async (req, res) => {
  */
 const getV2CategoriesWithSubcategories = async (req, res) => {
   try {
-    const categories = await Category.find({ isNotShowed: false })
+    const categories = await Category.find({ isNotShowed: false, isDeleted: { $ne: true }, ...categoryRoleFilter(req) })
       .sort({ createdAt: 1 })
       .lean();
 
     const categoriesWithSubs = await Promise.all(
       categories.map(async (category) => {
-        const subcategories = await SubCategory.find({ parentCategory: category._id })
+        const subcategories = await SubCategory.find({ parentCategory: category._id, isDeleted: { $ne: true } })
           .sort({ createdAt: 1 })
           .lean();
 
         const subcategoriesWithSubSubs = await Promise.all(
           subcategories.map(async (subcategory) => {
             const subSubcategories = await SubSubCategory.find({
-              parentSubCategory: subcategory._id
+              parentSubCategory: subcategory._id,
+              isDeleted: { $ne: true }
             })
               .sort({ createdAt: 1 })
               .lean();

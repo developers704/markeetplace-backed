@@ -8,18 +8,19 @@ const performSearch = async (req, res) => {
         let searchResults = [];
         
         // Base queries
-        let categoryQuery = {};
-        let subcategoryQuery = {};
+        let categoryQuery = { isDeleted: { $ne: true } };
+        let subcategoryQuery = { isDeleted: { $ne: true } };
         let productQuery = {};
 
         if (query) {
             categoryQuery = {
+                isDeleted: { $ne: true },
                 $or: [
                     { name: { $regex: query, $options: 'i' } },
                     { description: { $regex: query, $options: 'i' } }
                 ]
             };
-            subcategoryQuery = categoryQuery;
+            subcategoryQuery = { ...categoryQuery };
             productQuery = {
                 $or: [
                     { name: { $regex: query, $options: 'i' } },
