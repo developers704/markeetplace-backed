@@ -80,13 +80,56 @@ async function rebuildInventoryCaches(skuId) {
   }
 }
 
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 const createStoreTransferOrder = async (req, res) => {
   try {
     const actor = req.b2bActor;
-    const { vendorProductId, skuId, quantity, sourceWarehouseId, destWarehouseId } = req.body || {};
+    const {
+      vendorProductId,
+      skuId,
+      sku: skuCode,
+      skuCode: skuCodeAlt,
+      quantity,
+      sourceWarehouseId,
+      destWarehouseId,
+      receiptNumber,
+      note,
+      confirmedByUserId,
+      confirmedBy,
+    } = req.body || {};
 
-    if (!isObjectId(vendorProductId) || !isObjectId(skuId) || !isObjectId(sourceWarehouseId)) {
-      return res.status(400).json({ success: false, message: 'vendorProductId, skuId, and sourceWarehouseId are required' });
+    const receipt = String(receiptNumber || '').trim();
+
+    if (!isObjectId(sourceWarehouseId)) {
+      return res.status(400).json({ success: false, message: 'Source store is required' });
+    }
+
+    let resolvedSkuId = isObjectId(skuId) ? String(skuId) : null;
+    let resolvedVendorProductId = isObjectId(vendorProductId) ? String(vendorProductId) : null;
+
+    const skuInput = String(skuCode || skuCodeAlt || '').trim();
+    if (!resolvedSkuId && skuInput) {
+      const skuDoc = await Sku.findOne({
+        $or: [
+          { skuKey: skuInput.toUpperCase() },
+          { sku: new RegExp(`^${escapeRegex(skuInput)}$`, 'i') },
+        ],
+      })
+        .select('_id sku productId price currency')
+        .lean();
+      if (!skuDoc) {
+        return res.status(404).json({ success: false, message: `SKU not found: ${skuInput}` });
+      }
+      resolvedSkuId = String(skuDoc._id);
+      resolvedVendorProductId = String(skuDoc.productId);
+    }
+
+    if (!resolvedSkuId || !resolvedVendorProductId) {
+      return res.status(400).json({
+        success: false,
+        message: 'SKU is required (enter SKU code or provide skuId)',
+      });
     }
 
     const selectedWarehouse = req.user?.selectedWarehouse ? String(req.user.selectedWarehouse) : null;
@@ -106,14 +149,22 @@ const createStoreTransferOrder = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You cannot request for this warehouse' });
     }
 
-    const qty = Number(quantity);
-    if (!Number.isFinite(qty) || qty < 1) {
-      return res.status(400).json({ success: false, message: 'Invalid quantity' });
+    const qtyStr = String(quantity ?? '').trim();
+    let finalQty = 1;
+    if (qtyStr !== '') {
+      const qty = Number(quantity);
+      if (!Number.isFinite(qty) || !Number.isInteger(qty) || qty < 1) {
+        return res.status(400).json({
+          success: false,
+          message: 'Quantity must be a whole number of at least 1',
+        });
+      }
+      finalQty = qty;
     }
 
     const [vendorProduct, sku] = await Promise.all([
-      VendorProduct.findById(vendorProductId).select('_id vendorModel title').lean(),
-      Sku.findById(skuId).select('_id sku productId price currency').lean(),
+      VendorProduct.findById(resolvedVendorProductId).select('_id vendorModel title').lean(),
+      Sku.findById(resolvedSkuId).select('_id sku productId price currency').lean(),
     ]);
 
     if (!vendorProduct) return res.status(404).json({ success: false, message: 'Product not found' });
@@ -123,15 +174,15 @@ const createStoreTransferOrder = async (req, res) => {
     }
 
     const available = await sumSkuInventory(sku._id, sourceWarehouseId, null);
-    if (available < qty) {
+    if (available < finalQty) {
       return res.status(400).json({
         success: false,
-        message: `Insufficient stock at source warehouse. Available=${available}, requested=${qty}`,
+        message: `Insufficient stock at source warehouse. Available=${available}, requested=${finalQty}`,
       });
     }
 
     const unitPrice = Number(sku.price) || 0;
-    const lineTotal = unitPrice * qty;
+    const lineTotal = unitPrice * finalQty;
     const inventoryWallet = await InventoryWallet.findOne({ warehouse: destWh }).lean();
     const walletBalance = inventoryWallet?.balance || 0;
     if (lineTotal > 0 && walletBalance < lineTotal) {
@@ -146,9 +197,12 @@ const createStoreTransferOrder = async (req, res) => {
       skuId: sku._id,
       sourceWarehouseId,
       destWarehouseId: destWh,
-      quantity: qty,
+      quantity: finalQty,
       unitPrice,
       currency: sku.currency || 'USD',
+      receiptNumber: receipt,
+      note: String(note || '').trim(),
+      confirmedByUserId: String(confirmedByUserId || confirmedBy || '').trim(),
       status: 'SUBMITTED',
       requestedBy: actor.id,
       requestedByModel: actor.model,

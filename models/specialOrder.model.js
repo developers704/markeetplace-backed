@@ -60,7 +60,8 @@ const spoChatSeenSchema = new mongoose.Schema(
 
 const spoChatMessageSchema = new mongoose.Schema(
   {
-    text: { type: String, required: true, maxlength: 4000 },
+    text: { type: String, default: '', maxlength: 4000 },
+    attachments: { type: [String], default: [] },
     role: { type: String, enum: ['user', 'admin'], required: true },
     senderId: { type: mongoose.Schema.Types.ObjectId, default: null },
     senderName: { type: String, default: '' },

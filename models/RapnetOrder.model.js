@@ -67,8 +67,8 @@ const RapnetOrderSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ['REQUESTED', 'SUBMITTED_TO_RAPNET', 'CONFIRMED', 'REJECTED', 'CANCELLED'],
-      default: 'REQUESTED',
+      enum: ['SUBMITTED', 'CONFIRMED', 'REJECTED'],
+      default: 'SUBMITTED',
       index: true,
     },
 

@@ -37,4 +37,6 @@ const uploadSpoAttachments = upload.fields([
   { name: 'canvasDrawing', maxCount: 1 },
 ]);
 
-module.exports = { uploadSpoAttachments };
+const uploadSpoChatAttachments = upload.array('chatAttachments', 5);
+
+module.exports = { uploadSpoAttachments, uploadSpoChatAttachments };

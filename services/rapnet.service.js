@@ -346,7 +346,7 @@ async function getDiamondById(diamondId) {
 
 // ── Public: Submit inquiry (local record only) ────────────────────────────────
 async function submitOrder(payload = {}) {
-  return { status: 'SUBMITTED_TO_RAPNET', order_id: null, payload };
+  return { status: 'SUBMITTED', order_id: null, payload };
 }
 
 function capitalize(str) {

@@ -104,7 +104,7 @@ const placeOrder = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Authentication required.' });
     }
 
-    // ── Create local record first (status = REQUESTED) ────────────────────────
+    // ── Create local record first (status = SUBMITTED) ────────────────────────
     const order = new RapnetOrder({
       customerId:      new mongoose.Types.ObjectId(String(customerId)),
       rapnetProductId: String(rapnetProductId),
@@ -118,7 +118,7 @@ const placeOrder = async (req, res) => {
       price:    productSnapshot?.price   ? Number(productSnapshot.price)  : null,
       quantity: Math.max(1, Number(quantity)),
       notes:    String(notes).trim(),
-      status:   'REQUESTED',
+      status:   'SUBMITTED',
     });
 
     await order.save();
@@ -126,7 +126,7 @@ const placeOrder = async (req, res) => {
     // ── Submit to RapNet ──────────────────────────────────────────────────────
     let rapnetResponse = null;
     let rapnetOrderRef = null;
-    let finalStatus    = 'SUBMITTED_TO_RAPNET';
+    let finalStatus    = 'SUBMITTED';
 
     try {
       rapnetResponse = await rapnetService.submitOrder({
@@ -145,7 +145,7 @@ const placeOrder = async (req, res) => {
       console.error('[RapNet] submitOrder to RapNet failed:', rapnetErr.message);
       // Update record to reflect failure but don't delete — keep for retry/audit
       order.rapnetResponse = { error: rapnetErr.message };
-      order.status         = 'REQUESTED';
+      order.status         = 'SUBMITTED';
       await order.save();
       return res.status(502).json({
         success:  false,
@@ -246,15 +246,16 @@ const cancelOrder = async (req, res) => {
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found.' });
     }
-    if (['CONFIRMED', 'CANCELLED'].includes(order.status)) {
+    if (['CONFIRMED', 'REJECTED'].includes(order.status)) {
       return res.status(400).json({
         success: false,
         message: `Order cannot be cancelled — current status: ${order.status}`,
       });
     }
-    order.status = 'CANCELLED';
+    order.status = 'REJECTED';
+    order.rejectedAt = new Date();
     await order.save();
-    return res.status(200).json({ success: true, message: 'Order cancelled.', data: order });
+    return res.status(200).json({ success: true, message: 'Order rejected.', data: order });
   } catch (err) {
     console.error('[RapNet] cancelOrder error:', err.message);
     return res.status(500).json({ success: false, message: 'Failed to cancel order.', error: err.message });
@@ -271,8 +272,12 @@ const getAdminOrders = async (req, res) => {
     const search = String(req.query.search || '').trim();
 
     const match = {};
-    if (status && ['REQUESTED','SUBMITTED_TO_RAPNET','CONFIRMED','REJECTED','CANCELLED'].includes(status)) {
-      match.status = status;
+    if (status === 'SUBMITTED') {
+      match.status = { $in: ['SUBMITTED', 'REQUESTED', 'SUBMITTED_TO_RAPNET'] };
+    } else if (status === 'REJECTED') {
+      match.status = { $in: ['REJECTED', 'CANCELLED'] };
+    } else if (status === 'CONFIRMED') {
+      match.status = 'CONFIRMED';
     }
     if (search) {
       if (mongoose.isValidObjectId(search)) {
@@ -323,7 +328,7 @@ const updateOrderStatus = async (req, res) => {
     const { id }     = req.params;
     const { status, adminNote } = req.body ?? {};
 
-    const VALID = ['SUBMITTED_TO_RAPNET', 'CONFIRMED', 'REJECTED', 'CANCELLED'];
+    const VALID = ['SUBMITTED', 'CONFIRMED', 'REJECTED'];
     if (!VALID.includes(status)) {
       return res.status(400).json({
         success: false,
@@ -338,8 +343,8 @@ const updateOrderStatus = async (req, res) => {
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found.' });
     }
-    if (order.status === 'CANCELLED') {
-      return res.status(400).json({ success: false, message: 'Cannot update a cancelled order.' });
+    if (order.status === 'REJECTED') {
+      return res.status(400).json({ success: false, message: 'Cannot update a rejected order.' });
     }
 
     const prevStatus   = order.status;

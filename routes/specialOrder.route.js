@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middlewares/authMiddleware');
-const { uploadSpoAttachments } = require('../middlewares/spoUpload.middleware');
+const { uploadSpoAttachments, uploadSpoChatAttachments } = require('../middlewares/spoUpload.middleware');
 
 const {
   createSpecialOrder,
@@ -29,7 +29,7 @@ router.get('/admin', checkSpecialOrderAdmin, listAdminSpecialOrders);
 
 router.patch('/:id/finalize', finalizeSpecialOrder);
 router.get('/:id/chat-messages', listSpoChatMessages);
-router.post('/:id/chat-messages', postSpoChatMessage);
+router.post('/:id/chat-messages', uploadSpoChatAttachments, postSpoChatMessage);
 router.post('/:id/chat-messages/seen', markSpoChatSeen);
 router.get('/:id', getSpecialOrderById);
 router.patch('/:id', checkSpecialOrderAdmin, updateSpecialOrder);

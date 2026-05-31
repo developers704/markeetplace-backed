@@ -41,6 +41,9 @@ const b2bStoChatMessageSchema = new mongoose.Schema(
 const b2bStoreTransferOrderSchema = new mongoose.Schema(
   {
     ticketNumber: { type: String, unique: true, sparse: true, index: true },
+    receiptNumber: { type: String, default: '', trim: true, index: true },
+    note: { type: String, default: '', trim: true },
+    confirmedByUserId: { type: String, default: '', trim: true },
     vendorProductId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'VendorProduct',

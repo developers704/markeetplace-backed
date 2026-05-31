@@ -1860,6 +1860,7 @@ const exportVendorProductsCsv = async (req, res) => {
       // 'Vendor',
       'Vendor Model',
       'SKU',
+      'cp-price',
       'Tag Price',
       // 'Product Title',
       'Brand',
@@ -1925,7 +1926,8 @@ const exportVendorProductsCsv = async (req, res) => {
         // Vendor: attrs?.vendor || attrs?.branddesign || product?.brand || '',
         'Vendor Model': product?.vendorModel || '',
         SKU: sku?.sku || '',
-        'Tag Price': sku?.price || '',
+        'cp-price': sku?.price || '',
+        'Tag Price': sku?.tagPrice || '',
 
         // 'Product Title': product?.title || '',
         Brand: product?.brand || '',
