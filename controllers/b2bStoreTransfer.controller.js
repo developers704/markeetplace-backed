@@ -746,6 +746,7 @@ const listStoreTransferChatMessages = async (req, res) => {
     const messages = (order.chatMessages || []).map((m) => ({
       _id: m._id,
       text: m.text,
+      attachments: Array.isArray(m.attachments) ? m.attachments : [],
       role: m.role,
       senderId: m.senderId,
       senderName: m.senderName,
@@ -806,7 +807,15 @@ const postStoreTransferChatMessage = async (req, res) => {
 
     const text = String(req.body?.text || '').trim();
     const replyToMessageIdRaw = req.body?.replyToMessageId;
-    if (!text) return res.status(400).json({ success: false, message: 'Message required' });
+    const chatFiles = Array.isArray(req.files) ? req.files : [];
+    const attachmentPaths = chatFiles.map((f) => `spo/${f.filename}`);
+
+    if (!text && attachmentPaths.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Message text or at least one attachment is required',
+      });
+    }
     if (text.length > 4000) return res.status(400).json({ success: false, message: 'Message too long' });
 
     const order = await B2bStoreTransferOrder.findById(id);
@@ -847,7 +856,8 @@ const postStoreTransferChatMessage = async (req, res) => {
 
     const viewerModel = req.b2bActor?.model || 'User';
     order.chatMessages.push({
-      text,
+      text: text || (attachmentPaths.length ? '[attachment]' : ''),
+      attachments: attachmentPaths,
       role,
       senderId: req.user._id,
       senderName,
@@ -861,6 +871,7 @@ const postStoreTransferChatMessage = async (req, res) => {
     const payload = {
       _id: last._id,
       text: last.text,
+      attachments: Array.isArray(last.attachments) ? last.attachments : [],
       role: last.role,
       senderId: last.senderId,
       senderName: last.senderName,

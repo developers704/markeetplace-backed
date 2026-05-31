@@ -27,6 +27,7 @@ const b2bStoChatSeenSchema = new mongoose.Schema(
 const b2bStoChatMessageSchema = new mongoose.Schema(
   {
     text: { type: String, required: true, maxlength: 4000 },
+    attachments: { type: [String], default: [] },
     role: { type: String, enum: ['user', 'admin'], required: true },
     senderId: { type: mongoose.Schema.Types.ObjectId, default: null },
     senderName: { type: String, default: '' },
