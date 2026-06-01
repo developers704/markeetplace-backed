@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const CounterModel = require('./Counter.model');
 
 const TYPE_OF_REQUEST = [
   'WATCH',
@@ -103,13 +104,34 @@ const specialOrderSchema = new mongoose.Schema(
 specialOrderSchema.index({ createdAt: -1 });
 specialOrderSchema.index({ storeId: 1, status: 1 });
 
+// specialOrderSchema.pre('save', async function (next) {
+//   if (this.isNew && !this.ticketNumber) {
+//     const count = await mongoose.model('SpecialOrder').countDocuments();
+//     const year = new Date().getFullYear();
+//     this.ticketNumber = `SPO-${year}-${String(count + 1).padStart(5, '0')}`;
+//   }
+//   next();
+// });
+
 specialOrderSchema.pre('save', async function (next) {
-  if (this.isNew && !this.ticketNumber) {
-    const count = await mongoose.model('SpecialOrder').countDocuments();
-    const year = new Date().getFullYear();
-    this.ticketNumber = `SPO-${year}-${String(count + 1).padStart(5, '0')}`;
+  try {
+    if (this.isNew && !this.ticketNumber) {
+      const year = new Date().getFullYear();
+      const counterKey = `specialOrder-${year}`;
+
+      const counter = await CounterModel.findOneAndUpdate(
+        { _id: counterKey },
+        { $inc: { seq: 1 } },
+        { new: true, upsert: true }
+      );
+
+      this.ticketNumber = `SPO-${year}-${String(counter.seq).padStart(5, '0')}`;
+    }
+
+    next();
+  } catch (error) {
+    next(error);
   }
-  next();
 });
 
 const SpecialOrder = mongoose.model('SpecialOrder', specialOrderSchema);
