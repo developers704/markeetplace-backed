@@ -883,6 +883,12 @@ const listPurchaseRequests = async (req, res) => {
       : [];
 
     const filter = {};
+    const returnPending = String(req.query.returnPending || '').trim() === '1';
+
+    if (returnPending) {
+      filter.status = 'APPROVED';
+      filter['returnRequest.status'] = 'PENDING';
+    }
 
     if (view === 'my-orders') {
       const scope = String(req.query.scope || 'mine').toLowerCase().trim();
@@ -900,13 +906,13 @@ const listPurchaseRequests = async (req, res) => {
         filter.requestedBy = actor.id;
       }
 
-      if (statusList.length) {
+      if (!returnPending && statusList.length) {
         filter.status = { $in: statusList };
       }
     } else {
       // Approval queue
       if (actor?.isSuperUser || role === 'admin') {
-        if (statusList.length) {
+        if (!returnPending && statusList.length) {
           filter.status = { $in: statusList };
         }
         if (req.query.storeWarehouseId && isObjectId(req.query.storeWarehouseId)) {
@@ -914,18 +920,18 @@ const listPurchaseRequests = async (req, res) => {
         }
       } else if (role === 'district manager') {
         filter.dmUserId = actor.id;
-        if (statusList.length) {
+        if (!returnPending && statusList.length) {
           filter.status = { $in: statusList };
         }
       } else if (role === 'corporate manager') {
         filter.cmUserId = actor.id;
-        if (statusList.length) {
+        if (!returnPending && statusList.length) {
           filter.status = { $in: statusList };
         }
       } else {
         filter.requestedBy = actor.id;
 
-        if (statusList.length) {
+        if (!returnPending && statusList.length) {
           filter.status = { $in: statusList };
         }
       }
@@ -1193,6 +1199,372 @@ const rejectPurchaseRequest = async (req, res) => {
     return res.status(200).json({ success: true, message: 'Purchase request rejected', data: { requestId } });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to reject request', error: error.message });
+  }
+};
+
+const hasApprovalStep = (step) => !!step?.approvedAt;
+
+/** Ensure store still holds enough SKU qty to reverse an approved transfer. */
+async function assertStoreHasReturnStock(fresh, session) {
+  const available = await sumSkuInventory(fresh.skuId, fresh.storeWarehouseId, session);
+  if (available < fresh.quantity) {
+    throw new Error(
+      `Insufficient stock at store to roll back. Available=${available}, required=${fresh.quantity}`,
+    );
+  }
+
+  const storeInvQuery = StoreInventory.findOne({
+    storeWarehouseId: fresh.storeWarehouseId,
+    storeId: fresh.storeId,
+    vendorProductId: fresh.vendorProductId,
+    skuId: fresh.skuId,
+  }).select('quantity');
+  if (session) storeInvQuery.session(session);
+  const storeInv = await storeInvQuery.lean();
+  const storeInvQty = Number(storeInv?.quantity || 0);
+  if (storeInvQty < fresh.quantity) {
+    throw new Error(
+      `Insufficient store inventory record. Available=${storeInvQty}, required=${fresh.quantity}`,
+    );
+  }
+}
+
+/** Reverse admin approval: store -> vendor inventory + wallet (same amounts as approval). */
+async function reverseApprovedPurchaseInventory(fresh, session) {
+  const now = new Date();
+  await assertStoreHasReturnStock(fresh, session);
+
+  await deductSkuInventory({
+    skuId: fresh.skuId,
+    warehouseId: fresh.storeWarehouseId,
+    quantity: fresh.quantity,
+    session,
+  });
+
+  const storeInvOpts = session ? { session } : {};
+  await StoreInventory.updateOne(
+    {
+      storeWarehouseId: fresh.storeWarehouseId,
+      storeId: fresh.storeId,
+      vendorProductId: fresh.vendorProductId,
+      skuId: fresh.skuId,
+    },
+    { $inc: { quantity: -fresh.quantity } },
+    storeInvOpts,
+  );
+
+  await incrementSkuInventoryAtWarehouse({
+    skuId: fresh.skuId,
+    warehouseId: fresh.vendorWarehouseId,
+    quantity: fresh.quantity,
+    session,
+  });
+
+  const itemTotal = (fresh.cartItemPrice || 0) * fresh.quantity;
+  if (itemTotal > 0) {
+    const storeWalletQuery = InventoryWallet.findOne({ warehouse: fresh.storeWarehouseId });
+    if (session) storeWalletQuery.session(session);
+    let storeWallet = await storeWalletQuery;
+    if (!storeWallet) {
+      storeWallet = new InventoryWallet({ warehouse: fresh.storeWarehouseId, balance: 0 });
+    }
+    storeWallet.balance += itemTotal;
+    storeWallet.lastTransaction = now;
+    await storeWallet.save(session ? { session } : {});
+
+    const vendorWalletQuery = InventoryWallet.findOne({ warehouse: fresh.vendorWarehouseId });
+    if (session) vendorWalletQuery.session(session);
+    const vendorWallet = await vendorWalletQuery;
+    if (!vendorWallet) {
+      throw new Error('Inventory wallet not found for vendor warehouse');
+    }
+    if (vendorWallet.balance < itemTotal) {
+      throw new Error(
+        `Insufficient vendor wallet balance to reverse transfer. Available: ${vendorWallet.balance}, Required: ${itemTotal}`,
+      );
+    }
+    vendorWallet.balance -= itemTotal;
+    vendorWallet.lastTransaction = now;
+    await vendorWallet.save(session ? { session } : {});
+  }
+}
+
+async function runWithOptionalTransaction(fn) {
+  try {
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => fn(session));
+    } finally {
+      session.endSession();
+    }
+  } catch (txErr) {
+    const msg = String(txErr?.message || '');
+    if (msg.includes('Transaction numbers are only allowed') || msg.includes('replica set')) {
+      await fn(null);
+    } else {
+      throw txErr;
+    }
+  }
+}
+
+/**
+ * POST /api/v2/b2b/rollback/:requestId
+ * DM/CM undo their approval; Admin undo final approval (inventory + wallet reverse if store has stock).
+ */
+const rollbackPurchaseApproval = async (req, res) => {
+  try {
+    const actor = req.b2bActor;
+    const role = String(actor?.roleName || '').toLowerCase().trim();
+    const { requestId } = req.params;
+    if (!isObjectId(requestId)) return res.status(400).json({ success: false, message: 'Invalid requestId' });
+
+    const request = await B2BPurchaseRequest.findById(requestId);
+    if (!request) return res.status(404).json({ success: false, message: 'Purchase request not found' });
+    if (request.status === 'REJECTED') {
+      return res.status(400).json({ success: false, message: 'Rejected requests cannot be rolled back' });
+    }
+    if (request.status === 'RETURNED') {
+      return res.status(400).json({ success: false, message: 'Request is already returned / rolled back' });
+    }
+    if (String(request.returnRequest?.status || 'NONE') === 'PENDING') {
+      return res.status(400).json({
+        success: false,
+        message: 'A customer return is pending. Approve or reject the return request instead.',
+      });
+    }
+
+    const actorId = String(actor.id);
+    const isAdmin = actor.isSuperUser || role === 'admin';
+    const now = new Date();
+
+    // Admin rollback after final approval
+    if (isAdmin && request.status === 'APPROVED' && hasApprovalStep(request.approvals?.admin)) {
+      await runWithOptionalTransaction(async (session) => {
+        const reqQuery = B2BPurchaseRequest.findById(requestId);
+        if (session) reqQuery.session(session);
+        const fresh = await reqQuery;
+        if (!fresh || fresh.status !== 'APPROVED') throw new Error('Request is not approved');
+        await reverseApprovedPurchaseInventory(fresh, session);
+        fresh.approvals.admin = { userId: null, userModel: null, approvedAt: null };
+        fresh.status = 'RETURNED';
+        fresh.fulfillmentStatus = 'NONE';
+        fresh.shippedAt = null;
+        fresh.completedAt = null;
+        await fresh.save(session ? { session } : {});
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Approval rolled back. Inventory and wallets reversed.',
+        data: { requestId, status: 'RETURNED' },
+      });
+    }
+
+    // DM rollback — only if CM and Admin have not approved
+    if (role === 'district manager' && !actor.isSuperUser) {
+      if (String(request.dmUserId) !== actorId) {
+        return res.status(403).json({ success: false, message: 'You are not the assigned DM for this store' });
+      }
+      if (!hasApprovalStep(request.approvals?.dm)) {
+        return res.status(400).json({ success: false, message: 'DM approval has not been recorded yet' });
+      }
+      if (hasApprovalStep(request.approvals?.cm)) {
+        return res.status(400).json({ success: false, message: 'Cannot roll back: CM has already approved' });
+      }
+      if (hasApprovalStep(request.approvals?.admin) || request.status === 'APPROVED') {
+        return res.status(400).json({ success: false, message: 'Cannot roll back: Admin has already approved' });
+      }
+      if (!['PENDING_CM', 'PENDING_ADMIN'].includes(request.status)) {
+        return res.status(400).json({ success: false, message: 'Request is not in a DM-rollbackable state' });
+      }
+
+      request.approvals.dm = { userId: null, userModel: null, approvedAt: null };
+      request.status = 'PENDING_DM';
+      await request.save();
+
+      return res.status(200).json({
+        success: true,
+        message: 'DM approval rolled back',
+        data: { requestId, status: request.status },
+      });
+    }
+
+    // CM rollback — only if Admin has not approved
+    if (role === 'corporate manager' && !actor.isSuperUser) {
+      if (String(request.cmUserId) !== actorId) {
+        return res.status(403).json({ success: false, message: 'You are not the assigned CM for this store' });
+      }
+      if (!hasApprovalStep(request.approvals?.cm)) {
+        return res.status(400).json({ success: false, message: 'CM approval has not been recorded yet' });
+      }
+      if (hasApprovalStep(request.approvals?.admin) || request.status === 'APPROVED') {
+        return res.status(400).json({ success: false, message: 'Cannot roll back: Admin has already approved' });
+      }
+      if (request.status !== 'PENDING_ADMIN') {
+        return res.status(400).json({ success: false, message: 'Request is not pending admin approval' });
+      }
+
+      request.approvals.cm = { userId: null, userModel: null, approvedAt: null };
+      request.status = 'PENDING_CM';
+      await request.save();
+
+      return res.status(200).json({
+        success: true,
+        message: 'CM approval rolled back',
+        data: { requestId, status: request.status },
+      });
+    }
+
+    return res.status(403).json({ success: false, message: 'Rollback not allowed for your role on this request' });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * POST /api/v2/b2b/return-request/:requestId
+ * Store user requests return on an approved order (admin must approve).
+ */
+const requestPurchaseReturn = async (req, res) => {
+  try {
+    const actor = req.b2bActor;
+    const { requestId } = req.params;
+    if (!isObjectId(requestId)) return res.status(400).json({ success: false, message: 'Invalid requestId' });
+
+    const request = await B2BPurchaseRequest.findById(requestId);
+    if (!request) return res.status(404).json({ success: false, message: 'Purchase request not found' });
+    if (request.status !== 'APPROVED') {
+      return res.status(400).json({ success: false, message: 'Only approved orders can be returned' });
+    }
+    if (String(request.returnRequest?.status || 'NONE') === 'PENDING') {
+      return res.status(400).json({ success: false, message: 'Return request is already pending admin review' });
+    }
+    if (String(request.returnRequest?.status || 'NONE') === 'APPROVED' || request.status === 'RETURNED') {
+      return res.status(400).json({ success: false, message: 'This order has already been returned' });
+    }
+
+    const actorId = String(actor.id);
+    if (String(request.requestedBy) !== actorId) {
+      return res.status(403).json({ success: false, message: 'Only the requester can submit a return' });
+    }
+
+    const now = new Date();
+    request.returnRequest = {
+      status: 'PENDING',
+      requestedAt: now,
+      requestedBy: actor.id,
+      requestedByModel: actor.model,
+      processedAt: null,
+      processedBy: null,
+      processedByModel: null,
+      note: String(req.body?.note || '').trim(),
+    };
+    await request.save();
+
+    notifyB2BEvent({ event: 'RETURN_REQUESTED', request, actor }).catch((err) => console.error('Notification error:', err));
+
+    return res.status(200).json({
+      success: true,
+      message: 'Return request submitted. Awaiting admin approval.',
+      data: { requestId, returnRequest: request.returnRequest },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to submit return request', error: error.message });
+  }
+};
+
+/**
+ * POST /api/v2/b2b/return-approve/:requestId
+ * Admin approves customer return — reverses inventory/wallets at original cart price if store has stock.
+ */
+const approvePurchaseReturn = async (req, res) => {
+  try {
+    const actor = req.b2bActor;
+    const role = String(actor?.roleName || '').toLowerCase().trim();
+    const isAdmin = actor.isSuperUser || role === 'admin';
+    if (!isAdmin) return res.status(403).json({ success: false, message: 'Admin access required' });
+
+    const { requestId } = req.params;
+    if (!isObjectId(requestId)) return res.status(400).json({ success: false, message: 'Invalid requestId' });
+
+    const request = await B2BPurchaseRequest.findById(requestId);
+    if (!request) return res.status(404).json({ success: false, message: 'Purchase request not found' });
+    if (request.status !== 'APPROVED') {
+      return res.status(400).json({ success: false, message: 'Order must be approved before return can be processed' });
+    }
+    if (String(request.returnRequest?.status || 'NONE') !== 'PENDING') {
+      return res.status(400).json({ success: false, message: 'No pending return request for this order' });
+    }
+
+    const now = new Date();
+
+    await runWithOptionalTransaction(async (session) => {
+      const reqQuery = B2BPurchaseRequest.findById(requestId);
+      if (session) reqQuery.session(session);
+      const fresh = await reqQuery;
+      if (!fresh || fresh.status !== 'APPROVED') throw new Error('Order is not approved');
+      if (String(fresh.returnRequest?.status || 'NONE') !== 'PENDING') {
+        throw new Error('Return request is no longer pending');
+      }
+
+      await reverseApprovedPurchaseInventory(fresh, session);
+
+      fresh.returnRequest.status = 'APPROVED';
+      fresh.returnRequest.processedAt = now;
+      fresh.returnRequest.processedBy = actor.id;
+      fresh.returnRequest.processedByModel = actor.model;
+      fresh.status = 'RETURNED';
+      fresh.fulfillmentStatus = 'NONE';
+      fresh.shippedAt = null;
+      fresh.completedAt = null;
+      await fresh.save(session ? { session } : {});
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Return approved. Inventory and wallets reversed at original purchase price.',
+      data: { requestId, status: 'RETURNED' },
+    });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * POST /api/v2/b2b/return-reject/:requestId
+ */
+const rejectPurchaseReturn = async (req, res) => {
+  try {
+    const actor = req.b2bActor;
+    const role = String(actor?.roleName || '').toLowerCase().trim();
+    const isAdmin = actor.isSuperUser || role === 'admin';
+    if (!isAdmin) return res.status(403).json({ success: false, message: 'Admin access required' });
+
+    const { requestId } = req.params;
+    const { note } = req.body || {};
+    if (!isObjectId(requestId)) return res.status(400).json({ success: false, message: 'Invalid requestId' });
+
+    const request = await B2BPurchaseRequest.findById(requestId);
+    if (!request) return res.status(404).json({ success: false, message: 'Purchase request not found' });
+    if (String(request.returnRequest?.status || 'NONE') !== 'PENDING') {
+      return res.status(400).json({ success: false, message: 'No pending return request' });
+    }
+
+    const now = new Date();
+    request.returnRequest.status = 'REJECTED';
+    request.returnRequest.processedAt = now;
+    request.returnRequest.processedBy = actor.id;
+    request.returnRequest.processedByModel = actor.model;
+    request.returnRequest.note = String(note || request.returnRequest.note || '').trim();
+    await request.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Return request rejected',
+      data: { requestId, returnRequest: request.returnRequest },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to reject return', error: error.message });
   }
 };
 
@@ -1596,6 +1968,10 @@ module.exports = {
   listPurchaseRequests,
   approvePurchaseRequest,
   rejectPurchaseRequest,
+  rollbackPurchaseApproval,
+  requestPurchaseReturn,
+  approvePurchaseReturn,
+  rejectPurchaseReturn,
   listStoreInventory,
   listMyStoreInventory,
   patchPurchaseFulfillment,

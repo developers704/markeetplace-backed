@@ -89,10 +89,26 @@ const b2bPurchaseRequestSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ['PENDING_DM', 'PENDING_CM', 'PENDING_ADMIN', 'APPROVED', 'REJECTED'],
+      enum: ['PENDING_DM', 'PENDING_CM', 'PENDING_ADMIN', 'APPROVED', 'REJECTED', 'RETURNED'],
       required: true,
       default: 'PENDING_DM',
       index: true,
+    },
+
+    returnRequest: {
+      status: {
+        type: String,
+        enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'],
+        default: 'NONE',
+        index: true,
+      },
+      requestedAt: { type: Date, default: null },
+      requestedBy: { type: mongoose.Schema.Types.ObjectId, default: null },
+      requestedByModel: { type: String, enum: ['Customer', 'User'], default: null },
+      processedAt: { type: Date, default: null },
+      processedBy: { type: mongoose.Schema.Types.ObjectId, default: null },
+      processedByModel: { type: String, enum: ['Customer', 'User'], default: null },
+      note: { type: String, default: '' },
     },
 
     requestedBy: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },

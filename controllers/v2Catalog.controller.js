@@ -42,9 +42,16 @@ const INVENTORY_SCOPES_WITH_SKU_ORDER = new Set([
 ]);
 
 /** Inventory scope (sort) + optional SKU order (skuOrder) are separate query params. */
+const LISTING_SORT_ALIASES = {
+  'is-main': 'ismain',
+  'main': 'ismain',
+  'main-inventory': 'ismain',
+};
+
 function resolveListingSort(query) {
   let scopeRule = String(query?.sort || query?.srule || 'featured').toLowerCase();
   let skuOrder = String(query?.skuOrder || query?.skuSort || '').toLowerCase();
+  if (LISTING_SORT_ALIASES[scopeRule]) scopeRule = LISTING_SORT_ALIASES[scopeRule];
 
   if (SKU_SORT_VALUES.has(scopeRule)) {
     if (!skuOrder) skuOrder = scopeRule;
@@ -72,10 +79,76 @@ function buildListingSortObject(scopeRule, skuOrder) {
     'new-arrivals': { createdAt: -1, _id: 1 },
     'best-sellers': { createdAt: -1, _id: 1 },
     featured: { updatedAt: -1, _id: 1 },
-    ismain: { _id: 1 },
+    ismain: { mainWarehouseInventory: -1, _id: 1 },
   };
   return byScope[scopeRule] || { updatedAt: -1, _id: 1 };
 }
+
+const LISTING_PRODUCT_SELECT = [
+  'productId', 'vendorModel', 'vendorModelKey', 'title', 'brand', 'description',
+  'categoryId', 'categoryDoc', 'subcategoryId', 'subcategoryDoc', 'subsubcategoryId', 'subsubcategoryDoc',
+  'defaultSku', 'minPrice', 'maxPrice', 'skuCount', 'totalInventory', 'mainWarehouseInventory',
+  'createdAt', 'updatedAt',
+].join(' ');
+
+const isListingDebugQuery = (query) =>
+  String(process.env.PRODUCT_LISTING_DEBUG || '').toLowerCase() === 'true'
+  || ['1', 'true', 'yes'].includes(String(query?.debugListing || '').toLowerCase());
+
+const shouldBypassListingCache = (query) =>
+  ['1', 'true', 'yes'].includes(String(query?.nocache || query?.skipCache || '').toLowerCase());
+
+const toProductObjectId = (value) => {
+  if (!value) return null;
+  if (value instanceof mongoose.Types.ObjectId) return value;
+  if (typeof value === 'object' && value._id) return toProductObjectId(value._id);
+  const asString = String(value).trim();
+  return mongoose.Types.ObjectId.isValid(asString) ? new mongoose.Types.ObjectId(asString) : null;
+};
+
+/** Build API product row from ProductListing read model (source of truth for list endpoint). */
+const mapListingDocToProduct = (listing) => {
+  const id = toProductObjectId(listing?.productId);
+  if (!id) return null;
+  return {
+    _id: id,
+    vendorModel: listing.vendorModel || '',
+    vendorModelKey: listing.vendorModelKey || '',
+    title: listing.title || '',
+    brand: listing.brand || '',
+    category: listing.categoryDoc || listing.categoryId || null,
+    subcategory: listing.subcategoryDoc || listing.subcategoryId || null,
+    subsubcategory: listing.subsubcategoryDoc || listing.subsubcategoryId || null,
+    description: listing.description || '',
+    defaultSku: listing.defaultSku || null,
+    minPrice: listing.minPrice,
+    maxPrice: listing.maxPrice,
+    skuCount: listing.skuCount ?? 0,
+    totalInventory: listing.totalInventory ?? 0,
+    createdAt: listing.createdAt,
+    updatedAt: listing.updatedAt,
+  };
+};
+
+/** Prefer live VendorProduct fields when the document still exists; otherwise listing snapshot. */
+const mergeVendorProductWithListing = (vp, listing) => {
+  const fromListing = mapListingDocToProduct(listing) || {};
+  return {
+    ...fromListing,
+    _id: vp._id,
+    vendorModel: vp.vendorModel ?? fromListing.vendorModel,
+    vendorModelKey: vp.vendorModelKey ?? fromListing.vendorModelKey,
+    title: vp.title ?? fromListing.title,
+    brand: vp.brand ?? fromListing.brand,
+    category: vp.category ?? fromListing.category,
+    subcategory: vp.subcategory ?? fromListing.subcategory,
+    subsubcategory: vp.subsubcategory ?? fromListing.subsubcategory,
+    description: vp.description ?? fromListing.description,
+    defaultSku: vp.defaultSku ?? fromListing.defaultSku,
+    createdAt: vp.createdAt ?? fromListing.createdAt,
+    updatedAt: vp.updatedAt ?? fromListing.updatedAt,
+  };
+};
 const ATTRIBUTE_SKIP_KEYS = ['featureimageslink', 'galleryimagelink', 'descriptionname', 'stonetype', 'centerclarity'];
 
 function listingCacheKey(gen, params) {
@@ -638,8 +711,9 @@ const listVendorProducts = async (req, res) => {
     const redis = getRedis();
     const gen = redis ? await getListingCacheVersion() : '0';
     const cacheKey = listingCacheKey(gen, cacheParams);
+    const skipCache = shouldBypassListingCache(req.query);
 
-    if (redis) {
+    if (redis && !skipCache) {
       const cached = await redis.get(cacheKey);
       if (cached) {
         res.status(200).json(JSON.parse(cached));
@@ -714,8 +788,10 @@ async function buildListingPayload(query, context = {}) {
   const sortVp = buildListingSortObject(sortRule, skuOrder);
 
   let productIds = [];
+  let listingDocs = [];
   let total = 0;
   let listingMatchForFacets = null;
+  const listingDebug = isListingDebugQuery(query);
   const listingCount = await ProductListing.estimatedDocumentCount().catch(() => 0);
 
   if (listingCount > 0) {
@@ -840,10 +916,20 @@ async function buildListingPayload(query, context = {}) {
       .sort(sortVp)
       .skip(skip)
       .limit(limit)
-      .select('_id productId');
-    const listingDocs = await listingQuery.lean();
-    productIds = listingDocs.map((d) => d.productId);
+      .select(LISTING_PRODUCT_SELECT);
+    listingDocs = await listingQuery.lean();
+    productIds = listingDocs.map((d) => toProductObjectId(d.productId)).filter(Boolean);
     total = await ProductListing.countDocuments(listingMatch);
+
+    if (listingDebug) {
+      console.log('[listing][ProductListing]', {
+        sortRule,
+        skuOrder,
+        listingMatch,
+        total,
+        pageProductIds: productIds.length,
+      });
+    }
   }
 
   // Skip fallback when warehouseIds filter is active — empty result = no products in those warehouses
@@ -892,29 +978,32 @@ async function buildListingPayload(query, context = {}) {
 
   let products = [];
   if (productIds.length > 0) {
-    // products = await VendorProduct.find({ _id: { $in: productIds } })
-    //   .populate([
-    //     { path: 'category', select: '_id name' },
-    //     { path: 'subcategory', select: '_id name' },
-    //     { path: 'subsubcategory', select: '_id name' },
-    //     { path: 'defaultSku', select: '_id sku price currency images gallery metalColor metalType size attributes' }
-    //   ])
-    //   .lean();
+    const listingByProductId = new Map();
+    listingDocs.forEach((doc) => {
+      const pid = toProductObjectId(doc.productId);
+      if (pid) listingByProductId.set(pid.toString(), doc);
+    });
 
     const productDocs = await VendorProduct.find({ _id: { $in: productIds } })
-    .populate([
-    { path: 'category', select: '_id name' },
-    { path: 'subcategory', select: '_id name' },
-    { path: 'subsubcategory', select: '_id name' },
-    { path: 'defaultSku', select: '_id sku price tagPrice currency images gallery metalColor metalType size attributes' }
-    ])
-    .lean();
-    // Map products by _id
+      .populate([
+        { path: 'category', select: '_id name' },
+        { path: 'subcategory', select: '_id name' },
+        { path: 'subsubcategory', select: '_id name' },
+        { path: 'defaultSku', select: '_id sku price tagPrice currency images gallery metalColor metalType size attributes' },
+      ])
+      .lean();
     const productMap = new Map();
-    productDocs.forEach(p => productMap.set(p._id.toString(), p));
+    productDocs.forEach((p) => productMap.set(p._id.toString(), p));
 
-    // Reorder according to sorted productIds
-    products = productIds.map(id => productMap.get(id.toString())).filter(Boolean);
+    products = productIds.map((id) => {
+      const key = id.toString();
+      const vp = productMap.get(key);
+      const listing = listingByProductId.get(key);
+      if (vp && listing) return mergeVendorProductWithListing(vp, listing);
+      if (vp) return vp;
+      if (listing) return mapListingDocToProduct(listing);
+      return null;
+    }).filter(Boolean);
 
     const skus = await Sku.find({ productId: { $in: productIds }, isActive: true }).select('_id productId').lean();
     const skuIds = skus.map((s) => s._id);
@@ -965,11 +1054,32 @@ async function buildListingPayload(query, context = {}) {
     for (const p of products) {
       const pid = p._id.toString();
       p.skuCount = skuCountByProduct.get(pid) || 0;
-      p.totalInventory = totalInventoryByProduct.get(pid) || 0;
+      let qty = totalInventoryByProduct.get(pid);
+      if (qty == null) {
+        const listing = listingByProductId.get(pid);
+        if (listing) {
+          qty = isMainInventorySort ? listing.mainWarehouseInventory : listing.totalInventory;
+        }
+      }
+      p.totalInventory = qty || 0;
     }
   }
 
-  products.sort((a, b) => productIds.indexOf(a._id) - productIds.indexOf(b._id));
+  const productIdOrder = new Map(productIds.map((id, index) => [id.toString(), index]));
+  products.sort(
+    (a, b) => (productIdOrder.get(a._id.toString()) ?? 0) - (productIdOrder.get(b._id.toString()) ?? 0)
+  );
+
+  if (listingDebug) {
+    console.log('[listing][result]', {
+      sortRule,
+      productIds: productIds.length,
+      products: products.length,
+      total,
+      page,
+      limit,
+    });
+  }
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const hasNextPage = page < totalPages;
   let filters;

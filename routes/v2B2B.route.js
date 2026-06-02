@@ -10,6 +10,10 @@ const {
   listPurchaseRequests,
   approvePurchaseRequest,
   rejectPurchaseRequest,
+  rollbackPurchaseApproval,
+  requestPurchaseReturn,
+  approvePurchaseReturn,
+  rejectPurchaseReturn,
   listStoreInventory,
   listMyStoreInventory,
   patchPurchaseFulfillment,
@@ -38,6 +42,10 @@ router.post('/requests/:purchaseId/chat-messages/seen', markB2bPurchaseChatSeen)
 router.get('/requests', listPurchaseRequests);
 router.post('/approve/:requestId', approvePurchaseRequest);
 router.post('/reject/:requestId', rejectPurchaseRequest);
+router.post('/rollback/:requestId', rollbackPurchaseApproval);
+router.post('/return-request/:requestId', requestPurchaseReturn);
+router.post('/return-approve/:requestId', approvePurchaseReturn);
+router.post('/return-reject/:requestId', rejectPurchaseReturn);
 
 router.get('/store-inventory', listStoreInventory);
 router.get('/store-inventory/my', listMyStoreInventory);
