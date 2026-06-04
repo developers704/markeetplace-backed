@@ -33,8 +33,10 @@ async function run() {
     } else throw err;
   }
   try {
-    await rebuildAllProductListings(500);
-    console.log('ProductListing rebuild complete.');
+    const ProductListing = require('../models/productListing.model');
+    await ProductListing.syncIndexes();
+    const summary = await rebuildAllProductListings(500);
+    console.log('ProductListing rebuild complete.', summary);
   } finally {
     await mongoose.disconnect();
   }

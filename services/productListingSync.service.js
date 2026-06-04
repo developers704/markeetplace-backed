@@ -208,6 +208,14 @@ async function syncProductListing(productId, bumpCacheVersion = true) {
     createdAt: existingListing?.createdAt || vp.createdAt || new Date(),
     updatedAt: new Date(),
   };
+  
+  const vendorModel = listing.vendorModel || '';
+  if (vendorModel) {
+    await ProductListing.deleteMany({
+      vendorModel,
+      productId: { $ne: vp._id },
+    });
+  }
 
   await ProductListing.updateOne(
     { productId },
@@ -237,19 +245,69 @@ async function syncProductListingsInChunks(productIds, concurrency = 80) {
   if (ids.length > 0) await incrListingCacheVersion();
 }
 
+/**
+ * Full backfill after empty collection / index change.
+ * One listing per vendorModelKey (newest VendorProduct wins if duplicates exist in catalog).
+ */
 async function rebuildAllProductListings(batchSize = 500) {
-  const ids = await VendorProduct.find({}).distinct('_id');
-  // for (let i = 0; i < ids.length; i += batchSize) {
-  //   const batch = ids.slice(i, i + batchSize);
-  //   await syncProductListings(batch);
-  // }
-  for (let i = 0; i < ids.length; i += batchSize) {
-  const batch = ids.slice(i, i + batchSize);
-  await Promise.all(batch.map((id) => syncProductListing(id, false)));
+  const batch = Math.max(1, Number(batchSize) || 500);
+  const allProducts = await VendorProduct.find({})
+    .select('_id vendorModel vendorModelKey updatedAt createdAt')
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .lean();
+
+  const canonicalByModelKey = new Map();
+  const duplicateVendorProducts = [];
+
+  for (const vp of allProducts) {
+    const modelKey = normalizeKey(vp.vendorModelKey || vp.vendorModel);
+    if (!modelKey) continue;
+    if (canonicalByModelKey.has(modelKey)) {
+      duplicateVendorProducts.push({
+        vendorModelKey: modelKey,
+        keptProductId: String(canonicalByModelKey.get(modelKey)),
+        skippedProductId: String(vp._id),
+      });
+      continue;
+    }
+    canonicalByModelKey.set(modelKey, vp._id);
   }
+
+  const ids = [...canonicalByModelKey.values()];
+  let synced = 0;
+  let failed = 0;
+
+  console.log(
+    `[ProductListing] rebuild: ${allProducts.length} vendor products → ${ids.length} unique vendor models (${duplicateVendorProducts.length} duplicates skipped)`
+  );
+
+  for (let i = 0; i < ids.length; i += batch) {
+    const slice = ids.slice(i, i + batch);
+    const results = await Promise.allSettled(slice.map((id) => syncProductListing(id, false)));
+    results.forEach((r, idx) => {
+      if (r.status === 'fulfilled') synced += 1;
+      else {
+        failed += 1;
+        console.error(`[ProductListing] sync failed productId=${slice[idx]}:`, r.reason?.message || r.reason);
+      }
+    });
+    if ((i + batch) % (batch * 10) === 0 || i + batch >= ids.length) {
+      console.log(`[ProductListing] progress ${Math.min(i + batch, ids.length)}/${ids.length}`);
+    }
+  }
+
   await incrListingCacheVersion();
 
-
+  const listingCount = await ProductListing.countDocuments();
+  return {
+    vendorProductCount: allProducts.length,
+    uniqueVendorModels: ids.length,
+    duplicateVendorProductsSkipped: duplicateVendorProducts.length,
+    synced,
+    failed,
+    listingCount,
+    duplicateVendorProducts,
+  };
 }
 
 module.exports = {

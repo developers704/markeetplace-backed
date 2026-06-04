@@ -7,6 +7,11 @@ const TYPE_OF_REQUEST = [
   'STULLER_ITEM',
   'QG_ITEM',
   'CUSTOM_JEWELRY_PIECE',
+  'TRITON',
+  'TUNGSTEN',
+  'BENCHMARK',
+  'AGI_CERTIFICATE',
+  'REPAIR_diamond_replacement_under_warranty',
   'OTHERS',
 ];
 

@@ -54,7 +54,8 @@ const productListingSchema = new mongoose.Schema(
 );
 
 productListingSchema.index({ productId: 1 }, { unique: true });
-productListingSchema.index({ vendorModel: 1 },{ unique: true });
+/** One listing per vendor model string; sparse so empty values do not collide. */
+productListingSchema.index({ vendorModel: 1 }, { unique: true, sparse: true });
 productListingSchema.index({ brandKey: 1, categoryId: 1, updatedAt: -1, _id: 1 });
 productListingSchema.index({ brandKey: 1 });
 productListingSchema.index({ categoryId: 1 });
