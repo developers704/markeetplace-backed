@@ -634,6 +634,7 @@ const listVendorProductsAdmin = async (req, res) => {
  * - brand (optional)
  * - category (optional)
  */
+
 const listVendorProducts = async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -835,7 +836,11 @@ async function buildListingPayload(query, context = {}) {
     if (subsubcategoryId) listingMatch.subsubcategoryId = { $in: [subsubcategoryId, subsubcategoryId.toString()] };
     if (minPrice != null && minPrice > 0) listingMatch.minPrice = { $gte: minPrice };
     if (maxPrice != null && maxPrice > 0) listingMatch.maxPrice = { $lte: maxPrice };
-    if (!isOwnInventorySort && minQuantity != null && minQuantity > 0) listingMatch.totalInventory = { $gte: minQuantity };
+    if (!isOwnInventorySort && sortRule !== 'ismain' && warehouseIds.length === 0) {
+      listingMatch.totalInventory = minQuantity != null && minQuantity > 0
+        ? { $gte: minQuantity }
+        : { $gt: 0 };
+    }
     if (metalColorRaw && String(metalColorRaw).trim()) listingMatch.metalColorKeys = normalizeKey(metalColorRaw);
     // if (metalTypeRaw && String(metalTypeRaw).trim()) listingMatch.metalTypeKeys = normalizeKey(metalTypeRaw);
     if (metalTypeRaw && String(metalTypeRaw).trim()) {
@@ -963,17 +968,56 @@ async function buildListingPayload(query, context = {}) {
     // ];
 
   const fallbackSort = buildListingSortObject(sortRule, skuOrder);
+  const fallbackInventoryMatch = minQuantity != null && minQuantity > 0
+    ? { totalInventory: { $gte: minQuantity } }
+    : { totalInventory: { $gt: 0 } };
+  const fallbackInventoryStages = [
+    {
+      $lookup: {
+        from: 'skus',
+        let: { pid: '$_id' },
+        pipeline: [
+          { $match: { $expr: { $eq: ['$productId', '$$pid'] }, isActive: true } },
+          { $project: { _id: 1 } },
+        ],
+        as: 'skuDocs',
+      },
+    },
+    {
+      $lookup: {
+        from: 'skuinventories',
+        let: { skuIds: '$skuDocs._id' },
+        pipeline: [
+          { $match: { $expr: { $in: ['$skuId', '$$skuIds'] } } },
+          { $group: { _id: null, totalQty: { $sum: '$quantity' } } },
+        ],
+        as: 'inventoryAgg',
+      },
+    },
+    {
+      $addFields: {
+        totalInventory: { $ifNull: [{ $first: '$inventoryAgg.totalQty' }, 0] },
+      },
+    },
+    { $match: fallbackInventoryMatch },
+  ];
 
   const idPipeline = [
-  { $match: match },
-  { $sort: fallbackSort },
-  { $skip: skip },
-  { $limit: limit },
-  { $project: { _id: 1 } },
+    { $match: match },
+    ...fallbackInventoryStages,
+    { $sort: fallbackSort },
+    { $skip: skip },
+    { $limit: limit },
+    { $project: { _id: 1 } },
   ];
     const idResults = await VendorProduct.aggregate(idPipeline);
     productIds = idResults.map((p) => p._id);
-    total = await VendorProduct.countDocuments(match);
+    const countResult = await VendorProduct.aggregate([
+      { $match: match },
+      ...fallbackInventoryStages,
+      { $count: 'total' },
+    ]);
+    total = countResult[0]?.total || 0;
   }
 
   let products = [];
@@ -1063,6 +1107,11 @@ async function buildListingPayload(query, context = {}) {
       }
       p.totalInventory = qty || 0;
     }
+    products = products.filter((p) => {
+      const qty = p.totalInventory || 0;
+      if (minQuantity != null && minQuantity > 0) return qty >= minQuantity;
+      return qty > 0;
+    });
   }
 
   const productIdOrder = new Map(productIds.map((id, index) => [id.toString(), index]));
