@@ -16,6 +16,53 @@ const BUNNY_API_KEY = '258531ca-27bd-46bc-a91ff5bea140-9be6-4d9f';
 const BUNNY_CDN_HOSTNAME = 'vz-95f84657-308.b-cdn.net'; // CDN hostname from Bunny Stream dashboard
 const BUNNY_API_BASE_URL = `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}`;
 
+const toWarehouseSummary = (warehouseDoc) => {
+  if (!warehouseDoc) return null;
+  const rawId = warehouseDoc._id ?? warehouseDoc;
+  const idStr = String(rawId || '').trim();
+  if (!idStr || !mongoose.Types.ObjectId.isValid(idStr)) return null;
+  return {
+    _id: idStr,
+    name: warehouseDoc.name || '',
+    location: warehouseDoc.location || '',
+  };
+};
+
+/** Customer.warehouse is an array; support legacy single-object/id shapes too. */
+const normalizeCustomerWarehouses = (warehouseField) => {
+  if (warehouseField == null) {
+    return { warehouses: [], warehouse: null, warehouseIds: [] };
+  }
+  const rawList = Array.isArray(warehouseField) ? warehouseField : [warehouseField];
+  const warehouses = rawList.map(toWarehouseSummary).filter(Boolean);
+  const warehouseIds = warehouses.map((w) => w._id);
+  return {
+    warehouses,
+    warehouse: warehouses[0] || null,
+    warehouseIds,
+  };
+};
+
+const customerHasWarehouse = (warehouseField, warehouseId) => {
+  if (!warehouseId) return true;
+  const target = String(warehouseId);
+  const { warehouseIds } = normalizeCustomerWarehouses(warehouseField);
+  return warehouseIds.includes(target);
+};
+
+const buildWarehouseUserCounts = (users = []) => {
+  const counts = {};
+  for (const user of users) {
+    const ids = Array.isArray(user?.warehouseIds) && user.warehouseIds.length > 0
+      ? user.warehouseIds.map(String)
+      : normalizeCustomerWarehouses(user?.warehouses?.length ? user.warehouses : user?.warehouse).warehouseIds;
+    for (const warehouseId of ids) {
+      counts[warehouseId] = (counts[warehouseId] || 0) + 1;
+    }
+  }
+  return counts;
+};
+
 /**
  * Poll Bunny Stream API until video processing is complete
  * 
@@ -5915,7 +5962,7 @@ const getAllUsersProgress = async (req, res) => {
       .populate({
         path: 'enrolledUsers.user',
         model: 'Customer',
-        select: 'username email firstName lastName profilePicture isActive createdAt lastLogin department',
+        select: 'username email firstName lastName profilePicture isActive createdAt lastLogin department warehouse',
         populate: [
           { path: 'role', select: 'name' },
           { path: 'warehouse', select: 'name location' },
@@ -5960,8 +6007,14 @@ const getAllUsersProgress = async (req, res) => {
           if (!matchesSearch) continue;
         }
 
+        if (department && mongoose.Types.ObjectId.isValid(department)) {
+          const userDeptId = user.department?._id || user.department;
+          if (!userDeptId || String(userDeptId) !== String(department)) continue;
+        }
+
         // Initialize user in map if not exists
         if (!userMap.has(userId)) {
+          const warehouseInfo = normalizeCustomerWarehouses(user.warehouse);
           userMap.set(userId, {
             _id: user._id,
             username: user.username,
@@ -5973,11 +6026,9 @@ const getAllUsersProgress = async (req, res) => {
               _id: user.role._id,
               name: user.role.name
             } : null,
-            warehouse: user.warehouse ? {
-              _id: user.warehouse._id,
-              name: user.warehouse.name,
-              location: user.warehouse.location
-            } : null,
+            warehouses: warehouseInfo.warehouses,
+            warehouseIds: warehouseInfo.warehouseIds,
+            warehouse: warehouseInfo.warehouse,
             department: user.department ? {
               _id: user.department._id,
               name: user.department.name,
@@ -6070,11 +6121,17 @@ const getAllUsersProgress = async (req, res) => {
 
     console.log(`Processed ${processedUsers.length} users with enrollments`);
 
+    const warehouseUserCounts = buildWarehouseUserCounts(processedUsers);
+    const totalProgressUsers = processedUsers.length;
+
     if (warehouse && mongoose.Types.ObjectId.isValid(warehouse)) {
       const wh = String(warehouse);
-      processedUsers = processedUsers.filter(
-        (u) => u.warehouse?._id && String(u.warehouse._id) === wh,
-      );
+      processedUsers = processedUsers.filter((u) => {
+        if (Array.isArray(u.warehouseIds) && u.warehouseIds.length > 0) {
+          return u.warehouseIds.includes(wh);
+        }
+        return customerHasWarehouse(u.warehouses?.length ? u.warehouses : u.warehouse, wh);
+      });
     }
     if (department && mongoose.Types.ObjectId.isValid(department)) {
       const dept = String(department);
@@ -6147,6 +6204,8 @@ const getAllUsersProgress = async (req, res) => {
           hasPrevPage: page > 1
         },
         overallStats,
+        warehouseUserCounts,
+        totalProgressUsers,
         filters: {
           courseId: courseId || null,
           status: status || null,
@@ -7289,7 +7348,7 @@ const getCourseUsersProgress = async (req, res) => {
       .populate({
         path: 'enrolledUsers.user',
         model: 'Customer',
-        select: 'username email firstName lastName profilePicture isActive createdAt lastLogin',
+        select: 'username email firstName lastName profilePicture isActive createdAt lastLogin warehouse',
         populate: [
           { path: 'role', select: 'name' },
           { path: 'warehouse', select: 'name location' }
@@ -7349,6 +7408,7 @@ const getCourseUsersProgress = async (req, res) => {
       // Apply status filter
       if (status && courseProgress.status !== status) continue;
 
+      const warehouseInfo = normalizeCustomerWarehouses(user.warehouse);
       processedUsers.push({
         _id: user._id,
         username: user.username,
@@ -7362,11 +7422,9 @@ const getCourseUsersProgress = async (req, res) => {
           _id: user.role._id,
           name: user.role.name
         } : null,
-        warehouse: user.warehouse ? {
-          _id: user.warehouse._id,
-          name: user.warehouse.name,
-          location: user.warehouse.location
-        } : null,
+        warehouses: warehouseInfo.warehouses,
+        warehouseIds: warehouseInfo.warehouseIds,
+        warehouse: warehouseInfo.warehouse,
 
         // 🆕 COURSE SPECIFIC PROGRESS
         courseProgress: {
@@ -7965,6 +8023,7 @@ const getDashboardSummary = async (req, res) => {
       const averageRisk = courseCount > 0 ? totalRiskScore / courseCount : 0;
 
       if (averageRisk >= 5) {
+        const warehouseInfo = normalizeCustomerWarehouses(user.warehouse);
         riskyUsers.push({
           _id: user._id,
           username: user.username,
@@ -7972,7 +8031,9 @@ const getDashboardSummary = async (req, res) => {
           fullName: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
           profilePicture: user.profilePicture,
           role: user.role,
-          warehouse: user.warehouse,
+          warehouses: warehouseInfo.warehouses,
+          warehouseIds: warehouseInfo.warehouseIds,
+          warehouse: warehouseInfo.warehouse,
           riskScore: Math.round(averageRisk),
           enrolledCourses: courseCount
         });

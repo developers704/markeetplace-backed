@@ -392,7 +392,7 @@ const getAcceptedTermsUsers = async (req, res) => {
     const filter = { termsAccepted: true };
 
     if (req.query.warehouse && mongoose.Types.ObjectId.isValid(req.query.warehouse)) {
-      filter.warehouse = req.query.warehouse;
+      filter.warehouse = new mongoose.Types.ObjectId(req.query.warehouse);
     }
     if (req.query.department && mongoose.Types.ObjectId.isValid(req.query.department)) {
       filter.department = req.query.department;
