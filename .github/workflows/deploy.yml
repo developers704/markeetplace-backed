@@ -24,7 +24,7 @@ jobs:
 
             cd /var/www/marketplace/markeetplace-backed
             git pull origin main
-            npm install
+          
             pm2 restart marketplace-backend --update-env
             pm2 save
             echo "Backend deployed successfully at $(date)"
