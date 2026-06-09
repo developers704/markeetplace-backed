@@ -9,7 +9,7 @@ const wishlistSchema = new mongoose.Schema({
   products: [{
     productType: {
       type: String,
-      enum: ['regular', 'special'],
+      enum: ['regular', 'special', 'vendor'],
       required: true
     },
     product: {
@@ -22,6 +22,10 @@ const wishlistSchema = new mongoose.Schema({
     },
     isMain:{
       type: String 
+    },
+    skuId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Sku',
     },
   }]
 }, { timestamps: true });

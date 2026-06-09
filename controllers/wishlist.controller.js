@@ -3,10 +3,12 @@ const Product = require('../models/product.model');
 const Cart = require('../models/cart.model');
 const Inventory = require('../models/inventory.model');
 const SpecialProduct = require('../models/specialProduct.model.js');
+const VendorProduct = require('../models/vendorProduct.model');
+const Sku = require('../models/sku.model');
 
 const addToWishlist = async (req, res) => {
     try {
-      const { productId, productType , isMain , sellerWarehouseId} = req.body;
+      const { productId, productType , isMain , sellerWarehouseId, skuId } = req.body;
       const customerId = req.user._id;
   
       // Check if the product exists
@@ -16,15 +18,33 @@ const addToWishlist = async (req, res) => {
         product = await Product.findById(productId);
       } else if (productType === 'special') {
         product = await SpecialProduct.findById(productId);
+      } else if (productType === 'vendor') {
+        product = await VendorProduct.findById(productId);
+        if (product && skuId) {
+          const sku = await Sku.findOne({ _id: skuId, productId });
+          if (!sku) {
+            return res.status(404).json({ message: 'SKU not found for this vendor product' });
+          }
+        }
       }
       if (!product) {
         return res.status(404).json({ message: 'Product not found' });
+      }
+
+      const wishlistEntry = {
+        productType,
+        product: productId,
+        isMain,
+        sellerWarehouseId,
+      };
+      if (productType === 'vendor' && skuId) {
+        wishlistEntry.skuId = skuId;
       }
   
       // Use $addToSet to avoid duplicate product entries
       let wishlist = await Wishlist.findOneAndUpdate(
         { customer: customerId },
-        { $addToSet: { products: { productType, product: productId, isMain : isMain , sellerWarehouseId : sellerWarehouseId } } }, 
+        { $addToSet: { products: wishlistEntry } }, 
         { new: true, upsert: true } // new returns the updated document, upsert creates a new wishlist if it doesn't exist
       );
   
@@ -215,6 +235,8 @@ const toggleWishlistProduct = async (req, res) => {
       product = await Product.findById(productId);
     } else if (productType === 'special') {
       product = await SpecialProduct.findById(productId);
+    } else if (productType === 'vendor') {
+      product = await VendorProduct.findById(productId);
     }
 
     if (!product) {
@@ -392,6 +414,38 @@ const getWishlist = async (req, res) => {
           .populate("specialSubcategory", "name")
           .populate("prices.city")
           .lean();
+      } else if (item.productType === 'vendor') {
+        populatedProduct = await VendorProduct.findById(item.product)
+          .populate('subcategory', 'name')
+          .populate('subsubcategory', 'name')
+          .populate({
+            path: 'defaultSku',
+            select: 'sku price tagPrice currency images metalColor metalType size',
+          })
+          .lean();
+
+        if (populatedProduct) {
+          let skuData = null;
+          if (item.skuId) {
+            skuData = await Sku.findById(item.skuId)
+              .select('sku price tagPrice currency images metalColor metalType size')
+              .lean();
+          }
+          if (!skuData && populatedProduct.defaultSku) {
+            skuData = populatedProduct.defaultSku;
+          }
+
+          populatedProduct.name = populatedProduct.title;
+          populatedProduct._wishlistProductType = 'vendor';
+          if (skuData) {
+            populatedProduct.sku = skuData.sku;
+            populatedProduct.defaultSkuId = skuData._id;
+            populatedProduct.prices = [{ amount: skuData.price ?? skuData.tagPrice ?? 0 }];
+            populatedProduct.gallery = skuData.images?.length ? skuData.images : [];
+          } else {
+            populatedProduct.prices = [{ amount: 0 }];
+          }
+        }
       }
 
       if (populatedProduct && city && populatedProduct.prices && Array.isArray(populatedProduct.prices)) {
@@ -403,7 +457,11 @@ const getWishlist = async (req, res) => {
       return { ...item, product: populatedProduct };
     }));
 
-    wishlist.products = wishlist.products.filter((item) => item.product && item.product.prices && item.product.prices.length > 0);
+    wishlist.products = wishlist.products.filter((item) => {
+      if (!item.product) return false;
+      if (item.productType === 'vendor') return true;
+      return item.product.prices && item.product.prices.length > 0;
+    });
 
     res.status(200).json(wishlist);
   } catch (error) {

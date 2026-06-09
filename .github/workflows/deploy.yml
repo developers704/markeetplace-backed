@@ -1,4 +1,4 @@
-name: Deploy Backend to VPS
+name: Deploy Backend to Hetzner VPS
 
 on:
   push:
@@ -10,20 +10,21 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy backend to VPS
+      - name: Deploy backend to Hetzner VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
+          port: ${{ secrets.VPS_PORT }}
           username: ${{ secrets.VPS_USER }}
           password: ${{ secrets.VPS_PASSWORD }}
           script: |
-            export NODE_HOME="/root/.nvm/versions/node/v20.20.2"
-            export PATH="$NODE_HOME/bin:$PATH"
-
             echo "Node: $(which node) - $(node -v)"
             echo "NPM: $(which npm) - $(npm -v)"
             echo "PM2: $(which pm2) - $(pm2 -v)"
+
             cd /var/www/marketplace/markeetplace-backed
             git pull origin main
+            npm install
             pm2 restart marketplace-backend --update-env
             pm2 save
+            echo "Backend deployed successfully at $(date)"
