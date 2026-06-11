@@ -32,12 +32,14 @@ try {
   const { initB2bPurchaseChatSocket } = require('./socket/b2bPurchaseChat.socket');
   const { initAdminChatSocket } = require('./socket/adminChat.socket');
   const { initCustomerChatSocket } = require('./socket/customerChat.socket');
+  const { initSupportChatSocket } = require('./socket/supportChat.socket');
   initImportProgressSocket(server);
   initSpoChatSocket(server);
   initB2bStoreTransferChatSocket(server);
   initB2bPurchaseChatSocket(server);
   initAdminChatSocket(server);
   initCustomerChatSocket(server);
+  initSupportChatSocket(server);
 } catch (e) {
   console.error('Socket.IO init failed:', e.message);
 }
@@ -61,6 +63,12 @@ connectDB()
       startProductListingSyncWorker();
     } catch (e) {
       console.error('Product listing sync worker not started:', e.message);
+    }
+    try {
+      const { scheduleCatalogCacheRefresh } = require('./services/supportChatCatalogCache.service');
+      scheduleCatalogCacheRefresh();
+    } catch (e) {
+      console.error('Support chat catalog cache not started:', e.message);
     }
   })
   .catch((err) => console.error('MongoDB connection error:', err));

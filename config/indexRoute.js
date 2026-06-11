@@ -80,6 +80,7 @@ const fileManagerRoutes = require('../routes/fileManager.route');
 const rapnetRoutes      = require('../routes/rapnet.route');
 const adminChatUnreadRoutes = require('../routes/adminChatUnread.route');
 const aiImageSearchRoutes = require('../routes/aiImageSearch.route');
+const supportChatRoutes = require('../routes/supportChat.route');
 
 const router = express.Router();
 
@@ -163,5 +164,6 @@ router.use('/sheets', sheetCategoryRoutes);
 router.use('/file-manager', fileManagerRoutes);
 router.use('/rapnet',       rapnetRoutes);
 router.use('/ai-image-search', aiImageSearchRoutes);
+router.use('/support-chat', supportChatRoutes);
 
 module.exports = router;

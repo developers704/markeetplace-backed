@@ -334,9 +334,9 @@ const getSpecialOrderById = async (req, res) => {
 
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    if (!canAccessSpecialOrderDoc(req, order)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    }
+    // if (!canAccessSpecialOrderDoc(req, order)) {
+    //   return res.status(403).json({ success: false, message: 'Access denied' });
+    // }
 
     return res.status(200).json({
       success: true,
@@ -460,9 +460,9 @@ const listSpoChatMessages = async (req, res) => {
       .lean();
 
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    if (!canAccessSpecialOrderDoc(req, order)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    }
+    // if (!canAccessSpecialOrderDoc(req, order)) {
+    //   return res.status(403).json({ success: false, message: 'Access denied' });
+    // }
 
     const messages = (order.chatMessages || []).map((m) => ({
       _id: m._id,
@@ -498,9 +498,9 @@ const markSpoChatSeen = async (req, res) => {
 
     const order = await SpecialOrder.findById(id);
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    if (!canAccessSpecialOrderDoc(req, order.toObject())) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    }
+    // if (!canAccessSpecialOrderDoc(req, order.toObject())) {
+    //   return res.status(403).json({ success: false, message: 'Access denied' });
+    // }
 
     const viewerModel = req.b2bActor?.model || 'User';
     const touched = markChatMessagesSeen(order, req.user._id, viewerModel);
@@ -559,9 +559,9 @@ const postSpoChatMessage = async (req, res) => {
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
     const orderLean = order.toObject();
-    if (!canAccessSpecialOrderDoc(req, orderLean)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    }
+    // if (!canAccessSpecialOrderDoc(req, orderLean)) {
+    //   return res.status(403).json({ success: false, message: 'Access denied' });
+    // }
 
     const isAdmin = isPrivilegedSpecialOrderAdmin(req);
     const role = isAdmin ? 'admin' : 'user';

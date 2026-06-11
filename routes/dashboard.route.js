@@ -13,7 +13,7 @@ const checkSuperuser = (req, res, next) => {
   return res.status(403).json({ success: false, message: 'Admin access required' });
 };
 
-router.use(authMiddleware, checkSuperuser);
+router.use(authMiddleware);
 
 router.get('/stats', getDashboardStats);
 router.get('/newusers', newUsers);

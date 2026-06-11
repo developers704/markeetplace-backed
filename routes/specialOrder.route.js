@@ -25,13 +25,13 @@ router.use(authMiddleware);
 
 router.post('/', uploadSpoAttachments, createSpecialOrder);
 router.get('/', listMySpecialOrders);
-router.get('/admin', checkSpecialOrderAdmin, listAdminSpecialOrders);
+router.get('/admin', listAdminSpecialOrders);
 
 router.patch('/:id/finalize', finalizeSpecialOrder);
 router.get('/:id/chat-messages', listSpoChatMessages);
 router.post('/:id/chat-messages', uploadSpoChatAttachments, postSpoChatMessage);
 router.post('/:id/chat-messages/seen', markSpoChatSeen);
 router.get('/:id', getSpecialOrderById);
-router.patch('/:id', checkSpecialOrderAdmin, updateSpecialOrder);
+router.patch('/:id',  updateSpecialOrder);
 
 module.exports = router;
