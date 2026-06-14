@@ -176,7 +176,7 @@ const createSpecialOrder = async (req, res) => {
               <p><strong>Ticket:</strong> ${order.ticketNumber}</p>
               <p><strong>Requested By:</strong> ${requester?.username || ''}</p>
               <p><strong>Store:</strong> ${populated?.storeId?.name || ''}</p>
-              <p><a href="${process.env.ADMIN_URL}/special-orders/${order._id}">
+              <p><a href="${process.env.ADMIN_URL}/#/products/special-orders/${order._id}">
               View Order</a></p>
             `
           });
