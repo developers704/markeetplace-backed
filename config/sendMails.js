@@ -306,36 +306,73 @@
 // module.exports = { sendEmail };
 
 
-require("dotenv").config();
-const mailchimpTransactional = require("@mailchimp/mailchimp_transactional");
+// require("dotenv").config();
+// const mailchimpTransactional = require("@mailchimp/mailchimp_transactional");
 
-const client = mailchimpTransactional(process.env.MAILCHIMP_API_KEY);
+// const client = mailchimpTransactional(process.env.MAILCHIMP_API_KEY);
+
+// const sendEmail = async ({ to, subject, html, text }) => {
+//   try {
+//     const message = {
+//       from_email: process.env.EMAIL_FROM || "info@vallianimarketplace.com",
+//       from_name: process.env.EMAIL_FROM_NAME || "Valliani Marketplace",
+//       subject,
+//       text: text || "",
+//       html: html || `<p>${text || ""}</p>`,
+//       to: [{ email: to, type: "to" }],
+//     };
+
+//     const response = await client.messages.send({ message });
+
+//     console.log("✅ Mailchimp Transactional Email:", response);
+
+//     return {
+//       success: Array.isArray(response) && ["sent", "queued"].includes(response[0]?.status),
+//       response,
+//     };
+//   } catch (error) {
+//     console.error("❌ Mailchimp Transactional Error:", error?.response?.body || error.message || error);
+//     return {
+//       success: false,
+//       error: error?.response?.body || error.message || error,
+//     };
+//   }
+// };
+
+// module.exports = { sendEmail };
+
+
+require("dotenv").config();
+const nodemailer = require("nodemailer");
+
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || "mi3-cl9-ats6.a2hosting.com",
+  port: Number(process.env.SMTP_PORT) || 465,
+  secure: String(process.env.SMTP_SECURE) === "true",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+  logger: true,
+  debug: true,
+});
 
 const sendEmail = async ({ to, subject, html, text }) => {
   try {
-    const message = {
-      from_email: process.env.EMAIL_FROM || "info@vallianimarketplace.com",
-      from_name: process.env.EMAIL_FROM_NAME || "Valliani Marketplace",
+    const info = await transporter.sendMail({
+      from: `"${process.env.EMAIL_FROM_NAME || "Valliani Jewelers"}" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
+      to,
       subject,
       text: text || "",
       html: html || `<p>${text || ""}</p>`,
-      to: [{ email: to, type: "to" }],
-    };
+      replyTo: process.env.EMAIL_FROM || process.env.EMAIL_USER,
+    });
 
-    const response = await client.messages.send({ message });
-
-    console.log("✅ Mailchimp Transactional Email:", response);
-
-    return {
-      success: Array.isArray(response) && ["sent", "queued"].includes(response[0]?.status),
-      response,
-    };
+    console.log("✅ SMTP Email sent:", info.messageId);
+    return { success: true, messageId: info.messageId };
   } catch (error) {
-    console.error("❌ Mailchimp Transactional Error:", error?.response?.body || error.message || error);
-    return {
-      success: false,
-      error: error?.response?.body || error.message || error,
-    };
+    console.error("❌ SMTP Email Error:", error.message);
+    return { success: false, error: error.message };
   }
 };
 
