@@ -230,25 +230,67 @@ const getCategoryFiltersAndProducts = async (req, res) => {
 
 const getAllProducts = async (req, res) => {
     try {
-        const products = await SpecialProduct.find()
-            .populate('specialCategory')
-            .populate('specialSubcategory')
-            .populate('prices.city')
-            .populate({
-                path: 'productVariants',
-                populate: {
-                    path: 'variantName'
-                }
-            })
-            .populate({
-                path: 'inventory',
-                populate: [
-                    { path: 'warehouse' },
-                    { path: 'product' },
-                    { path: 'city' }
-                ]
+        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 15));
+        const skip = (page - 1) * limit;
+        const search = String(req.query.search || '').trim();
+        const sortFieldRaw = String(req.query.sort || 'name').toLowerCase();
+        const order = String(req.query.order || 'asc').toLowerCase() === 'desc' ? -1 : 1;
+        const city = req.query.city ? String(req.query.city).trim() : '';
+
+        const filter = {};
+        if (search) {
+            const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const re = new RegExp(escaped, 'i');
+            filter.$or = [{ name: re }, { sku: re }];
+        }
+
+        const allowedSort = {
+            name: 'name',
+            sku: 'sku',
+            status: 'status',
+            type: 'type',
+            createdat: 'createdAt',
+            updatedat: 'updatedAt',
+        };
+        const sortField = allowedSort[sortFieldRaw] || 'name';
+
+        const [total, products] = await Promise.all([
+            SpecialProduct.countDocuments(filter),
+            SpecialProduct.find(filter)
+                .select(
+                    'name sku image status type prices specialCategory specialSubcategory description gallery createdAt updatedAt'
+                )
+                .populate('specialCategory', 'name')
+                .populate('specialSubcategory', 'name')
+                .populate('prices.city', 'name')
+                .sort({ [sortField]: order, _id: 1 })
+                .skip(skip)
+                .limit(limit)
+                .lean(),
+        ]);
+
+        let data = products;
+        if (city) {
+            data = products.map((product) => {
+                const prices = (product.prices || []).filter(
+                    (p) => p.city && String(p.city._id || p.city) === city
+                );
+                return { ...product, prices };
             });
-        res.status(200).json(products);
+        }
+
+        return res.status(200).json({
+            success: true,
+            data,
+            pagination: {
+                total,
+                page,
+                limit,
+                totalPages: Math.ceil(total / limit) || 0,
+                hasNextPage: page * limit < total,
+            },
+        });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }

@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const warehouseSchema = new mongoose.Schema({
     name: { type: String, required: true, unique: true },
+    storeEmail: { type: String, trim: true, lowercase: true, default: '' },
     districtManager: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'Customer',

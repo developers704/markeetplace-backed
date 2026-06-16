@@ -82,5 +82,9 @@ const specialProductSchema = new mongoose.Schema({
     timestamps: true
 });
 
+specialProductSchema.index({ name: 1 });
+specialProductSchema.index({ sku: 1 });
+specialProductSchema.index({ createdAt: -1 });
+
 const SpecialProduct = mongoose.model('SpecialProduct', specialProductSchema);
 module.exports = SpecialProduct;

@@ -7,6 +7,10 @@ const { emitSpoChatMessage } = require('../socket/spoChat.socket');
 const { emitAdminChatUnreadChanged } = require('../socket/adminChat.socket');
 const { emitCustomerChatUnreadChanged } = require('../socket/customerChat.socket');
 const { notifySpoRequesterSms } = require('../utils/spoRequesterSms');
+const {
+  buildCreatorSpecialOrderEmail,
+  buildAdminSpecialOrderEmail,
+} = require('../utils/specialOrderEmailTemplates');
 
 const isObjectId = (v) => mongoose.isValidObjectId(String(v || '').trim());
 const MAX_REPLY_PREVIEW = 88;
@@ -59,6 +63,9 @@ function canAccessSpecialOrderDoc(req, order) {
   if (userSharesOrderStore(req, order)) return true;
   return false;
 }
+
+
+
 
 /**
  * POST /api/special-orders
@@ -140,24 +147,51 @@ const createSpecialOrder = async (req, res) => {
     });
 
     const populated = await SpecialOrder.findById(order._id)
-      .populate('storeId', 'name')
+      .populate('storeId', 'name storeEmail')
       .lean();
       
       // send email dynamic user start
-      // 1️⃣ Creator email
       const emails = [];
-
+      const customerOrderUrl = `${process.env.FRONTEND_URL || 'https://vallianimarketplace.com'}/en/special-order/${order._id}`;
+      const adminOrderUrl = `${process.env.ADMIN_URL || 'https://portal.vallianimarketplace.com'}/#/products/special-orders/${order._id}`;
       const requester = req.user;
+      const formData = {
+        receiptNumber,
+        customerNumber,
+        typeOfRequest,
+        referenceSkuNumber,
+        metalQuality,
+        diamondType,
+        diamondColor,
+        diamondClarity,
+        diamondDetails,
+        customization,
+        notes,
+        eta,
+      };
+
+      const sharedEmailPayload = {
+        order,
+        requester,
+        populated,
+        formData,
+        attachmentCount: attachmentPaths.length,
+      };
+
+      const creatorEmailHtml = buildCreatorSpecialOrderEmail({
+        ...sharedEmailPayload,
+        orderUrl: customerOrderUrl,
+      });
+      const adminEmailHtml = buildAdminSpecialOrderEmail({
+        ...sharedEmailPayload,
+        orderUrl: adminOrderUrl,
+      });
+     
       if (requester?.email) {
         emails.push({
           to: requester.email,
           subject: `Special Order Submitted - ${order.ticketNumber}`,
-          html: `
-            <h2>Special Order Submitted</h2>
-            <p>Your special order <strong>${order.ticketNumber}</strong> has been submitted successfully.</p>
-            <p>Store: ${populated?.storeId?.name || ''}</p>
-            <p>Status: SUBMITTED</p>
-          `
+          html: creatorEmailHtml,
         });
       }
 
@@ -171,17 +205,24 @@ const createSpecialOrder = async (req, res) => {
           emails.push({
             to: r.userId.email,
             subject: `New Special Order - ${order.ticketNumber}`,
-            html: `
-              <h2>New Special Order Received</h2>
-              <p><strong>Ticket:</strong> ${order.ticketNumber}</p>
-              <p><strong>Requested By:</strong> ${requester?.username || ''}</p>
-              <p><strong>Store:</strong> ${populated?.storeId?.name || ''}</p>
-              <p><a href="${process.env.ADMIN_URL}/special-orders/${order._id}">
-              View Order</a></p>
-            `
+            html: adminEmailHtml,
           });
         }
       });
+
+      const storeEmail = String(populated?.storeId?.storeEmail || '').trim().toLowerCase();
+      if (storeEmail) {
+        const alreadyNotified = emails.some(
+          (mail) => String(mail.to || '').trim().toLowerCase() === storeEmail
+        );
+        if (!alreadyNotified) {
+          emails.push({
+            to: storeEmail,
+            subject: `New Special Order - ${order.ticketNumber}`,
+            html: adminEmailHtml,
+          });
+        }
+      }
 
       // 3️⃣ Send emails (non-blocking like your existing system)
       if (emails.length > 0) {
