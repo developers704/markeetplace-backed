@@ -692,7 +692,7 @@ const updateUserInfo = async (req, res) => {
 const getAllUsers = async (req, res) => {
     try {
         // First get all users
-        const users = await User.find({ is_superuser: false }, '-password')
+        const users = await User.find({}, '-password')
             .populate('role')
             .populate('warehouse')
             .populate('department')
