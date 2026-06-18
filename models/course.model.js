@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const adminProgressCache = require('../services/adminProgressCache.service');
 
 const courseSchema = new mongoose.Schema({
     name: {
@@ -347,6 +348,12 @@ const courseSchema = new mongoose.Schema({
     }
 }, {
     timestamps: true
+});
+
+courseSchema.post('save', function postSaveCourse() {
+  if (this.isModified('enrolledUsers')) {
+    adminProgressCache.bumpAdminProgressCache().catch(() => {});
+  }
 });
 
 const Course = mongoose.model('Course', courseSchema);

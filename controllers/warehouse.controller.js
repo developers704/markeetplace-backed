@@ -150,6 +150,14 @@ const createWarehouse = async (req, res) => {
 
 const getAllWarehouses = async (req, res) => {
     try {
+        const minimal = String(req.query.minimal || '') === '1';
+        if (minimal) {
+            const warehouses = await Warehouse.find({}, '_id name')
+                .sort({ name: 1 })
+                .lean();
+            return res.status(200).json(warehouses);
+        }
+
         const warehouses = await Warehouse.find()
             .populate([
                 {

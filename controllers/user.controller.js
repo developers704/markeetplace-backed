@@ -1,4 +1,5 @@
 const bcrypt = require('bcryptjs');
+const mongoose = require('mongoose');
 const User = require('../models/user.model');
 const Wallet = require('../models/wallet.model.js')
 const UserRole = require('../models/userRole.model');
@@ -19,6 +20,100 @@ const {
 } = require('../services/permissionCache.service');
 
 const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const mapUserListRow = (user) => ({
+    _id: user._id,
+    username: user.username,
+    userId: user.userId,
+    email: user.email,
+    phone_number: user.phone_number,
+    role: user.role
+        ? { _id: user.role._id, role_name: user.role.role_name }
+        : null,
+    warehouse: Array.isArray(user.warehouse)
+        ? user.warehouse
+            .filter(Boolean)
+            .map((w) => (typeof w === 'object' ? { _id: w._id, name: w.name } : w))
+        : [],
+    department: user.department && typeof user.department === 'object'
+        ? { _id: user.department._id, name: user.department.name }
+        : null,
+});
+
+const mapUserEditPayload = (user, formOptions = null) => {
+    const payload = {
+        _id: user._id,
+        username: user.username,
+        userId: user.userId,
+        email: user.email,
+        phone_number: user.phone_number,
+        role: user.role
+            ? { _id: user.role._id, role_name: user.role.role_name }
+            : null,
+        warehouse: Array.isArray(user.warehouse)
+            ? user.warehouse
+                .filter(Boolean)
+                .map((w) => (typeof w === 'object' ? { _id: w._id, name: w.name } : w))
+            : [],
+        department: user.department && typeof user.department === 'object'
+            ? user.department._id
+            : (user.department || null),
+    };
+
+    if (formOptions) {
+        payload.formOptions = formOptions;
+    }
+
+    return payload;
+};
+
+const buildUserListQuery = ({ search, role, department } = {}) => {
+    const query = {};
+
+    if (role && mongoose.Types.ObjectId.isValid(role)) {
+        query.role = new mongoose.Types.ObjectId(role);
+    }
+
+    if (department && mongoose.Types.ObjectId.isValid(department)) {
+        query.department = new mongoose.Types.ObjectId(department);
+    }
+
+    const term = String(search || '').trim();
+    if (term) {
+        const regex = new RegExp(escapeRegex(term), 'i');
+        query.$or = [
+            { username: regex },
+            { email: regex },
+            { userId: regex },
+            { phone_number: regex },
+        ];
+    }
+
+    return query;
+};
+
+const getUserListFilterOptions = async () => {
+    const [roles, departments] = await Promise.all([
+        UserRole.find({ role_name: { $ne: 'Super User' } }, '_id role_name')
+            .sort({ role_name: 1 })
+            .lean(),
+        Department.find({}, '_id name').sort({ name: 1 }).lean(),
+    ]);
+    return { roles, departments };
+};
+
+const fetchUserListRows = (query, { skip = 0, limit } = {}) => {
+    let q = User.find(query, '_id username userId email phone_number role warehouse department')
+        .populate('role', '_id role_name')
+        .populate('warehouse', '_id name')
+        .populate('department', '_id name')
+        .sort({ updatedAt: -1 });
+
+    if (skip > 0) q = q.skip(skip);
+    if (limit) q = q.limit(limit);
+
+    return q.lean();
+};
 
 // Create User Role
 const createUserRole = async (req, res) => {
@@ -42,9 +137,18 @@ const createUserRole = async (req, res) => {
 // Get all User Roles
 const getAllUserRoles = async (req, res) => {
     try {
-        // Find all roles except the one marked as "superuser"
-        const userRoles = await UserRole.find({ role_name: { $ne: 'Super User' } });
+        const minimal = String(req.query.minimal || '') === '1';
+        if (minimal) {
+            const userRoles = await UserRole.find(
+                { role_name: { $ne: 'Super User' } },
+                '_id role_name',
+            )
+                .sort({ role_name: 1 })
+                .lean();
+            return res.status(200).json(userRoles);
+        }
 
+        const userRoles = await UserRole.find({ role_name: { $ne: 'Super User' } });
         res.status(200).json(userRoles);
     } catch (error) {
         res.status(400).json({ message: error.message });
@@ -691,43 +795,47 @@ const updateUserInfo = async (req, res) => {
 
 const getAllUsers = async (req, res) => {
     try {
-        // First get all users
-        const users = await User.find({}, '-password')
-            .populate('role')
-            .populate('warehouse')
-            .populate('department')
-            .sort({ updatedAt: -1 });
+        const {
+            page,
+            limit,
+            search,
+            role,
+            department,
+        } = req.query;
 
-        // Get all customers with matching emails
-        const userEmails = users.map(user => user.email);
-        const customers = await Customer.find({ email: { $in: userEmails } });
+        const isPaginated = page !== undefined
+            || limit !== undefined
+            || search
+            || role
+            || department;
 
-        // Create email to customer ID mapping
-        const customerMap = customers.reduce((acc, customer) => {
-            acc[customer.email] = customer._id;
-            return acc;
-        }, {});
+        if (!isPaginated) {
+            const users = await fetchUserListRows({});
+            return res.status(200).json(users.map(mapUserListRow));
+        }
 
-        // Get wallets for these customers
-        const wallets = await Wallet.find({
-            customer: { $in: customers.map(customer => customer._id) }
+        const pageNum = Math.max(1, parseInt(page, 10) || 1);
+        const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 15));
+        const skip = (pageNum - 1) * limitNum;
+        const query = buildUserListQuery({ search, role, department });
+
+        const [totalUsers, users, filterOptions] = await Promise.all([
+            User.countDocuments(query),
+            fetchUserListRows(query, { skip, limit: limitNum }),
+            getUserListFilterOptions(),
+        ]);
+
+        res.status(200).json({
+            users: users.map(mapUserListRow),
+            pagination: {
+                currentPage: pageNum,
+                totalPages: Math.ceil(totalUsers / limitNum) || 0,
+                totalUsers,
+                hasNextPage: pageNum * limitNum < totalUsers,
+                hasPrevPage: pageNum > 1,
+            },
+            filterOptions,
         });
-
-        // Create customer ID to wallet mapping
-        const walletMap = wallets.reduce((acc, wallet) => {
-            acc[wallet.customer.toString()] = wallet;
-            return acc;
-        }, {});
-
-        // Combine all data
-        const usersWithWallets = users.map(user => {
-            const userObj = user.toObject();
-            const customerId = customerMap[user.email];
-            userObj.wallet = customerId ? walletMap[customerId.toString()] : null;
-            return userObj;
-        });
-
-        res.status(200).json(usersWithWallets);
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
@@ -897,15 +1005,29 @@ const toggleTwoFactorAuth = async (req, res) => {
   const getUserById = async (req, res) => {
     try {
         const { id } = req.params;
-        const user = await User.findById(id)
-            .select('-password') // Exclude the password field
-            .populate('role'); // Populate the role field
+        const includeFormOptions = String(req.query.for || '') === 'edit';
+
+        const user = await User.findById(id, '-password')
+            .populate('role', '_id role_name')
+            .populate('warehouse', '_id name')
+            .populate('department', '_id name')
+            .lean();
 
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        res.status(200).json(user);
+        let formOptions = null;
+        if (includeFormOptions) {
+            const [roles, warehouses, departments] = await Promise.all([
+                UserRole.find({ role_name: { $ne: 'Super User' } }, '_id role_name').lean(),
+                Warehouse.find({}, '_id name').sort({ name: 1 }).lean(),
+                Department.find({}, '_id name').sort({ name: 1 }).lean(),
+            ]);
+            formOptions = { roles, warehouses, departments };
+        }
+
+        res.status(200).json(mapUserEditPayload(user, formOptions));
     } catch (error) {
         res.status(400).json({ message: error.message });
     }

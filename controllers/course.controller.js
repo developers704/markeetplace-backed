@@ -7,6 +7,7 @@ const Warehouse = require('../models/warehouse.model.js');
 const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
+const adminProgressCache = require('../services/adminProgressCache.service');
 
 // ============================================================================
 // Bunny Stream Video Library Configuration
@@ -5935,10 +5936,354 @@ const getAvailableCoursesForUser = async (req, res) => {
 
 
 // admin sites progress:
+const mapCourseToExportSlim = (course) => ({
+  courseName: course.courseName,
+  courseType: course.courseType,
+  progress: course.progress,
+  status: course.status,
+  gradePercentage: course.gradePercentage,
+  gradeLabel: course.gradeLabel,
+  enrollmentDate: course.enrollmentDate,
+  completionDate: course.completionDate,
+  lastAccessDate: course.lastAccessDate,
+  certificateInfo: { requestStatus: course.certificateInfo?.requestStatus },
+  performance: { riskLevel: course.performance?.riskLevel },
+});
+
+const mapUserToListRow = (user, { includeCourses = false } = {}) => {
+  const mainCourses = user.courses?.mainCourses || [];
+  const shortCourses = user.courses?.shortCourses || [];
+  const primary = mainCourses[0] || shortCourses[0] || null;
+
+  const row = {
+    _id: user._id,
+    username: user.username,
+    email: user.email,
+    createdAt: user.createdAt,
+    department: user.department,
+    warehouses: user.warehouses,
+    warehouse: user.warehouse,
+    warehouseIds: user.warehouseIds,
+    courseSummary: {
+      totalEnrolled: user.courseSummary?.totalEnrolled ?? 0,
+      completedCourses: user.courseSummary?.completedCourses ?? 0,
+      inProgressCourses: user.courseSummary?.inProgressCourses ?? 0,
+      failedCourses: user.courseSummary?.failedCourses ?? 0,
+      certificatesEarned: user.courseSummary?.certificatesEarned ?? 0,
+      certificateRequested: user.courseSummary?.certificateRequested ?? 0,
+      averageProgress: user.courseSummary?.averageProgress ?? 0,
+    },
+    listDisplay: {
+      status: primary?.status || 'Not Started',
+      riskLevel: primary?.performance?.riskLevel || 'Unknown',
+      gradeLabel: primary?.gradeLabel || 'Incomplete',
+      gradePercentage: primary?.gradePercentage ?? 0,
+    },
+  };
+
+  if (includeCourses) {
+    row.courses = {
+      mainCourses: mainCourses.map(mapCourseToExportSlim),
+      shortCourses: shortCourses.map(mapCourseToExportSlim),
+    };
+  }
+
+  return row;
+};
+
+const sortProcessedUsers = (users, sortBy, sortOrder) => {
+  const sorted = [...users];
+  sorted.sort((a, b) => {
+    let aValue;
+    let bValue;
+
+    switch (sortBy) {
+      case 'progress':
+        aValue = a.courseSummary.averageProgress;
+        bValue = b.courseSummary.averageProgress;
+        break;
+      case 'enrollmentDate': {
+        const aDates = a.courses.mainCourses.concat(a.courses.shortCourses).map((c) => new Date(c.enrollmentDate || 0).getTime());
+        const bDates = b.courses.mainCourses.concat(b.courses.shortCourses).map((c) => new Date(c.enrollmentDate || 0).getTime());
+        aValue = aDates.length ? Math.min(...aDates) : 0;
+        bValue = bDates.length ? Math.min(...bDates) : 0;
+        break;
+      }
+      case 'username':
+        aValue = a.username?.toLowerCase() || '';
+        bValue = b.username?.toLowerCase() || '';
+        break;
+      default:
+        aValue = a.courseSummary.averageProgress;
+        bValue = b.courseSummary.averageProgress;
+    }
+
+    if (sortOrder === 'desc') {
+      return bValue > aValue ? 1 : -1;
+    }
+    return aValue > bValue ? 1 : -1;
+  });
+  return sorted;
+};
+
+const buildOverallStats = (users) => ({
+  totalUsers: users.length,
+  activeUsers: users.filter((u) => u.isActive).length,
+  totalEnrollments: users.reduce((sum, u) => sum + u.courseSummary.totalEnrolled, 0),
+  totalCompletedCourses: users.reduce((sum, u) => sum + u.courseSummary.completedCourses, 0),
+  totalInProgressCourses: users.reduce((sum, u) => sum + u.courseSummary.inProgressCourses, 0),
+  totalFailedCourses: users.reduce((sum, u) => sum + u.courseSummary.failedCourses, 0),
+  totalCertificatesEarned: users.reduce((sum, u) => sum + u.courseSummary.certificatesEarned, 0),
+  averageProgressAllUsers: users.length > 0
+    ? Math.round(users.reduce((sum, u) => sum + u.courseSummary.averageProgress, 0) / users.length)
+    : 0,
+});
+
+const computeAdminProgressIndex = async (filters) => {
+  const {
+    courseId,
+    status,
+    search,
+    department,
+  } = filters;
+
+  let courseQuery = { isActive: true };
+  if (courseId && mongoose.Types.ObjectId.isValid(courseId)) {
+    courseQuery._id = new mongoose.Types.ObjectId(courseId);
+  }
+
+  const courses = await Course.find(courseQuery)
+    .populate({
+      path: 'enrolledUsers.user',
+      model: 'Customer',
+      select: 'username email firstName lastName profilePicture isActive createdAt lastLogin department warehouse',
+      populate: [
+        { path: 'role', select: 'name' },
+        { path: 'warehouse', select: 'name location' },
+        { path: 'department', select: 'name' },
+      ],
+    })
+    .populate({
+      path: 'enrolledUsers.certificateRequestId',
+      model: 'CertificateRequest',
+      select: 'status certificateId createdAt reviewedAt certificateImagePath',
+    })
+    .select('name description thumbnail level courseType language approximateHours totalVideos status passingGrade chapters enrolledUsers weightage');
+
+  const allQuizResults = await Quiz.find({}).lean();
+
+  const userMap = new Map();
+
+  for (const course of courses) {
+    if (!course.enrolledUsers || course.enrolledUsers.length === 0) continue;
+
+    for (const enrollment of course.enrolledUsers) {
+      if (!enrollment.user) continue;
+
+      const userId = String(enrollment.user._id);
+      const user = enrollment.user;
+
+      if (search) {
+        const searchLower = search.toLowerCase();
+        const matchesSearch =
+          user.username?.toLowerCase().includes(searchLower) ||
+          user.email?.toLowerCase().includes(searchLower) ||
+          user.firstName?.toLowerCase().includes(searchLower) ||
+          user.lastName?.toLowerCase().includes(searchLower);
+        if (!matchesSearch) continue;
+      }
+
+      if (department && mongoose.Types.ObjectId.isValid(department)) {
+        const userDeptId = user.department?._id || user.department;
+        if (!userDeptId || String(userDeptId) !== String(department)) continue;
+      }
+
+      if (!userMap.has(userId)) {
+        const warehouseInfo = normalizeCustomerWarehouses(user.warehouse);
+        userMap.set(userId, {
+          _id: user._id,
+          username: user.username,
+          email: user.email,
+          isActive: user.isActive,
+          createdAt: user.createdAt,
+          warehouses: warehouseInfo.warehouses,
+          warehouseIds: warehouseInfo.warehouseIds,
+          warehouse: warehouseInfo.warehouse,
+          department: user.department
+            ? {
+                _id: user.department._id,
+                name: user.department.name,
+                code: user.department.code,
+              }
+            : null,
+          courses: [],
+          courseSummary: {
+            totalEnrolled: 0,
+            mainCoursesCount: 0,
+            shortCoursesCount: 0,
+            completedCourses: 0,
+            inProgressCourses: 0,
+            failedCourses: 0,
+            certificatesEarned: 0,
+            averageProgress: 0,
+            certificateEligible: 0,
+            certificateRequested: 0,
+            certificateApproved: 0,
+          },
+        });
+      }
+
+      const userData = userMap.get(userId);
+      const courseProgress = await calculateSingleCourseProgress(course, enrollment, userId, allQuizResults);
+
+      if (status && courseProgress.status !== status) continue;
+
+      userData.courses.push(courseProgress);
+      userData.courseSummary.totalEnrolled++;
+
+      if (courseProgress.courseType === 'Course') {
+        userData.courseSummary.mainCoursesCount++;
+      } else if (courseProgress.courseType === 'Short Course') {
+        userData.courseSummary.shortCoursesCount++;
+      }
+
+      if (courseProgress.status === 'Completed') {
+        userData.courseSummary.completedCourses++;
+      } else if (courseProgress.status === 'Done') {
+        userData.courseSummary.completedCourses++;
+        userData.courseSummary.certificatesEarned++;
+      } else if (courseProgress.status === 'In Progress') {
+        userData.courseSummary.inProgressCourses++;
+      } else if (courseProgress.status === 'Failed') {
+        userData.courseSummary.failedCourses++;
+      }
+
+      if (courseProgress.certificateInfo.requestStatus === 'Eligible') {
+        userData.courseSummary.certificateEligible++;
+      } else if (courseProgress.certificateInfo.requestStatus === 'Requested') {
+        userData.courseSummary.certificateRequested++;
+      } else if (courseProgress.certificateInfo.requestStatus === 'Approved') {
+        userData.courseSummary.certificateApproved++;
+      }
+    }
+  }
+
+  const processedUsers = Array.from(userMap.values()).map((user) => {
+    if (user.courses.length > 0) {
+      const totalProgress = user.courses.reduce((sum, course) => sum + course.progress, 0);
+      user.courseSummary.averageProgress = Math.round(totalProgress / user.courses.length);
+    }
+
+    const mainCourses = user.courses.filter((course) => course.courseType === 'Course');
+    const shortCourses = user.courses.filter((course) => course.courseType === 'Short Course');
+
+    return {
+      ...user,
+      courses: { mainCourses, shortCourses },
+    };
+  });
+
+  return {
+    processedUsers,
+    warehouseUserCounts: buildWarehouseUserCounts(processedUsers),
+    totalProgressUsers: processedUsers.length,
+  };
+};
+
+const buildAdminUserProgressDetail = async (userId) => {
+  const customer = await Customer.findById(userId)
+    .populate('role', 'name')
+    .populate('warehouse', 'name location')
+    .populate('department', 'name code')
+    .select('username email firstName lastName profilePicture isActive createdAt lastLogin department warehouse');
+
+  if (!customer) {
+    return null;
+  }
+
+  const courses = await Course.find({
+    isActive: true,
+    'enrolledUsers.user': userId,
+  })
+    .populate({
+      path: 'enrolledUsers.certificateRequestId',
+      model: 'CertificateRequest',
+      select: 'status certificateId createdAt reviewedAt certificateImagePath userSignaturePath presidentSignaturePath',
+    })
+    .select('name description thumbnail level courseType language approximateHours totalVideos status passingGrade chapters enrolledUsers weightage');
+
+  const allQuizResults = await Quiz.find({});
+  const warehouseInfo = normalizeCustomerWarehouses(customer.warehouse);
+  const courseRows = [];
+
+  for (const course of courses) {
+    const enrollment = course.enrolledUsers.find(
+      (e) => e?.user && String(e.user) === String(userId),
+    );
+    if (!enrollment) continue;
+    const courseProgress = await calculateSingleCourseProgress(course, enrollment, String(userId), allQuizResults);
+    courseRows.push(courseProgress);
+  }
+
+  const courseSummary = {
+    totalEnrolled: courseRows.length,
+    mainCoursesCount: courseRows.filter((c) => c.courseType === 'Course').length,
+    shortCoursesCount: courseRows.filter((c) => c.courseType === 'Short Course').length,
+    completedCourses: 0,
+    inProgressCourses: 0,
+    failedCourses: 0,
+    certificatesEarned: 0,
+    averageProgress: 0,
+    certificateEligible: 0,
+    certificateRequested: 0,
+    certificateApproved: 0,
+  };
+
+  for (const c of courseRows) {
+    if (c.status === 'Completed') courseSummary.completedCourses++;
+    else if (c.status === 'Done') {
+      courseSummary.completedCourses++;
+      courseSummary.certificatesEarned++;
+    } else if (c.status === 'In Progress') courseSummary.inProgressCourses++;
+    else if (c.status === 'Failed') courseSummary.failedCourses++;
+
+    if (c.certificateInfo?.requestStatus === 'Eligible') courseSummary.certificateEligible++;
+    else if (c.certificateInfo?.requestStatus === 'Requested') courseSummary.certificateRequested++;
+    else if (c.certificateInfo?.requestStatus === 'Approved') courseSummary.certificateApproved++;
+  }
+
+  if (courseRows.length) {
+    courseSummary.averageProgress = Math.round(
+      courseRows.reduce((sum, c) => sum + c.progress, 0) / courseRows.length,
+    );
+  }
+
+  const mainCourses = courseRows.filter((c) => c.courseType === 'Course');
+  const shortCourses = courseRows.filter((c) => c.courseType === 'Short Course');
+
+  return {
+    _id: customer._id,
+    username: customer.username,
+    email: customer.email,
+    fullName: `${customer.firstName || ''} ${customer.lastName || ''}`.trim(),
+    role: customer.role ? { _id: customer.role._id, name: customer.role.name } : null,
+    warehouses: warehouseInfo.warehouses,
+    warehouseIds: warehouseInfo.warehouseIds,
+    warehouse: warehouseInfo.warehouse,
+    department: customer.department
+      ? { _id: customer.department._id, name: customer.department.name, code: customer.department.code }
+      : null,
+    profilePicture: customer.profilePicture,
+    isActive: customer.isActive,
+    createdAt: customer.createdAt,
+    lastLogin: customer.lastLogin,
+    courseSummary,
+    courses: { mainCourses, shortCourses },
+  };
+};
+
 const getAllUsersProgress = async (req, res) => {
   try {
-    console.log("Admin getting all users progress...");
-
     const {
       page = 1,
       limit = 10,
@@ -5948,181 +6293,26 @@ const getAllUsersProgress = async (req, res) => {
       warehouse,
       department,
       sortBy = 'enrollmentDate',
-      sortOrder = 'desc'
+      sortOrder = 'desc',
     } = req.query;
 
-    // Build course query
-    let courseQuery = { isActive: true };
-    if (courseId && mongoose.Types.ObjectId.isValid(courseId)) {
-      courseQuery._id = new mongoose.Types.ObjectId(courseId);
+    const includeCourses = String(req.query.includeCourses || req.query.export || '') === '1';
+    const cacheFilters = {
+      courseId: courseId || null,
+      status: status || null,
+      search: search || null,
+      department: department || null,
+    };
+
+    let indexPayload = await adminProgressCache.getIndexCache(cacheFilters);
+    if (!indexPayload) {
+      indexPayload = await computeAdminProgressIndex(cacheFilters);
+      await adminProgressCache.setIndexCache(cacheFilters, indexPayload);
     }
 
-    // 🆕 GET COURSES WITH ENROLLED USERS (SAME AS SINGLE USER LOGIC)
-    const courses = await Course.find(courseQuery)
-      .populate({
-        path: 'enrolledUsers.user',
-        model: 'Customer',
-        select: 'username email firstName lastName profilePicture isActive createdAt lastLogin department warehouse',
-        populate: [
-          { path: 'role', select: 'name' },
-          { path: 'warehouse', select: 'name location' },
-          { path: 'department', select: 'name' },
-
-        ]
-      })
-      .populate({
-        path: 'enrolledUsers.certificateRequestId',
-        model: 'CertificateRequest',
-        select: 'status certificateId createdAt reviewedAt certificateImagePath'
-      })
-      .select('name description thumbnail level courseType language approximateHours totalVideos status passingGrade chapters enrolledUsers weightage');
-
-    console.log(`Found ${courses.length} courses`);
-
-    // 🆕 GET ALL QUIZ RESULTS (SAME AS SINGLE USER)
-    const allQuizResults = await Quiz.find({});
-
-    // 🆕 CREATE USER MAP TO ORGANIZE DATA
-    const userMap = new Map();
-
-    // 🆕 PROCESS EACH COURSE AND ENROLLMENT (EXACT SAME LOGIC AS SINGLE USER)
-    for (const course of courses) {
-      if (!course.enrolledUsers || course.enrolledUsers.length === 0) continue;
-
-      for (const enrollment of course.enrolledUsers) {
-        if (!enrollment.user) continue;
-
-        const userId = enrollment.user._id.toString();
-        const user = enrollment.user;
-
-        // Apply search filter
-        if (search) {
-          const searchLower = search.toLowerCase();
-          const matchesSearch =
-            user.username?.toLowerCase().includes(searchLower) ||
-            user.email?.toLowerCase().includes(searchLower) ||
-            user.firstName?.toLowerCase().includes(searchLower) ||
-            user.lastName?.toLowerCase().includes(searchLower);
-
-          if (!matchesSearch) continue;
-        }
-
-        if (department && mongoose.Types.ObjectId.isValid(department)) {
-          const userDeptId = user.department?._id || user.department;
-          if (!userDeptId || String(userDeptId) !== String(department)) continue;
-        }
-
-        // Initialize user in map if not exists
-        if (!userMap.has(userId)) {
-          const warehouseInfo = normalizeCustomerWarehouses(user.warehouse);
-          userMap.set(userId, {
-            _id: user._id,
-            username: user.username,
-            email: user.email,
-            firstName: user.firstName,
-            lastName: user.lastName,
-            fullName: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
-            role: user.role ? {
-              _id: user.role._id,
-              name: user.role.name
-            } : null,
-            warehouses: warehouseInfo.warehouses,
-            warehouseIds: warehouseInfo.warehouseIds,
-            warehouse: warehouseInfo.warehouse,
-            department: user.department ? {
-              _id: user.department._id,
-              name: user.department.name,
-              code: user.department.code
-            } : null,
-            profilePicture: user.profilePicture,
-            isActive: user.isActive,
-            createdAt: user.createdAt,
-            lastLogin: user.lastLogin,
-            courses: [],
-            courseSummary: {
-              totalEnrolled: 0,
-              mainCoursesCount: 0,
-              shortCoursesCount: 0,
-              completedCourses: 0,
-              inProgressCourses: 0,
-              failedCourses: 0,
-              certificatesEarned: 0,
-              averageProgress: 0,
-              certificateEligible: 0,
-              certificateRequested: 0,
-              certificateApproved: 0
-            }
-          });
-        }
-
-        const userData = userMap.get(userId);
-
-        // 🆕 CALCULATE COURSE PROGRESS (EXACT SAME AS SINGLE USER LOGIC)
-        const courseProgress = await calculateSingleCourseProgress(course, enrollment, userId, allQuizResults);
-
-        // Apply status filter
-        if (status && courseProgress.status !== status) continue;
-
-        // Add course to user's courses
-        userData.courses.push(courseProgress);
-
-        // 🆕 UPDATE USER SUMMARY (SAME LOGIC AS SINGLE USER)
-        userData.courseSummary.totalEnrolled++;
-
-        if (courseProgress.courseType === 'Course') {
-          userData.courseSummary.mainCoursesCount++;
-        } else if (courseProgress.courseType === 'Short Course') {
-          userData.courseSummary.shortCoursesCount++;
-        }
-
-        // Status counting (same as single user)
-        if (courseProgress.status === 'Completed') {
-          userData.courseSummary.completedCourses++;
-        } else if (courseProgress.status === 'Done') {
-          userData.courseSummary.completedCourses++;
-          userData.courseSummary.certificatesEarned++;
-        } else if (courseProgress.status === 'In Progress') {
-          userData.courseSummary.inProgressCourses++;
-        } else if (courseProgress.status === 'Failed') {
-          userData.courseSummary.failedCourses++;
-        }
-
-        // Certificate status counting
-        if (courseProgress.certificateInfo.requestStatus === 'Eligible') {
-          userData.courseSummary.certificateEligible++;
-        } else if (courseProgress.certificateInfo.requestStatus === 'Requested') {
-          userData.courseSummary.certificateRequested++;
-        } else if (courseProgress.certificateInfo.requestStatus === 'Approved') {
-          userData.courseSummary.certificateApproved++;
-        }
-      }
-    }
-
-    // Convert map to array and calculate averages
-    let processedUsers = Array.from(userMap.values()).map(user => {
-      // Calculate average progress
-      if (user.courses.length > 0) {
-        const totalProgress = user.courses.reduce((sum, course) => sum + course.progress, 0);
-        user.courseSummary.averageProgress = Math.round(totalProgress / user.courses.length);
-      }
-
-      // Separate main courses and short courses
-      const mainCourses = user.courses.filter(course => course.courseType === 'Course');
-      const shortCourses = user.courses.filter(course => course.courseType === 'Short Course');
-
-      return {
-        ...user,
-        courses: {
-          mainCourses,
-          shortCourses
-        }
-      };
-    });
-
-    console.log(`Processed ${processedUsers.length} users with enrollments`);
-
-    const warehouseUserCounts = buildWarehouseUserCounts(processedUsers);
-    const totalProgressUsers = processedUsers.length;
+    let processedUsers = indexPayload.processedUsers || [];
+    const warehouseUserCounts = indexPayload.warehouseUserCounts || {};
+    const totalProgressUsers = indexPayload.totalProgressUsers || processedUsers.length;
 
     if (warehouse && mongoose.Types.ObjectId.isValid(warehouse)) {
       const wh = String(warehouse);
@@ -6133,63 +6323,18 @@ const getAllUsersProgress = async (req, res) => {
         return customerHasWarehouse(u.warehouses?.length ? u.warehouses : u.warehouse, wh);
       });
     }
-    if (department && mongoose.Types.ObjectId.isValid(department)) {
-      const dept = String(department);
-      processedUsers = processedUsers.filter(
-        (u) => u.department?._id && String(u.department._id) === dept,
-      );
-    }
 
-    // Sort users (same logic)
-    processedUsers.sort((a, b) => {
-      let aValue, bValue;
+    processedUsers = sortProcessedUsers(processedUsers, sortBy, sortOrder);
 
-      switch (sortBy) {
-        case 'progress':
-          aValue = a.courseSummary.averageProgress;
-          bValue = b.courseSummary.averageProgress;
-          break;
-        case 'enrollmentDate':
-          const aEarliestEnrollment = Math.min(...a.courses.mainCourses.concat(a.courses.shortCourses).map(c => new Date(c.enrollmentDate || 0)));
-          const bEarliestEnrollment = Math.min(...b.courses.mainCourses.concat(b.courses.shortCourses).map(c => new Date(c.enrollmentDate || 0)));
-          aValue = aEarliestEnrollment;
-          bValue = bEarliestEnrollment;
-          break;
-        case 'username':
-          aValue = a.username?.toLowerCase() || '';
-          bValue = b.username?.toLowerCase() || '';
-          break;
-        default:
-          aValue = a.courseSummary.averageProgress;
-          bValue = b.courseSummary.averageProgress;
-      }
-
-      if (sortOrder === 'desc') {
-        return bValue > aValue ? 1 : -1;
-      } else {
-        return aValue > bValue ? 1 : -1;
-      }
-    });
-
-    // Apply pagination
     const totalUsers = processedUsers.length;
-    const skip = (page - 1) * limit;
-    const paginatedUsers = processedUsers.slice(skip, skip + parseInt(limit));
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 10));
+    const skip = (pageNum - 1) * limitNum;
+    const paginatedUsers = processedUsers
+      .slice(skip, skip + limitNum)
+      .map((u) => mapUserToListRow(u, { includeCourses }));
 
-    // Calculate overall statistics
-    const overallStats = {
-      totalUsers: totalUsers,
-      activeUsers: processedUsers.filter(u => u.isActive).length,
-      totalEnrollments: processedUsers.reduce((sum, u) => sum + u.courseSummary.totalEnrolled, 0),
-      totalCompletedCourses: processedUsers.reduce((sum, u) => sum + u.courseSummary.completedCourses, 0),
-      totalInProgressCourses: processedUsers.reduce((sum, u) => sum + u.courseSummary.inProgressCourses, 0),
-      totalFailedCourses: processedUsers.reduce((sum, u) => sum + u.courseSummary.failedCourses, 0),
-      totalCertificatesEarned: processedUsers.reduce((sum, u) => sum + u.courseSummary.certificatesEarned, 0),
-      averageProgressAllUsers: processedUsers.length > 0 ?
-        Math.round(processedUsers.reduce((sum, u) => sum + u.courseSummary.averageProgress, 0) / processedUsers.length) : 0
-    };
-
-    console.log(`Successfully retrieved progress for ${paginatedUsers.length} users`);
+    const overallStats = buildOverallStats(processedUsers);
 
     res.status(200).json({
       success: true,
@@ -6197,11 +6342,11 @@ const getAllUsersProgress = async (req, res) => {
       data: {
         users: paginatedUsers,
         pagination: {
-          currentPage: parseInt(page),
-          totalPages: Math.ceil(totalUsers / limit),
-          totalUsers: totalUsers,
-          hasNextPage: page * limit < totalUsers,
-          hasPrevPage: page > 1
+          currentPage: pageNum,
+          totalPages: Math.ceil(totalUsers / limitNum) || 0,
+          totalUsers,
+          hasNextPage: pageNum * limitNum < totalUsers,
+          hasPrevPage: pageNum > 1,
         },
         overallStats,
         warehouseUserCounts,
@@ -6213,17 +6358,16 @@ const getAllUsersProgress = async (req, res) => {
           warehouse: warehouse || null,
           department: department || null,
           sortBy,
-          sortOrder
-        }
-      }
+          sortOrder,
+        },
+      },
     });
-
   } catch (error) {
     console.error('Error getting all users progress:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to get all users progress',
-      error: error.message
+      error: error.message,
     });
   }
 };
@@ -6511,12 +6655,19 @@ const calculateSingleCourseProgress = async (course, enrollment, userId, allQuiz
     canRequest: certificateStatus === 'Eligible' && status === 'Completed'
   };
 
-  // Get certificate request details if exists
+  // Get certificate request details if exists (use populate when available — avoids N+1)
   if (enrollment.certificateRequestId) {
     try {
-      const CertificateRequest = require('../models/certificateRequest.model');
-      const certificateRequest = await CertificateRequest.findById(enrollment.certificateRequestId)
-        .select('status certificateId createdAt reviewedAt certificateImagePath userSignaturePath presidentSignaturePath');
+      const populatedCert = enrollment.certificateRequestId;
+      let certificateRequest = null;
+
+      if (populatedCert && typeof populatedCert === 'object' && populatedCert._id) {
+        certificateRequest = populatedCert;
+      } else {
+        const CertificateRequest = require('../models/certificateRequest.model');
+        certificateRequest = await CertificateRequest.findById(enrollment.certificateRequestId)
+          .select('status certificateId createdAt reviewedAt certificateImagePath userSignaturePath presidentSignaturePath');
+      }
 
       if (certificateRequest) {
         certificateInfo.certificateRequest = {
@@ -6530,7 +6681,6 @@ const calculateSingleCourseProgress = async (course, enrollment, userId, allQuiz
           presidentSignaturePath: certificateRequest.presidentSignaturePath
         };
 
-        // Update certificate status based on actual request status
         if (certificateRequest.status === 'Pending') {
           certificateInfo.requestStatus = 'Requested';
           certificateInfo.canRequest = false;
@@ -7115,206 +7265,40 @@ const calculateCourseProgress = async (course, enrollment, courseQuizResults, us
 
 
 
-// get specific user:
+// get specific user (full detail for modal — cached):
 const getUserProgressById = async (req, res) => {
   try {
     const { userId } = req.params;
-     const warehouseID = req?.user?.selectedWarehouse;
     if (!mongoose.Types.ObjectId.isValid(userId)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid user ID'
+        message: 'Invalid user ID',
       });
     }
 
-    console.log(`Admin getting progress for user: ${userId}`);
-
-    // Get customer details
-    const customer = await Customer.findById(userId)
-      .populate('role', 'name')
-      .populate('warehouse', 'name location');
-
-    if (!customer) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-    const selectedwarehouse = await Warehouse.findById(warehouseID);
-    console.log(`Selected warehouse: ${selectedwarehouse ? selectedwarehouse.name : 'None'}`);
-    // Get all courses with enrollments
-    const courses = await Course.find({
-      isActive: true,
-      'enrolledUsers.user': userId
-    })
-      .select('name description thumbnail level courseType language approximateHours totalVideos status passingGrade chapters enrolledUsers weightage')
-      .populate({
-        path: 'enrolledUsers.certificateRequestId',
-        model: 'CertificateRequest',
-        select: 'status certificateId createdAt reviewedAt certificateImagePath'
-      });
-
-    console.log(`Found ${courses.length} courses for user ${customer.username}`);
-
-    // Get all quiz results for this user
-    const allQuizResults = await Quiz.find({
-      'attempts.userId': userId
-    });
-
-    // Process user's courses
-    const processedCourses = [];
-    let totalProgress = 0;
-    let completedCourses = 0;
-    let inProgressCourses = 0;
-    let failedCourses = 0;
-    let certificatesEarned = 0;
-
-    for (const course of courses) {
-      // Find user's enrollment in this course
-      const enrollment = course.enrolledUsers.find(
-        e => e && e.user && e.user.toString() === userId
-      );
-
-      if (!enrollment) continue;
-
-      // Get quiz results for this course
-      const courseQuizResults = allQuizResults.filter(quiz =>
-        quiz.courseId.toString() === course._id.toString()
-      );
-
-      // Calculate detailed progress
-      const courseProgress = await calculateCourseProgress(
-        course,
-        enrollment,
-        courseQuizResults,
-        userId
-      );
-
-      processedCourses.push(courseProgress);
-
-      // Update totals
-      totalProgress += courseProgress.progress;
-
-      if (courseProgress.status === 'Completed' || courseProgress.status === 'Done') {
-        completedCourses++;
-      } else if (courseProgress.status === 'In Progress' || courseProgress.status === 'Requested') {
-        inProgressCourses++;
-      } else if (courseProgress.status === 'Failed') {
-        failedCourses++;
-      }
-
-      if (courseProgress.certificateInfo.requestStatus === 'Approved') {
-        certificatesEarned++;
-      }
-    }
-
-    // Calculate average progress
-    const averageProgress = courses.length > 0 ?
-      Math.round(totalProgress / courses.length) : 0;
-
-    // Separate main courses and short courses
-    const mainCourses = processedCourses.filter(course =>
-      course.courseType === 'Course'
-    );
-
-    const shortCourses = processedCourses.filter(course =>
-      course.courseType === 'Short Course'
-    );
-
-    // Get recent activity (last 10 quiz attempts)
-    const recentActivity = [];
-    for (const course of processedCourses) {
-      if (course.detailedStats.quizStats.attempts.length > 0) {
-        course.detailedStats.quizStats.attempts.forEach(attempt => {
-          if (attempt.lastAttemptDate) {
-            recentActivity.push({
-              type: 'quiz_attempt',
-              courseName: course.name,
-              quizTitle: attempt.quizTitle,
-              score: attempt.bestScore,
-              passed: attempt.passed,
-              date: attempt.lastAttemptDate
-            });
-          }
+    let userProgressData = await adminProgressCache.getUserDetailCache(userId);
+    if (!userProgressData) {
+      userProgressData = await buildAdminUserProgressDetail(userId);
+      if (!userProgressData) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
         });
       }
+      await adminProgressCache.setUserDetailCache(userId, userProgressData);
     }
-
-    // Sort recent activity by date
-    recentActivity.sort((a, b) => new Date(b.date) - new Date(a.date));
-    const limitedRecentActivity = recentActivity.slice(0, 10);
-
-    const userProgressData = {
-      _id: customer._id,
-      username: customer.username,
-      email: customer.email,
-      firstName: customer.firstName,
-      lastName: customer.lastName,
-      fullName: `${customer.firstName || ''} ${customer.lastName || ''}`.trim(),
-      role: customer.role ? {
-        _id: customer.role._id,
-        name: customer.role.name
-      } : null,
-      warehouse: customer.warehouse ? {
-        _id: customer.warehouse._id,
-        name: customer.warehouse.name,
-        location: customer.warehouse.location
-      } : null,
-      profilePicture: customer.profilePicture,
-      isActive: customer.isActive,
-      createdAt: customer.createdAt,
-      lastLogin: customer.lastLogin,
-
-      // 🆕 DETAILED PROGRESS SUMMARY
-      progressSummary: {
-        totalEnrolled: courses.length,
-        mainCoursesCount: mainCourses.length,
-        shortCoursesCount: shortCourses.length,
-        completedCourses,
-        inProgressCourses,
-        failedCourses,
-        certificatesEarned,
-        averageProgress,
-
-        // Certificate summary
-        certificateRequested: processedCourses.filter(c => c.certificateInfo.requestStatus === 'Requested').length,
-        certificateApproved: processedCourses.filter(c => c.certificateInfo.requestStatus === 'Approved').length,
-
-        // Performance metrics
-        totalQuizAttempts: processedCourses.reduce((sum, c) =>
-          sum + c.detailedStats.quizStats.attempts.reduce((attemptSum, a) => attemptSum + a.totalAttempts, 0), 0
-        ),
-        averageQuizScore: processedCourses.length > 0 ?
-          Math.round(processedCourses.reduce((sum, c) => sum + c.detailedStats.quizStats.averageScore, 0) / processedCourses.length) : 0,
-
-        // Time tracking
-        totalTimeSpent: processedCourses.reduce((sum, c) => sum + (c.detailedStats.totalTimeSpent || 0), 0),
-        averageTimePerCourse: courses.length > 0 ?
-          Math.round(processedCourses.reduce((sum, c) => sum + (c.detailedStats.totalTimeSpent || 0), 0) / courses.length) : 0
-      },
-
-      // 🆕 DETAILED COURSE DATA
-      courses: {
-        mainCourses: mainCourses,
-        shortCourses: shortCourses
-      },
-
-      // 🆕 RECENT ACTIVITY
-      recentActivity: limitedRecentActivity
-    };
 
     res.status(200).json({
       success: true,
       message: 'User progress retrieved successfully',
-      data: userProgressData
+      data: userProgressData,
     });
-
   } catch (error) {
     console.error('Error getting user progress by ID:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to get user progress',
-      error: error.message
+      error: error.message,
     });
   }
 };

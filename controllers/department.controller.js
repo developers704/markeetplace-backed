@@ -19,6 +19,14 @@ const createDepartment = async (req, res) => {
 // Get all departments
 const getAllDepartments = async (req, res) => {
     try {
+        const minimal = String(req.query.minimal || '') === '1';
+        if (minimal) {
+            const departments = await Department.find({}, '_id name')
+                .sort({ name: 1 })
+                .lean();
+            return res.status(200).json(departments);
+        }
+
         const departments = await Department.find()
         .sort({ createdAt: -1 , updatedAt: -1 });
         res.status(200).json(departments);

@@ -1,6 +1,7 @@
 const Quiz = require("../models/quiz.model");
 const Course = require("../models/course.model");
 const mongoose = require("mongoose");
+const adminProgressCache = require("../services/adminProgressCache.service");
 
 // Create a new quiz
 const createQuiz = async (req, res) => {
@@ -831,6 +832,7 @@ const startQuizAttempt = async (req, res) => {
 
     quiz.attempts.push(newAttempt);
     await quiz.save();
+    adminProgressCache.bumpAdminProgressCache().catch(() => {});
 
     // Return quiz questions without correct answers
     const questionsWithoutAnswers = quiz.questions.map((q) => ({
@@ -1437,6 +1439,7 @@ const submitQuizAttempt = async (req, res) => {
     // Add attempt to quiz
     quiz.attempts.push(attempt);
     await quiz.save();
+    adminProgressCache.bumpAdminProgressCache().catch(() => {});
 
     // 🆕 UPDATE COURSE PROGRESS WITH QUIZ RESULT
     const quizResult = {
