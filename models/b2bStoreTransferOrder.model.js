@@ -69,7 +69,7 @@ const b2bStoreTransferOrderSchema = new mongoose.Schema(
     quantity: { type: Number, required: true, min: 1 },
     unitPrice: { type: Number, required: true, min: 0 },
     currency: { type: String, default: 'USD', trim: true },
-
+    eta: { type: String, default: '', trim: true },
     status: {
       type: String,
       enum: STATUSES,

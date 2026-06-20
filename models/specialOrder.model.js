@@ -12,6 +12,7 @@ const TYPE_OF_REQUEST = [
   'BENCHMARK',
   'AGI_CERTIFICATE',
   'REPAIR_diamond_replacement_under_warranty',
+  'REPAIR_ROLEX',
   'OTHERS',
 ];
 
@@ -29,24 +30,25 @@ const METAL_QUALITY = [
   'PLATINUM',
   'SILVER',
   'SILVER_VERMEIL_YELLOW',
-  'NA',
+  'Tri_Color',
 ];
 
 const DIAMOND_TYPE = ['NATURAL', 'LAB_GROWN', 'NA'];
 
 const ASSIGNED_TO = [
-  'TRANSFER',
-  'NON_STOCK_QG_STULLER',
-  'NON_STOCK_BENCHMARK',
-  'NON_STOCK_TRITON',
-  'NON_STOCK_TUNGSTEN',
-  'NON_STOCK_WATCH_PARTS_FREE_LINKS',
-  'NON_STOCK_CUSTOM',
+  'QG_STULLER',
+  'BENCHMARK',
+  'TRITON',
+  'TUNGSTEN',
+  'WATCH_PARTS_FREE_LINKS',
+  'CUSTOM_JEWELRY_PIECE',
   'REPAIR_DIAMONDS_REPLACEMENT',
   'REPAIR_ROLEX',
+  'OTHERS'
 ];
 
 const STATUS = [
+  'REJECTED',
   'SUBMITTED',
   'RECEIVED_BY_SPO_TEAM',
   'WIP',
@@ -82,6 +84,16 @@ const spoChatMessageSchema = new mongoose.Schema(
 const specialOrderSchema = new mongoose.Schema(
   {
     ticketNumber: { type: String, unique: true, index: true },
+    trackingId: { type: String, unique: true, index: true },
+    trackingProvider: {
+    type: String,
+    enum: ['UPS', 'FEDEX', ''],
+    default: '',
+    },
+    trackingUrl: {
+      type: String,
+      default: '',
+    },
     receiptNumber: { type: String, default: '' },
     storeId: { type: mongoose.Schema.Types.ObjectId, ref: 'Warehouse', required: true, index: true },
     assignedTo: { type: String, enum: ASSIGNED_TO, default: null },

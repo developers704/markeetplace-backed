@@ -95,8 +95,10 @@ const createStoreTransferOrder = async (req, res) => {
       destWarehouseId,
       receiptNumber,
       note,
+      eta,
       confirmedByUserId,
       confirmedBy,
+
     } = req.body || {};
 
     const receipt = String(receiptNumber || '').trim();
@@ -203,6 +205,7 @@ const createStoreTransferOrder = async (req, res) => {
       receiptNumber: receipt,
       note: String(note || '').trim(),
       confirmedByUserId: String(confirmedByUserId || confirmedBy || '').trim(),
+      eta: String(eta || '').trim(),  
       status: 'SUBMITTED',
       requestedBy: actor.id,
       requestedByModel: actor.model,
@@ -354,9 +357,21 @@ function storeTransferOrderToCsvRow(order) {
 const exportAdminStoreTransferOrdersCsv = async (req, res) => {
   try {
     const status = req.query.status;
+    const receiptNumber = req.query.receiptNumber;
     const filter = {};
     if (status && String(status).trim()) {
       filter.status = String(status).trim().toUpperCase();
+    }
+    if (receiptNumber !== undefined) {
+      const receipt = String(receiptNumber).trim();
+      const normalized = receipt.toLowerCase();
+      if (normalized === 'has' || normalized === 'nonempty') {
+        filter.receiptNumber = { $nin: ['', null] };
+      } else if (normalized === '' || normalized === 'empty' || normalized === 'none') {
+        filter.receiptNumber = { $in: ['', null] };
+      } else {
+        filter.receiptNumber = receipt;
+      }
     }
 
     const rows = await B2bStoreTransferOrder.find(filter)
@@ -401,9 +416,21 @@ const exportAdminStoreTransferOrdersCsv = async (req, res) => {
 const listAdminStoreTransferOrders = async (req, res) => {
   try {
     const status = req.query.status;
+    const receiptNumber = req.query.receiptNumber;
     const filter = {};
     if (status && String(status).trim()) {
       filter.status = String(status).trim().toUpperCase();
+    }
+    if (receiptNumber !== undefined) {
+      const receipt = String(receiptNumber).trim();
+      const normalized = receipt.toLowerCase();
+      if (normalized === 'has' || normalized === 'nonempty') {
+        filter.receiptNumber = { $nin: ['', null] };
+      } else if (normalized === '' || normalized === 'empty' || normalized === 'none') {
+        filter.receiptNumber = { $in: ['', null] };
+      } else {
+        filter.receiptNumber = receipt;
+      }
     }
 
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -416,7 +443,16 @@ const listAdminStoreTransferOrders = async (req, res) => {
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
-        .populate('vendorProductId', 'vendorModel ')
+        .populate({
+          path:'vendorProductId',
+          select: 'vendorModel subcategory category',
+          populate: [
+            {path: 'category', select: 'name'},
+            {path: 'subcategory', select: 'name'},
+          ]
+
+        })
+        // .populate('vendorProductId', 'vendorModel subcategory category ')
         .populate('skuId', 'sku price attributes')
         .populate('sourceWarehouseId', 'name')
         .populate('destWarehouseId', 'name')

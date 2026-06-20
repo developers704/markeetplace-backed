@@ -310,9 +310,23 @@ const listAdminSpecialOrders = async (req, res) => {
     const storeId = req.query.storeId;
     const search = req.query.search;
 
+    const statusValues = Array.isArray(status)
+      ? status
+      : typeof status === 'string'
+      ? status.split(',').map((s) => s.trim()).filter(Boolean)
+      : []
+    const storeIds = Array.isArray(storeId)
+      ? storeId
+      : typeof storeId === 'string'
+      ? storeId.split(',').map((id) => id.trim()).filter(Boolean)
+      : []
+
     const filter = {};
-    if (status) filter.status = status;
-    if (storeId && isObjectId(storeId)) filter.storeId = storeId;
+    if (statusValues.length) filter.status = { $in: statusValues };
+    if (storeIds.length) {
+      const validStoreIds = storeIds.filter(isObjectId)
+      if (validStoreIds.length) filter.storeId = { $in: validStoreIds };
+    }
     if (search && search.trim()) {
       filter.$or = [
         { ticketNumber: { $regex: search.trim(), $options: 'i' } },
@@ -401,7 +415,7 @@ const updateSpecialOrder = async (req, res) => {
     const { id } = req.params;
     if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid ID' });
 
-    const { status, assignedTo, eta, notes } = req.body || {};
+    const { status, assignedTo, eta, notes ,trackingId , trackingProvider ,trackingUrl} = req.body || {};
 
     if (status === 'FINALIZED') {
       return res.status(400).json({
@@ -409,13 +423,20 @@ const updateSpecialOrder = async (req, res) => {
         message: 'FINALIZED is set only when the requester confirms receipt.',
       });
     }
-
+    const TRACKING_URLS = {
+      UPS: 'https://www.ups.com/track?tracknum=',
+      FEDEX: 'https://www.fedex.com/fedextrack/?trknbr=',
+    };
     const update = {};
     if (status != null) update.status = status;
     if (assignedTo != null) update.assignedTo = assignedTo;
     if (eta != null) update.eta = eta === '' ? null : new Date(eta);
     if (notes != null) update.notes = notes;
-
+    if (trackingId != null) update.trackingId = String(trackingId).trim();
+    if (trackingProvider != null) {
+      update.trackingProvider = trackingProvider;
+      update.trackingUrl = TRACKING_URLS[trackingProvider] || '';
+    }  
     const order = await SpecialOrder.findByIdAndUpdate(id, update, {
       new: true,
       runValidators: true,

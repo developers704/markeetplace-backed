@@ -13,6 +13,7 @@ const vendorProductSchema = new mongoose.Schema(
 
     category: {
       type: mongoose.Schema.Types.Mixed,
+      ref: 'Category',
       required: true,
     },
 

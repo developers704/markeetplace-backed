@@ -481,6 +481,7 @@ const getPendingPolicies = async (req, res) => {
     if (!userId) return res.status(401).json({ message: 'Unauthorized' });
     const user = await Customer.findById(userId).lean();
     if (!user) return res.status(404).json({ message: 'User not found' });
+    
     const roleId = user.role?._id || null;
 
     // Fetch active policies
