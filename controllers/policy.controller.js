@@ -478,19 +478,22 @@ const getPendingPolicies = async (req, res) => {
   try {
     const warehouseId = req.user.selectedWarehouse || null;
     const userId = req.user?._id || req.user?.id;
+
     if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
     const user = await Customer.findById(userId).lean();
     if (!user) return res.status(404).json({ message: 'User not found' });
-    
-    const roleId = user.role?._id || null;
 
-    // Fetch active policies
-    const policies = await Policy.find({ isActive: true }).sort({ showFirst: -1, sequence: 1, createdAt: -1 }).lean();
+    const roleId = user.role?._id || user.role || null;
 
-    // Fetch all acceptances for this user
+    const policies = await Policy.find({ isActive: true })
+      .sort({ showFirst: -1, sequence: 1, createdAt: -1 })
+      .lean();
+
     const acceptances = await PolicyAcceptance.find({ customer: userId }).lean();
+
     const acceptedMap = new Map();
-    acceptances.forEach(a => {
+    acceptances.forEach((a) => {
       if (a.policy && mongoose.Types.ObjectId.isValid(a.policy)) {
         acceptedMap.set(a.policy.toString(), a);
       }
@@ -501,14 +504,26 @@ const getPendingPolicies = async (req, res) => {
     for (const p of policies) {
       if (!mongoose.Types.ObjectId.isValid(p._id)) continue;
 
-      // Role filter
-      if (p.applicableRoles?.length && roleId && !p.applicableRoles.map(String).includes(String(roleId))) continue;
+      const forced = Array.isArray(p.forceForUsers) &&
+        p.forceForUsers.some((f) => {
+          const forcedUserId = f?.user?._id || f?.user;
+          return String(forcedUserId) === String(userId);
+        });
 
-      // Warehouse filter
-      if (p.applicableWarehouses?.length && warehouseId && !p.applicableWarehouses.map(String).includes(String(warehouseId))) continue;
+      // forced user ko role/warehouse ki wajah se skip nahi karna
+      if (!forced) {
+        if (
+          p.applicableRoles?.length &&
+          roleId &&
+          !p.applicableRoles.map(String).includes(String(roleId))
+        ) continue;
 
-      // Forced check
-      const forced = Array.isArray(p.forceForUsers) && p.forceForUsers.some(f => mongoose.Types.ObjectId.isValid(f.user) && String(f.user) === String(userId));
+        if (
+          p.applicableWarehouses?.length &&
+          warehouseId &&
+          !p.applicableWarehouses.map(String).includes(String(warehouseId))
+        ) continue;
+      }
 
       const acc = acceptedMap.get(String(p._id));
 
@@ -517,8 +532,7 @@ const getPendingPolicies = async (req, res) => {
         continue;
       }
 
-      // Check version
-      if ((acc.policyVersion || '0') < (p.version || '0')) {
+      if ((Number(acc.policyVersion) || 0) < (Number(p.version) || 0)) {
         pending.push({ ...p, reason: 'new_version' });
         continue;
       }
@@ -527,8 +541,8 @@ const getPendingPolicies = async (req, res) => {
         pending.push({ ...p, reason: 'forced' });
       }
     }
-    return res.json({ pending });
 
+    return res.json({ pending });
   } catch (error) {
     console.error('getPendingPolicies error:', error);
     return res.status(500).json({ message: error.message });
@@ -539,47 +553,65 @@ const getPendingPolicies = async (req, res) => {
 
 // POST /api/policies/force/:userId
 const forcePolicyForUser = async (req, res) => {
-    try {
-        const policyId = req.body.policyId;
-        const { userId } = req.params;
-        if (!policyId || !userId) return res.status(400).json({ message: 'policyId and userId required' });
+  try {
+    const policyId = req.body.policyId;
+    const { userId } = req.params;
 
-        // add to policy.forceForUsers
-
-        const policy = await Policy.findById(policyId);
-        if (!policy) {
-            return res.status(404).json({ message: 'Policy not found' });
-        }
-
-        const alreadyForced = policy.forceForUsers.some(f => String(f.user) === String(userId));
-        if (alreadyForced) {
-            return res.status(400).json({ message: 'Policy already forced for this user' });
-        }
-           policy.forceForUsers.push({
-           user: userId,
-           forcedAt: new Date()
-          });
-
-        await policy.save();
-        
-        // const updated = await Policy.findByIdAndUpdate(policyId, { $addToSet: { forceForUsers: { user: userId, forcedAt: new Date() } } }, { new: true });
-
-        // mark customer's policyAccepted entry as forced = true (so UI can show forced reason)
-        const customer = await Customer.findById(userId);
-        if (customer) {
-            const idx = (customer.policyAccepted || []).findIndex(pa => String(pa.policy) === String(policyId));
-            if (idx >= 0) {
-                customer.policyAccepted[idx].forced = true;
-                await customer.save();
-            }
-        }
-
-        res.json({ success: true, message: 'Policy forced for user', policy });
-    } catch (error) {
-        console.error('forcePolicyForUser error:', error);
-        res.status(500).json({ message: error.message });
+    if (!policyId || !userId) {
+      return res.status(400).json({ message: 'policyId and userId required' });
     }
-}
+
+    const policy = await Policy.findById(policyId);
+    if (!policy) {
+      return res.status(404).json({ message: 'Policy not found' });
+    }
+
+    const alreadyIndex = policy.forceForUsers.findIndex(
+      (f) => String(f.user) === String(userId)
+    );
+
+    if (alreadyIndex >= 0) {
+      // reassign: forcedAt refresh karo
+      policy.forceForUsers[alreadyIndex].forcedAt = new Date();
+    } else {
+      policy.forceForUsers.push({
+        user: userId,
+        forcedAt: new Date(),
+      });
+    }
+
+    await policy.save();
+
+    // IMPORTANT: old acceptance remove karo taake user ko policy dobara pending aaye
+    await PolicyAcceptance.deleteOne({
+      customer: userId,
+      policy: policyId,
+    });
+
+    const customer = await Customer.findById(userId);
+    if (customer) {
+      const idx = (customer.policyAccepted || []).findIndex(
+        (pa) => String(pa.policy) === String(policyId)
+      );
+
+      if (idx >= 0) {
+        customer.policyAccepted.splice(idx, 1);
+        await customer.save();
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: alreadyIndex >= 0
+        ? 'Policy reassigned for user'
+        : 'Policy forced for user',
+      policy,
+    });
+  } catch (error) {
+    console.error('forcePolicyForUser error:', error);
+    return res.status(500).json({ message: error.message });
+  }
+};
 
 // Admin: Assign a policy to specific user(s)
 // POST /api/policies/:id/assign

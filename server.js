@@ -59,6 +59,12 @@ connectDB()
       console.error('SKU inventory import worker not started:', e.message);
     }
     try {
+      const { startVendorProductExportWorker } = require('./workers/vendorProductExport.worker');
+      startVendorProductExportWorker();
+    } catch (e) {
+      console.error('Vendor product export worker not started:', e.message);
+    }
+    try {
       const { startProductListingSyncWorker } = require('./workers/productListingSync.worker');
       startProductListingSyncWorker();
     } catch (e) {
@@ -198,6 +204,16 @@ cron.schedule('0 0 * * *', async () => {
      
   } catch (error) {
       console.error('Error cleaning up expired tokens:', error);
+  }
+});
+
+// Delete vendor product export files older than 7 days (daily at 1 AM)
+cron.schedule('0 1 * * *', async () => {
+  try {
+    const { cleanupExpiredExportFiles } = require('./services/vendorProductExportCleanup.service');
+    await cleanupExpiredExportFiles();
+  } catch (error) {
+    console.error('Error cleaning up expired export files:', error);
   }
 });
 

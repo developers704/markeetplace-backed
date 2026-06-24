@@ -187,7 +187,7 @@ const notifyB2BEvent = async ({ event, request, actor }) => {
     const requestLink = `/marketplace/b2b-approvals/${request._id}`;
 
     // Fetch all admins for admin notifications
-    const admins = await User.find({ is_superuser: true }).select('_id email username').lean();
+    const admins = await User.find({ isAdmin: true }).select('_id email username').lean();
 
     let notifications = [];
     let emails = [];
@@ -195,6 +195,60 @@ const notifyB2BEvent = async ({ event, request, actor }) => {
     switch (event) {
       case 'REQUEST_CREATED': {
         // Notify DM, CM
+        if (requester?.email) {
+        emails.push({
+          to: requester.email,
+          subject: `B2B Purchase Request Created - ${productInfo}`,
+          html: `
+            <h2>B2B Purchase Request Created</h2>
+            <p><strong>Store:</strong> ${store?.name || 'N/A'}</p>
+            <p><strong>Product:</strong> ${productInfo}</p>
+            <p><strong>${skuInfo}</strong></p>
+            <p><strong>Quantity:</strong> ${request.quantity}</p>
+            <p><strong>Status:</strong> ${request.status}</p>
+            <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}">View Request</a></p>
+          `,
+        });
+      }
+      if (requester?._id) {
+      notifications.push({
+        user: requester._id,
+        content: `Your B2B purchase request for ${productInfo} has been created. Status: ${request.status}`,
+        url: requestLink,
+        read: false,
+      });
+    }
+
+
+        admins.forEach((admin) => {
+          if (admin.email) {
+            emails.push({
+              to: admin.email,
+              subject: `New B2B Purchase Request - ${productInfo}`,
+              html: `
+                <h2>New B2B Purchase Request</h2>
+                <p><strong>Store:</strong> ${store?.name || 'N/A'}</p>
+                <p><strong>Product:</strong> ${productInfo}</p>
+                <p><strong>${skuInfo}</strong></p>
+                <p><strong>Quantity:</strong> ${request.quantity}</p>
+                <p><strong>Requested By:</strong> ${requester?.username || 'N/A'}</p>
+                <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}">Review Request</a></p>
+              `,
+            });
+          }
+        });
+        admins.forEach((admin) => {
+        notifications.push({
+        user: admin._id,
+        type: 'ORDER',
+        content: `New B2B purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
+        resourceId: request._id,
+        resourceModel: 'B2BPurchaseRequest',
+        priority: 'high',
+        read: false,
+      });
+    });
+
         if (dm) {
           notifications.push({
             user: dm._id,
@@ -277,7 +331,8 @@ const notifyB2BEvent = async ({ event, request, actor }) => {
             resourceModel: 'B2BPurchaseRequest',
             priority: 'medium',
             read: false,
-          });
+          });    
+
         });
         if (requester) {
           notifications.push({
@@ -438,10 +493,30 @@ const notifyB2BEvent = async ({ event, request, actor }) => {
         adminNotifications.length > 0 ? AdminNotification.insertMany(adminNotifications) : Promise.resolve(),
       ]);
     }
+        console.log('B2B email debug:', {
+      event,
+      requestId: String(request._id),
+      requesterEmail: requester?.email,
+      dmEmail: dm?.email,
+      cmEmail: cm?.email,
+      adminCount: admins.length,
+      emailsCount: emails.length,
+      emailsTo: emails.map((e) => e.to),
+    });
 
     // Send emails (non-blocking, fire and forget)
     if (emails.length > 0) {
-      Promise.all(emails.map((mail) => sendEmail(mail))).catch((err) => console.error('B2B email error:', err));
+      // Promise.all(emails.map((mail) => sendEmail(mail))).catch((err) => console.error('B2B email error:', err));
+      Promise.all(emails.map((mail) => sendEmail(mail))).then((results) => {
+      console.log('B2B email results:', results);
+
+      const failed = results.filter((r) => !r.success);
+      if (failed.length) {
+        console.error('B2B failed emails:', failed);
+      }
+    }).catch((err) => {
+      console.error('B2B email error:', err);
+    });
     }
   } catch (error) {
     console.error('B2B notification error:', error);

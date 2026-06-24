@@ -17,12 +17,53 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
-  const allowedImages = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-  const allowedVideos = ['video/mp4', 'video/webm', 'video/quicktime'];
-  if (allowedImages.includes(file.mimetype) || allowedVideos.includes(file.mimetype)) {
+  const allowedImages = [
+    'image/jpeg',
+    'image/png',
+    'image/gif',
+    'image/webp',
+    'image/bmp',
+    'image/tiff',
+    'image/svg+xml',
+    'image/heic',
+    'image/heif',
+  ];
+    const allowedVideos = [
+    'video/mp4',
+    'video/webm',
+    'video/quicktime',
+    'video/x-msvideo', // avi
+    'video/x-matroska', // mkv
+    'video/mpeg',
+  ];
+    const allowedDocuments = [
+    'application/pdf',
+
+    // Word
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+
+    // Excel
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+
+    // PowerPoint
+    'application/vnd.ms-powerpoint',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+
+    // Text
+    'text/plain',
+    'text/csv',
+
+    // Zip
+    'application/zip',
+    'application/x-zip-compressed',
+    'application/x-rar-compressed',
+  ];
+  if (allowedImages.includes(file.mimetype) || allowedVideos.includes(file.mimetype)||  allowedDocuments.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Only images and videos are allowed'), false);
+    cb(new Error('Only images, videos, PDF, Word, Excel, PowerPoint, TXT, CSV and ZIP files are allowed'), false);
   }
 };
 

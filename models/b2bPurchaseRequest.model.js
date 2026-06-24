@@ -111,9 +111,19 @@ const b2bPurchaseRequestSchema = new mongoose.Schema(
       note: { type: String, default: '' },
     },
 
-    requestedBy: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
-    requestedByModel: { type: String, enum: ['Customer', 'User'], required: true },
-
+    // requestedBy: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    // requestedByModel: { type: String, enum: ['Customer', 'User'], required: true },
+    requestedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    required: true,
+    index: true,
+    refPath: 'requestedByModel',
+    },
+    requestedByModel: {
+      type: String,
+      enum: ['Customer', 'User'],
+      required: true,
+    },
     approvals: {
       dm: { type: approvalStepSchema, default: {} },
       cm: { type: approvalStepSchema, default: {} },

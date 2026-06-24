@@ -15,6 +15,12 @@ const {
   importSkuInventory,
 } = require('../controllers/v2CatalogImport.controller');
 const {
+  startVendorProductExport,
+  getVendorProductExportStatus,
+  downloadVendorProductExport,
+  exportDownloadAuth,
+} = require('../controllers/vendorProductExport.controller');
+const {
   listVendorProducts,
   getVendorProductById,
   getSkuById,
@@ -24,7 +30,6 @@ const {
   deleteAllVendorData,
   downloadVendorCatalogTemplate,
   downloadSkuInventoryTemplate,
-  exportVendorProductsCsv,
   // Category management
   getV2Categories,
   getV2SubcategoriesByCategory,
@@ -61,7 +66,9 @@ const optionalAuthMiddleware = async (req, res, next) => {
 
 // Public/read routes
 router.get('/products/admin', listVendorProductsAdmin);
-router.get('/products/export', authMiddleware, exportVendorProductsCsv);
+router.post('/products/export/start', authMiddleware, startVendorProductExport);
+router.get('/products/export/status/:id', authMiddleware, getVendorProductExportStatus);
+router.get('/products/export/download/:id', exportDownloadAuth, downloadVendorProductExport);
 router.get('/products', listVendorProducts);
 router.get('/products/:id', getVendorProductById);
 router.get('/skus/:skuId', getSkuById);

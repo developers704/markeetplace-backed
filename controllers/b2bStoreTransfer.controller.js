@@ -943,6 +943,297 @@ const postStoreTransferChatMessage = async (req, res) => {
   }
 };
 
+/**
+ * GET /my-store-inventory
+ * Returns SkuInventory (qty > 0) for the logged-in user's selected warehouse,
+ * joined with Sku + VendorProduct details. Used for Store-to-Main transfer.
+ */
+const getMyStoreInventory = async (req, res) => {
+  try {
+    const selectedWarehouse = req.user?.selectedWarehouse
+      ? String(req.user.selectedWarehouse)
+      : null;
+    const userWarehouses = Array.isArray(req.user?.warehouse)
+      ? req.user.warehouse.map((w) => String(w._id || w))
+      : [];
+    const warehouseId = selectedWarehouse || userWarehouses[0] || null;
+
+    if (!warehouseId || !isObjectId(warehouseId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'No store warehouse selected. Please select a warehouse first.',
+      });
+    }
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const skip = (page - 1) * limit;
+    const search = String(req.query.search || '').trim();
+
+    const baseMatch = {
+      warehouse: new mongoose.Types.ObjectId(warehouseId),
+      quantity: { $gt: 0 },
+    };
+
+    let pipeline = [
+      { $match: baseMatch },
+      {
+        $lookup: {
+          from: 'skus',
+          localField: 'skuId',
+          foreignField: '_id',
+          as: 'skuDoc',
+        },
+      },
+      { $unwind: { path: '$skuDoc', preserveNullAndEmptyArrays: false } },
+      {
+        $lookup: {
+          from: 'vendorproducts',
+          localField: 'skuDoc.productId',
+          foreignField: '_id',
+          as: 'productDoc',
+        },
+      },
+      { $unwind: { path: '$productDoc', preserveNullAndEmptyArrays: false } },
+    ];
+
+    if (search) {
+      const rx = new RegExp(escapeRegex(search), 'i');
+      pipeline.push({
+        $match: {
+          $or: [
+            { 'skuDoc.sku': rx },
+            { 'productDoc.vendorModel': rx },
+            { 'productDoc.title': rx },
+            { 'productDoc.brand': rx },
+          ],
+        },
+      });
+    }
+
+    pipeline.push({
+      $addFields: {
+        daysInStore: {
+          $floor: {
+            $divide: [{ $subtract: [new Date(), '$createdAt'] }, 86400000],
+          },
+        },
+      },
+    });
+
+    const sortBy = String(req.query.sortBy || 'daysDesc');
+    const minDays = Math.max(0, parseInt(req.query.minDays, 10) || 0);
+    if (minDays > 0) {
+      pipeline.push({ $match: { daysInStore: { $gte: minDays } } });
+    }
+
+    let sortStage;
+    switch (sortBy) {
+      case 'daysAsc':
+        sortStage = { daysInStore: 1, 'skuDoc.sku': 1 };
+        break;
+      case 'sku':
+        sortStage = { 'skuDoc.sku': 1 };
+        break;
+      case 'daysDesc':
+      default:
+        sortStage = { daysInStore: -1, 'skuDoc.sku': 1 };
+        break;
+    }
+
+    const [countResult] = await SkuInventory.aggregate([...pipeline, { $count: 'total' }]);
+    const total = countResult?.total || 0;
+
+    pipeline = [
+      ...pipeline,
+      { $sort: sortStage },
+      { $skip: skip },
+      { $limit: limit },
+      {
+        $project: {
+          _id: 1,
+          availableQty: '$quantity',
+          createdAt: 1,
+          daysInStore: 1,
+          skuId: '$skuDoc._id',
+          sku: '$skuDoc.sku',
+          price: '$skuDoc.price',
+          tagPrice: '$skuDoc.tagPrice',
+          currency: '$skuDoc.currency',
+          metalColor: '$skuDoc.metalColor',
+          metalType: '$skuDoc.metalType',
+          size: '$skuDoc.size',
+          images: '$skuDoc.images',
+          gallery: '$skuDoc.gallery',
+          attributes: '$skuDoc.attributes',
+          productId: '$productDoc._id',
+          vendorModel: '$productDoc.vendorModel',
+          title: '$productDoc.title',
+          brand: '$productDoc.brand',
+          description: '$productDoc.description',
+        },
+      },
+    ];
+
+    const inventory = await SkuInventory.aggregate(pipeline);
+
+    return res.status(200).json({
+      success: true,
+      data: inventory,
+      warehouseId,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 0,
+        hasNextPage: page * limit < total,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch store inventory',
+    });
+  }
+};
+
+/**
+ * POST /batch
+ * @deprecated — Redirects to the dedicated StoreToMain controller.
+ * Kept for backward-compatibility; real logic now in storeToMainTransfer.controller.js
+ */
+const createBatchStoreTransferOrders = async (req, res) => {
+  try {
+    // Delegate to the new dedicated controller
+    const { createBatchOrders } = require('./storeToMainTransfer.controller');
+    return createBatchOrders(req, res);
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message || 'Batch create failed' });
+  }
+};
+
+const _createBatchStoreTransferOrders_LEGACY = async (req, res) => {
+  try {
+    const actor = req.b2bActor;
+    const { items, destWarehouseId, receiptNumber, note } = req.body || {};
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, message: 'At least one item is required' });
+    }
+    if (!isObjectId(destWarehouseId)) {
+      return res.status(400).json({ success: false, message: 'Destination warehouse is required' });
+    }
+
+    const selectedWarehouse = req.user?.selectedWarehouse
+      ? String(req.user.selectedWarehouse)
+      : null;
+    const userWarehouses = Array.isArray(req.user?.warehouse)
+      ? req.user.warehouse.map((w) => String(w._id || w))
+      : [];
+    const sourceWarehouseId = selectedWarehouse || userWarehouses[0] || null;
+
+    if (!sourceWarehouseId || !isObjectId(sourceWarehouseId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'No source store warehouse. Select a warehouse first.',
+      });
+    }
+    if (String(sourceWarehouseId) === String(destWarehouseId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Source and destination warehouses must be different.',
+      });
+    }
+
+    const created = [];
+    const errors = [];
+
+    for (const item of items) {
+      try {
+        const skuIdRaw = String(item.skuId || '').trim();
+        if (!isObjectId(skuIdRaw)) {
+          errors.push({ item, error: 'Invalid SKU ID' });
+          continue;
+        }
+        const qty = parseInt(item.quantity ?? item.qty, 10);
+        if (!Number.isFinite(qty) || qty < 1) {
+          errors.push({ skuId: skuIdRaw, error: 'Quantity must be at least 1' });
+          continue;
+        }
+
+        const sku = await Sku.findById(skuIdRaw).select('_id sku productId price currency').lean();
+        if (!sku) {
+          errors.push({ skuId: skuIdRaw, error: 'SKU not found' });
+          continue;
+        }
+
+        const vendorProduct = await VendorProduct.findById(sku.productId)
+          .select('_id vendorModel title')
+          .lean();
+        if (!vendorProduct) {
+          errors.push({ skuId: skuIdRaw, sku: sku.sku, error: 'Product not found' });
+          continue;
+        }
+
+        const available = await sumSkuInventory(sku._id, sourceWarehouseId, null);
+        if (available < qty) {
+          errors.push({
+            skuId: skuIdRaw,
+            sku: sku.sku,
+            error: `Insufficient stock. Available: ${available}, requested: ${qty}`,
+          });
+          continue;
+        }
+
+        const unitPrice = Number(sku.price) || 0;
+        const order = await B2bStoreTransferOrder.create({
+          vendorProductId: vendorProduct._id,
+          skuId: sku._id,
+          sourceWarehouseId,
+          destWarehouseId,
+          quantity: qty,
+          unitPrice,
+          currency: sku.currency || 'USD',
+          receiptNumber: String(receiptNumber || '').trim(),
+          note: String(note || '').trim(),
+          status: 'SUBMITTED',
+          requestedBy: actor.id,
+          requestedByModel: actor.model,
+        });
+
+        created.push({
+          _id: order._id,
+          ticketNumber: order.ticketNumber,
+          sku: sku.sku,
+          vendorModel: vendorProduct.vendorModel,
+          quantity: qty,
+          unitPrice,
+          lineTotal: unitPrice * qty,
+        });
+      } catch (itemErr) {
+        errors.push({ skuId: item?.skuId, error: itemErr.message });
+      }
+    }
+
+    if (created.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No orders could be created',
+        errors,
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: `${created.length} transfer request(s) submitted${errors.length > 0 ? `, ${errors.length} failed` : ''}`,
+      data: created,
+      errors,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message || 'Batch create failed' });
+  }
+};
+
 module.exports = {
   createStoreTransferOrder,
   listMyStoreTransferOrders,
@@ -955,4 +1246,6 @@ module.exports = {
   listStoreTransferChatMessages,
   postStoreTransferChatMessage,
   markStoreTransferChatSeen,
+  getMyStoreInventory,
+  createBatchStoreTransferOrders,
 };

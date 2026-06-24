@@ -413,7 +413,10 @@ const getSpecialOrderById = async (req, res) => {
 const updateSpecialOrder = async (req, res) => {
   try {
     const { id } = req.params;
-    if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid ID' });
+
+    if (!isObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
 
     const { status, assignedTo, eta, notes ,trackingId , trackingProvider ,trackingUrl} = req.body || {};
 
@@ -423,29 +426,94 @@ const updateSpecialOrder = async (req, res) => {
         message: 'FINALIZED is set only when the requester confirms receipt.',
       });
     }
+
     const TRACKING_URLS = {
       UPS: 'https://www.ups.com/track?tracknum=',
       FEDEX: 'https://www.fedex.com/fedextrack/?trknbr=',
     };
+
     const update = {};
+
     if (status != null) update.status = status;
     if (assignedTo != null) update.assignedTo = assignedTo;
     if (eta != null) update.eta = eta === '' ? null : new Date(eta);
     if (notes != null) update.notes = notes;
     if (trackingId != null) update.trackingId = String(trackingId).trim();
+
     if (trackingProvider != null) {
       update.trackingProvider = trackingProvider;
       update.trackingUrl = TRACKING_URLS[trackingProvider] || '';
-    }  
-    const order = await SpecialOrder.findByIdAndUpdate(id, update, {
-      new: true,
-      runValidators: true,
-    })
+    }
+
+    const existingOrder = await SpecialOrder.findById(id).lean();
+
+    if (!existingOrder) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const changes = {};
+    const updatedFields = [];
+
+    Object.keys(update).forEach((key) => {
+      const oldValue =
+        existingOrder[key] instanceof Date
+          ? existingOrder[key].toISOString()
+          : existingOrder[key];
+
+      const newValue =
+        update[key] instanceof Date
+          ? update[key].toISOString()
+          : update[key];
+
+      if (String(oldValue ?? '') !== String(newValue ?? '')) {
+        updatedFields.push(key);
+        changes[key] = {
+          from: existingOrder[key] ?? null,
+          to: update[key] ?? null,
+        };
+      }
+    });
+
+    if (updatedFields.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No changes detected',
+        data: existingOrder,
+      });
+    }
+
+    const updaterId = req.user?._id || req.user?.id;
+    const updaterModel = req.user?.constructor?.modelName === 'User' ? 'User' : 'Customer';
+    const updaterName =
+      req.user?.username ||
+      req.user?.name ||
+      req.user?.email ||
+      'Unknown User';
+
+    const order = await SpecialOrder.findByIdAndUpdate(
+      id,
+      {
+        $set: update,
+        $push: {
+          updateHistory: {
+            updatedBy: updaterId,
+            updatedByModel: updaterModel,
+            updatedByName: updaterName,
+            updatedFields,
+            changes,
+            updatedAt: new Date(),
+          },
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    )
       .populate('storeId', 'name')
       .populate('requestedBy', 'username email')
+      .populate('updateHistory.updatedBy', 'username email')
       .lean();
-
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
     return res.status(200).json({
       success: true,

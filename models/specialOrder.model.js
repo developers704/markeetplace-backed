@@ -57,6 +57,38 @@ const STATUS = [
   'FINALIZED',
 ];
 
+const spoUpdateHistorySchema = new mongoose.Schema(
+  {
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      refPath: 'updateHistory.updatedByModel',
+    },
+    updatedByModel: {
+      type: String,
+      enum: ['Customer', 'User'],
+      required: true,
+    },
+    updatedByName: {
+      type: String,
+      default: '',
+    },
+    updatedFields: {
+      type: [String],
+      default: [],
+    },
+    changes: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
+    updatedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: true }
+);
+
 const spoChatSeenSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, required: true },
@@ -112,6 +144,7 @@ const specialOrderSchema = new mongoose.Schema(
     notes: { type: String, default: '' },
     eta: { type: Date, default: null },
     chatMessages: { type: [spoChatMessageSchema], default: [] },
+    updateHistory: { type: [spoUpdateHistorySchema], default: [] },
     requestedBy: { type: mongoose.Schema.Types.ObjectId, required: true, index: true, refPath: 'requestedByModel', },
     requestedByModel: { type: String, enum: ['Customer', 'User'], required: true },
   },
