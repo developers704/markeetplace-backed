@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 /**
  * Store → Main Store Transfer (batch).
  * One document = one transfer request with multiple SKU items.
- * Lifecycle: SUBMITTED → WIP → APPROVED (stock+wallet applied) | REJECTED
+ * Lifecycle: SUBMITTED → WIP (Received) → APPROVED (stock+wallet applied) | REJECTED
  */
 
 const STATUSES = ['SUBMITTED', 'WIP', 'APPROVED', 'REJECTED'];
