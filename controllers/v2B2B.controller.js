@@ -1753,18 +1753,52 @@ const listMyStoreInventory = async (req, res) => {
   }
 };
 
+// function canViewPurchaseRequestDoc(req, order) {
+//   const actor = req.b2bActor;
+//   const role = String(actor?.roleName || '').toLowerCase().trim();
+//   const isAdminViewer =
+//     !!actor?.isSuperUser ||
+//     role === 'admin' ||
+//     role === 'super admin' ||
+//     role === 'superuser';
+//   if (isAdminViewer) return true;
+//   if (String(order.requestedBy) === String(actor.id)) return true;
+//   if (String(order.dmUserId?._id || order.dmUserId) === String(actor.id)) return true;
+//   if (String(order.cmUserId?._id || order.cmUserId) === String(actor.id)) return true;
+//   return false;
+// }
 function canViewPurchaseRequestDoc(req, order) {
   const actor = req.b2bActor;
   const role = String(actor?.roleName || '').toLowerCase().trim();
+
+  const actorId = String(actor?.id || req.user?._id || req.user?.id || '');
+
+  const getId = (value) => String(value?._id || value || '');
+
   const isAdminViewer =
     !!actor?.isSuperUser ||
+    !!req.user?.is_superuser ||
     role === 'admin' ||
     role === 'super admin' ||
     role === 'superuser';
+
   if (isAdminViewer) return true;
-  if (String(order.requestedBy) === String(actor.id)) return true;
-  if (String(order.dmUserId?._id || order.dmUserId) === String(actor.id)) return true;
-  if (String(order.cmUserId?._id || order.cmUserId) === String(actor.id)) return true;
+
+  if (getId(order.requestedBy) === actorId) return true;
+  if (getId(order.dmUserId) === actorId) return true;
+  if (getId(order.cmUserId) === actorId) return true;
+
+  const selectedWarehouse = req.user?.selectedWarehouse
+    ? String(req.user.selectedWarehouse?._id || req.user.selectedWarehouse)
+    : null;
+
+  const userWarehouses = Array.isArray(req.user?.warehouse)
+    ? req.user.warehouse.map((w) => String(w?._id || w))
+    : [];
+
+  if (getId(order.storeWarehouseId) === selectedWarehouse) return true;
+  if (userWarehouses.includes(getId(order.storeWarehouseId))) return true;
+
   return false;
 }
 
@@ -1916,7 +1950,7 @@ const listB2bPurchaseChatMessages = async (req, res) => {
     const { purchaseId } = req.params;
     if (!isObjectId(purchaseId)) return res.status(400).json({ success: false, message: 'Invalid id' });
 
-    const order = await B2BPurchaseRequest.findById(purchaseId).select('requestedBy dmUserId cmUserId chatMessages status').lean();
+    const order = await B2BPurchaseRequest.findById(purchaseId).select('requestedBy dmUserId cmUserId storeWarehouseId  chatMessages status').lean();
     if (!order) return res.status(404).json({ success: false, message: 'Not found' });
     if (!canViewPurchaseRequestDoc(req, order)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
