@@ -844,19 +844,59 @@ const getPurchaseStatus = async (req, res) => {
 
     if (!request) return res.status(404).json({ success: false, message: 'Purchase request not found' });
 
+    // const isAdminViewer =
+    //   !!actor?.isSuperUser ||
+    //   role === 'admin' ||
+    //   role === 'super admin' ||
+    //   role === 'superuser';
+
+    // const canView =
+    //   isAdminViewer ||
+    //   String(request.requestedBy) === String(actor.id) ||
+    //   String(request.dmUserId?._id || request.dmUserId) === String(actor.id) ||
+    //   String(request.cmUserId?._id || request.cmUserId) === String(actor.id);
+    
     const isAdminViewer =
       !!actor?.isSuperUser ||
+      !!req.user?.is_superuser ||
       role === 'admin' ||
       role === 'super admin' ||
       role === 'superuser';
 
+    const actorId = String(actor?.id || req.user?._id || req.user?.id || '');
+
+    const getId = (value) => String(value?._id || value || '');
+
+    const userWarehouses = Array.isArray(req.user?.warehouse)
+      ? req.user.warehouse.map((w) => String(w?._id || w))
+      : [];
+
+    const selectedWarehouse = req.user?.selectedWarehouse
+      ? String(req.user.selectedWarehouse?._id || req.user.selectedWarehouse)
+      : null;
+
     const canView =
       isAdminViewer ||
-      String(request.requestedBy) === String(actor.id) ||
-      String(request.dmUserId?._id || request.dmUserId) === String(actor.id) ||
-      String(request.cmUserId?._id || request.cmUserId) === String(actor.id);
+      !!req.user?.is_superuser ||
+      getId(request.requestedBy) === actorId ||
+      getId(request.dmUserId) === actorId ||
+      getId(request.cmUserId) === actorId ||
+      getId(request.storeWarehouseId) === selectedWarehouse ||
+      userWarehouses.includes(getId(request.storeWarehouseId));
 
+      console.log('B2B canView debug:', {
+      actorId,
+      role,
+      isAdminViewer,
+      requestedBy: getId(request.requestedBy),
+      dmUserId: getId(request.dmUserId),
+      cmUserId: getId(request.cmUserId),
+      storeWarehouseId: getId(request.storeWarehouseId),
+      selectedWarehouse,
+      userWarehouses,
+    });
     if (!canView) return res.status(403).json({ success: false, message: 'Access denied' });
+
 
     const [withRequester] = await resolveRequestedByDetails([request]);
 
