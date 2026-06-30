@@ -19,6 +19,7 @@ const { emitB2bPurchaseChatMessage, emitB2bPurchaseChatSeen } = require('../sock
 const { emitAdminChatUnreadChanged } = require('../socket/adminChat.socket');
 const { emitCustomerChatUnreadChanged } = require('../socket/customerChat.socket');
 
+
 const MAX_B2B_PURCHASE_REPLY_PREVIEW = 88;
 
 const isObjectId = (value) => mongoose.isValidObjectId(String(value || '').trim());
@@ -162,367 +163,646 @@ const resolveRequestedByDetails = async (requests) => {
 };
 
 /**
- * Helper: Send notifications and emails for B2B purchase lifecycle events
+ * Helper: Send notifications and emails for purchase lifecycle events
  */
-const notifyB2BEvent = async ({ event, request, actor }) => {
-  try {
-    const populated = await B2BPurchaseRequest.findById(request._id)
-      .populate('vendorProductId', 'vendorModel title')
-      .populate('skuId', 'sku metalColor metalType size')
-      .populate('storeWarehouseId', 'name')
-      .populate('requestedBy', 'username email')
-      .populate('dmUserId', 'username email')
-      .populate('cmUserId', 'username email')
-      .lean();
-
-    const vendorProduct = populated.vendorProductId;
-    const sku = populated.skuId;
-    const store = populated.storeWarehouseId;
-    const requester = populated.requestedBy;
-    const dm = populated.dmUserId;
-    const cm = populated.cmUserId;
-
-    const productInfo = `${vendorProduct?.title || 'N/A'} (${vendorProduct?.vendorModel || 'N/A'})`;
-    const skuInfo = `SKU: ${sku?.sku || 'N/A'} | ${sku?.metalColor || ''} ${sku?.metalType || ''} ${sku?.size || ''}`.trim();
-    const requestLink = `/marketplace/b2b-approvals/${request._id}`;
-
-    // Fetch all admins for admin notifications
-    const admins = await User.find({ isAdmin: true }).select('_id email username').lean();
-
-    let notifications = [];
-    let emails = [];
-
-    switch (event) {
-      case 'REQUEST_CREATED': {
-        // Notify DM, CM
-        if (requester?.email) {
-        emails.push({
-          to: requester.email,
-          subject: `B2B Purchase Request Created - ${productInfo}`,
-          html: `
-            <h2>B2B Purchase Request Created</h2>
-            <p><strong>Store:</strong> ${store?.name || 'N/A'}</p>
-            <p><strong>Product:</strong> ${productInfo}</p>
-            <p><strong>${skuInfo}</strong></p>
-            <p><strong>Quantity:</strong> ${request.quantity}</p>
-            <p><strong>Status:</strong> ${request.status}</p>
-            <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}">View Request</a></p>
-          `,
-        });
-      }
-      if (requester?._id) {
-      notifications.push({
-        user: requester._id,
-        content: `Your B2B purchase request for ${productInfo} has been created. Status: ${request.status}`,
-        url: requestLink,
-        read: false,
-      });
-    }
 
 
-        admins.forEach((admin) => {
-          if (admin.email) {
-            emails.push({
-              to: admin.email,
-              subject: `New B2B Purchase Request - ${productInfo}`,
-              html: `
-                <h2>New B2B Purchase Request</h2>
-                <p><strong>Store:</strong> ${store?.name || 'N/A'}</p>
-                <p><strong>Product:</strong> ${productInfo}</p>
-                <p><strong>${skuInfo}</strong></p>
-                <p><strong>Quantity:</strong> ${request.quantity}</p>
-                <p><strong>Requested By:</strong> ${requester?.username || 'N/A'}</p>
-                <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}">Review Request</a></p>
-              `,
-            });
-          }
-        });
-        admins.forEach((admin) => {
-        notifications.push({
-        user: admin._id,
-        type: 'ORDER',
-        content: `New B2B purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
-        resourceId: request._id,
-        resourceModel: 'B2BPurchaseRequest',
-        priority: 'high',
-        read: false,
-      });
-    });
+const getProductImageUrl = (sku) => {
+  const img = Array.isArray(sku?.images) ? sku.images[0] : '';
+  if (!img) return '';
 
-        if (dm) {
-          notifications.push({
-            user: dm._id,
-            content: `New B2B purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
-            url: requestLink,
-            read: false,
-          });
-          if (dm.email) {
-            emails.push({
-              to: dm.email,
-              subject: `New B2B Purchase Request - ${productInfo}`,
-              html: `
-                <h2>New B2B Purchase Request</h2>
-                <p><strong>Store:</strong> ${store?.name || 'N/A'}</p>
-                <p><strong>Product:</strong> ${productInfo}</p>
-                <p><strong>${skuInfo}</strong></p>
-                <p><strong>Quantity:</strong> ${request.quantity}</p>
-                <p><strong>Requested By:</strong> ${requester?.username || 'N/A'}</p>
-                <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}">Review Request</a></p>
-              `,
-            });
-          }
-        }
-        if (cm) {
-          notifications.push({
-            user: cm._id,
-            content: `New B2B purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
-            url: requestLink,
-            read: false,
-          });
-          if (cm.email) {
-            emails.push({
-              to: cm.email,
-              subject: `New B2B Purchase Request - ${productInfo}`,
-              html: `
-                <h2>New B2B Purchase Request</h2>
-                <p><strong>Store:</strong> ${store?.name || 'N/A'}</p>
-                <p><strong>Product:</strong> ${productInfo}</p>
-                <p><strong>${skuInfo}</strong></p>
-                <p><strong>Quantity:</strong> ${request.quantity}</p>
-                <p><strong>Requested By:</strong> ${requester?.username || 'N/A'}</p>
-                <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}">Review Request</a></p>
-              `,
-            });
-          }
-        }
-        break;
-      }
-      case 'DM_APPROVED': {
-        const actorName = actor?.username || 'District Manager';
-        // Notify CM, Admin, Store Manager
-        if (cm) {
-          notifications.push({
-            user: cm._id,
-            content: `DM ${actorName} approved purchase request for ${productInfo}. Awaiting your approval.`,
-            url: requestLink,
-            read: false,
-          });
-          if (cm.email) {
-            emails.push({
-              to: cm.email,
-              subject: `B2B Request Approved by DM - ${productInfo}`,
-              html: `
-                <h2>DM Approval Received</h2>
-                <p><strong>Store:</strong> ${store?.name || 'N/A'}</p>
-                <p><strong>Product:</strong> ${productInfo}</p>
-                <p><strong>${skuInfo}</strong></p>
-                <p><strong>Approved By:</strong> ${actorName}</p>
-                <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}">Review Request</a></p>
-              `,
-            });
-          }
-        }
-        admins.forEach((admin) => {
-          notifications.push({
-            user: admin._id,
-            type: 'ORDER',
-            content: `DM ${actorName} approved B2B purchase request for ${productInfo} (Qty: ${request.quantity})`,
-            resourceId: request._id,
-            resourceModel: 'B2BPurchaseRequest',
-            priority: 'medium',
-            read: false,
-          });    
+  if (String(img).startsWith('http')) return img;
 
-        });
-        if (requester) {
-          notifications.push({
-            user: requester._id,
-            content: `Your purchase request for ${productInfo} was approved by DM ${actorName}. Status: ${request.status}`,
-            url: requestLink,
-            read: false,
-          });
-          if (requester.email) {
-            emails.push({
-              to: requester.email,
-              subject: `B2B Purchase Request Approved by DM - ${productInfo}`,
-              html: `
-                <h2>Request Approved by District Manager</h2>
-                <p><strong>Product:</strong> ${productInfo}</p>
-                <p><strong>${skuInfo}</strong></p>
-                <p><strong>Quantity:</strong> ${request.quantity}</p>
-                <p><strong>Status:</strong> ${request.status}</p>
-                <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}">View Request</a></p>
-              `,
-            });
-          }
-        }
-        break;
-      }
-      case 'CM_APPROVED': {
-        const actorName = actor?.username || 'Corporate Manager';
-        // Notify Admin, Store Manager
-        admins.forEach((admin) => {
-          notifications.push({
-            user: admin._id,
-            type: 'ORDER',
-            content: `CM ${actorName} approved B2B purchase request for ${productInfo} (Qty: ${request.quantity}). Awaiting final admin approval.`,
-            resourceId: request._id,
-            resourceModel: 'B2BPurchaseRequest',
-            priority: 'high',
-            read: false,
-          });
-        });
-        if (requester) {
-          notifications.push({
-            user: requester._id,
-            content: `Your purchase request for ${productInfo} was approved by CM ${actorName}. Awaiting admin approval.`,
-            url: requestLink,
-            read: false,
-          });
-          if (requester.email) {
-            emails.push({
-              to: requester.email,
-              subject: `B2B Purchase Request Approved by CM - ${productInfo}`,
-              html: `
-                <h2>Request Approved by Corporate Manager</h2>
-                <p><strong>Product:</strong> ${productInfo}</p>
-                <p><strong>${skuInfo}</strong></p>
-                <p><strong>Quantity:</strong> ${request.quantity}</p>
-                <p><strong>Status:</strong> ${request.status}</p>
-                <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}">View Request</a></p>
-              `,
-            });
-          }
-        }
-        break;
-      }
-      case 'ADMIN_APPROVED': {
-        const actorName = actor?.username || 'Admin';
-        // Notify Store Manager, DM, CM, Vendor (if applicable)
-        if (requester) {
-          notifications.push({
-            user: requester._id,
-            content: `Your purchase request for ${productInfo} was FINALLY APPROVED by Admin. Inventory added to store.`,
-            url: requestLink,
-            read: false,
-          });
-          if (requester.email) {
-            emails.push({
-              to: requester.email,
-              subject: `B2B Purchase Request APPROVED - ${productInfo}`,
-              html: `
-                <h2>✅ Purchase Request Approved</h2>
-                <p><strong>Product:</strong> ${productInfo}</p>
-                <p><strong>${skuInfo}</strong></p>
-                <p><strong>Quantity:</strong> ${request.quantity}</p>
-                <p><strong>Status:</strong> APPROVED - Inventory added to store</p>
-                <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/marketplace/store-inventory">View Store Inventory</a></p>
-              `,
-            });
-          }
-        }
-        if (dm) {
-          notifications.push({
-            user: dm._id,
-            content: `B2B purchase request for ${productInfo} was approved by Admin. Inventory moved to ${store?.name || 'store'}.`,
-            url: requestLink,
-            read: false,
-          });
-        }
-        if (cm) {
-          notifications.push({
-            user: cm._id,
-            content: `B2B purchase request for ${productInfo} was approved by Admin. Inventory moved to ${store?.name || 'store'}.`,
-            url: requestLink,
-            read: false,
-          });
-        }
-        break;
-      }
-      case 'REJECTED': {
-        const actorName = actor?.username || 'Approver';
-        const reason = request.rejection?.reason || 'No reason provided';
-        // Notify Store Manager, DM, CM, Admin
-        if (requester) {
-          notifications.push({
-            user: requester._id,
-            content: `Your purchase request for ${productInfo} was REJECTED by ${actorName}. Reason: ${reason}`,
-            url: requestLink,
-            read: false,
-          });
-          if (requester.email) {
-            emails.push({
-              to: requester.email,
-              subject: `B2B Purchase Request Rejected - ${productInfo}`,
-              html: `
-                <h2>❌ Purchase Request Rejected</h2>
-                <p><strong>Product:</strong> ${productInfo}</p>
-                <p><strong>${skuInfo}</strong></p>
-                <p><strong>Quantity:</strong> ${request.quantity}</p>
-                <p><strong>Rejected By:</strong> ${actorName}</p>
-                <p><strong>Reason:</strong> ${reason}</p>
-                <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}">View Request</a></p>
-              `,
-            });
-          }
-        }
-        break;
-      }
-    }
-
-    // Save notifications (non-blocking)
-    if (notifications.length > 0) {
-      const customerNotifications = notifications.filter((n) => !n.type).map(({ user, content, url, read }) => ({
-        user,
-        content,
-        url,
-        read,
-      }));
-      const adminNotifications = notifications.filter((n) => n.type).map(({ user, type, content, resourceId, resourceModel, priority, read }) => ({
-        user,
-        type,
-        content,
-        resourceId,
-        resourceModel,
-        priority,
-        read,
-      }));
-
-      await Promise.all([
-        customerNotifications.length > 0 ? Notification.insertMany(customerNotifications) : Promise.resolve(),
-        adminNotifications.length > 0 ? AdminNotification.insertMany(adminNotifications) : Promise.resolve(),
-      ]);
-    }
-        console.log('B2B email debug:', {
-      event,
-      requestId: String(request._id),
-      requesterEmail: requester?.email,
-      dmEmail: dm?.email,
-      cmEmail: cm?.email,
-      adminCount: admins.length,
-      emailsCount: emails.length,
-      emailsTo: emails.map((e) => e.to),
-    });
-
-    // Send emails (non-blocking, fire and forget)
-    if (emails.length > 0) {
-      // Promise.all(emails.map((mail) => sendEmail(mail))).catch((err) => console.error('B2B email error:', err));
-      Promise.all(emails.map((mail) => sendEmail(mail))).then((results) => {
-      console.log('B2B email results:', results);
-
-      const failed = results.filter((r) => !r.success);
-      if (failed.length) {
-        console.error('B2B failed emails:', failed);
-      }
-    }).catch((err) => {
-      console.error('B2B email error:', err);
-    });
-    }
-  } catch (error) {
-    console.error('B2B notification error:', error);
-    // Don't throw - notifications are non-critical
-  }
+  const baseUrl = process.env.BACKEND_URL || process.env.BASE_API || 'https://backend.vallianimarketplace.com';
+  return `${baseUrl}/${String(img).replace(/^\/+/, '')}`;
 };
+
+
+
+const safe = (v) =>
+  String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+const money = (value, currency = 'USD') => {
+  const n = Number(value || 0);
+  return `${currency} ${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
+
+const buildB2BEmailTemplate = ({
+  title,
+  badge,
+  productInfo,
+  skuInfo,
+  storeName,
+  vendorWarehouseName,
+  quantity,
+  status,
+  requestedBy,
+  requestedByEmail,
+  approvedBy,
+  reason,
+  orderUrl,
+  imageUrl,
+  urgentNote = false,
+  request,
+  sku,
+  product,
+}) => {
+  const attrs = sku?.attributes || {};
+  const unitPrice = request?.cartItemPrice ?? sku?.price ?? 0;
+  const currency = request?.cartItemCurrency ?? sku?.currency ?? 'USD';
+  const totalPrice = Number(unitPrice || 0) * Number(quantity || 0);
+
+  const rows = [
+    ['Order ID', request?._id],
+    ['Status', status],
+    ['Store', storeName],
+    // ['Vendor Warehouse', vendorWarehouseName],
+    ['Requested By', requestedBy],
+    ['Requester Email', requestedByEmail],
+    approvedBy ? ['Action By', approvedBy] : null,
+    reason ? ['Reason', reason] : null,
+    ['Quantity', quantity],
+    ['Unit Price', money(unitPrice, currency)],
+    ['Total Amount', money(totalPrice, currency)],
+  ].filter(Boolean);
+
+  const productRows = [
+    ['Product Title', product?.title || attrs?.descriptionname],
+    ['Brand', product?.brand],
+    ['Vendor Model', product?.vendorModel],
+    ['SKU', sku?.sku],
+    ['Model No', attrs?.modelno],
+    ['Style', attrs?.style],
+    ['Vendor', attrs?.vendor],
+    ['Metal Type', sku?.metalType],
+    ['Metal Color', sku?.metalColor],
+    ['Size', sku?.size],
+    ['Avg Weight', attrs?.avgweight],
+    // ['Category', product?.category],
+  ].filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '');
+
+  return `
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+</head>
+<body style="margin:0;padding:0;background:#EDE8D0;font-family:Arial,Helvetica,sans-serif;color:#2b211b;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#EDE8D0;padding:28px 12px;">
+    <tr>
+      <td align="center">
+        <table width="720" cellpadding="0" cellspacing="0" style="max-width:720px;width:100%;background:#ffffff;border-radius:22px;overflow:hidden;border:1px solid #d8cfad;box-shadow:0 18px 45px rgba(111,78,55,0.18);">
+          
+          <tr>
+            <td style="background:linear-gradient(135deg,#4b2f20,#6f4e37,#8a624a);padding:30px 34px;color:#EDE8D0;">
+              <div style="font-size:12px;letter-spacing:2px;text-transform:uppercase;opacity:.85;">Valliani Jewelers</div>
+              <h1 style="margin:10px 0 6px;font-size:26px;line-height:1.25;">${safe(title)}</h1>
+              <div style="display:inline-block;margin-top:8px;padding:7px 13px;border-radius:999px;background:rgba(237,232,208,.16);border:1px solid rgba(237,232,208,.28);font-size:12px;font-weight:700;">
+                ${safe(badge || 'Purchase Request')}
+              </div>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:26px 34px;">
+              ${
+                urgentNote
+                  ? `<div style="margin-bottom:22px;border-left:5px solid #6f4e37;background:#fff7df;border-radius:12px;padding:14px 16px;color:#6f4e37;font-size:14px;line-height:1.55;">
+                      <strong>Action Required:</strong> This order should be reviewed/completed within <strong>6 hours</strong>.
+                    </div>`
+                  : ''
+              }
+
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  ${
+                    imageUrl
+                      ? `<td width="160" valign="top" style="padding-right:20px;">
+                          <img src="${safe(imageUrl)}" width="150" style="width:150px;max-width:150px;border-radius:16px;border:1px solid #e7dfc2;display:block;background:#f7f3e8;" />
+                        </td>`
+                      : ''
+                  }
+                  <td valign="top">
+                    <h2 style="margin:0 0 8px;color:#6f4e37;font-size:21px;line-height:1.35;">${safe(productInfo)}</h2>
+                    <p style="margin:0 0 14px;color:#6b625b;font-size:14px;line-height:1.5;">${safe(skuInfo)}</p>
+                    <a href="${safe(orderUrl)}" target="_blank" style="display:inline-block;background:#6f4e37;color:#EDE8D0;text-decoration:none;padding:12px 22px;border-radius:999px;font-size:14px;font-weight:700;">
+                      Review Order
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+              <div style="margin-top:28px;">
+                <h3 style="margin:0 0 12px;color:#6f4e37;font-size:16px;">Order Summary</h3>
+                <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #eee3c5;border-radius:14px;overflow:hidden;">
+                  ${rows
+                    .map(
+                      ([k, v], i) => `
+                      <tr>
+                        <td style="width:38%;padding:12px 15px;background:${i % 2 === 0 ? '#f8f5e8' : '#ffffff'};color:#6f4e37;font-size:13px;font-weight:700;border-bottom:1px solid #eee3c5;">${safe(k)}</td>
+                        <td style="padding:12px 15px;background:${i % 2 === 0 ? '#fbfaf3' : '#ffffff'};color:#2b211b;font-size:13px;border-bottom:1px solid #eee3c5;">${safe(v || 'N/A')}</td>
+                      </tr>`
+                    )
+                    .join('')}
+                </table>
+              </div>
+
+              <div style="margin-top:24px;">
+                <h3 style="margin:0 0 12px;color:#6f4e37;font-size:16px;">Product Details</h3>
+                <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #eee3c5;border-radius:14px;overflow:hidden;">
+                  ${productRows
+                    .map(
+                      ([k, v], i) => `
+                      <tr>
+                        <td style="width:38%;padding:11px 15px;background:${i % 2 === 0 ? '#f8f5e8' : '#ffffff'};color:#6f4e37;font-size:13px;font-weight:700;border-bottom:1px solid #eee3c5;">${safe(k)}</td>
+                        <td style="padding:11px 15px;background:${i % 2 === 0 ? '#fbfaf3' : '#ffffff'};color:#2b211b;font-size:13px;border-bottom:1px solid #eee3c5;">${safe(v || 'N/A')}</td>
+                      </tr>`
+                    )
+                    .join('')}
+                </table>
+              </div>
+
+              <div style="margin-top:28px;text-align:center;">
+                <a href="${safe(orderUrl)}" target="_blank" style="background:#6f4e37;color:#EDE8D0;text-decoration:none;padding:14px 30px;border-radius:999px;font-weight:700;display:inline-block;">
+                  Open Purchase Request
+                </a>
+              </div>
+
+              <p style="margin:24px 0 0;text-align:center;color:#8a7c70;font-size:12px;line-height:1.5;">
+                This is an automated notification from Valliani Marketplace. Please do not reply directly to this email.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+};
+
+  const notifyB2BEvent = async ({ event, request, actor }) => {
+    try {
+      const populated = await B2BPurchaseRequest.findById(request._id)
+        .populate('vendorProductId', 'vendorModel title brand category')
+        .populate('skuId', 'sku metalColor metalType size images')
+        .populate('storeWarehouseId', 'name')
+        .populate('requestedBy', 'username email')
+        .populate('dmUserId', 'username email')
+        .populate('cmUserId', 'username email')
+        .lean();
+
+      const vendorProduct = populated.vendorProductId;
+      const sku = populated.skuId;
+      const store = populated.storeWarehouseId;
+      const requester = populated.requestedBy;
+      const dm = populated.dmUserId;
+      const cm = populated.cmUserId;
+      const imageUrl = getProductImageUrl(sku);
+      
+      const productInfo = `${sku?.attributes?.descriptionname || '-'} (${sku?.sku || '-'})`;
+      const skuInfo = `SKU: ${sku?.sku || 'N/A'} | ${sku?.metalColor || ''} ${sku?.metalType || ''} ${sku?.size || ''}`.trim();
+      const requestLink = `/marketplace/b2b-approvals/${request._id}`;
+      const orderUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}`;
+
+      // Fetch all admins for admin notifications
+      const admins = await User.find({ isAdmin: true }).select('_id email username').lean();
+
+      let notifications = [];
+      let emails = [];
+
+      switch (event) {
+        case 'REQUEST_CREATED': {
+          // Notify DM, CM
+          if (requester?.email) {
+          emails.push({
+            to: requester.email,
+            subject: `Purchase Request Created - ${productInfo}`,
+            html: buildB2BEmailTemplate({
+            title: 'Purchase Request Created',
+            badge: 'Request Submitted',
+            productInfo,
+            skuInfo,
+            storeName: store?.name,
+            vendorWarehouseName: populated.vendorWarehouseId?.name,
+            quantity: request.quantity,
+            status: request.status,
+            requestedBy: requester?.username || 'N/A',
+            requestedByEmail: requester?.email || '',
+            orderUrl,
+            imageUrl,
+            urgentNote: true,
+            request,
+            sku,
+            product: vendorProduct,
+          }),
+          
+          
+          });
+        }
+        if (requester?._id) {
+        notifications.push({
+          user: requester._id,
+          content: `Your purchase request for ${productInfo} has been created. Status: ${request.status}`,
+          url: requestLink,
+          read: false,
+        });
+      }
+
+
+          admins.forEach((admin) => {
+            if (admin.email) {
+              emails.push({
+                to: admin.email,
+                subject: `New Purchase Request - ${productInfo}`,
+                html: buildB2BEmailTemplate({
+                title: 'New Purchase Request',
+                badge: 'Admin Review',
+                productInfo,
+                skuInfo,
+                storeName: store?.name,
+                vendorWarehouseName: populated.vendorWarehouseId?.name,
+                quantity: request.quantity,
+                status: request.status,
+                requestedBy: requester?.username || 'N/A',
+                requestedByEmail: requester?.email || '',
+                orderUrl,
+                imageUrl,
+                urgentNote: true,
+                request,
+                sku,
+                product: vendorProduct,
+              }),
+              
+              
+              });
+            }
+          });
+              admins.forEach((admin) => {
+              notifications.push({
+              user: admin._id,
+              type: 'ORDER',
+              content: `New purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
+              resourceId: request._id,
+              resourceModel: 'B2BPurchaseRequest',
+              priority: 'high',
+              read: false,
+            });
+          });
+
+          if (dm) {
+            notifications.push({
+              user: dm._id,
+              content: `New purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
+              url: requestLink,
+              read: false,
+            });
+            if (dm.email) {
+              emails.push({
+                to: dm.email,
+                subject: `New Purchase Request - ${productInfo}`,
+                html: buildB2BEmailTemplate({
+                title: 'New Purchase Request',
+                badge: 'DM Action Required',
+                productInfo,
+                skuInfo,
+                storeName: store?.name,
+                vendorWarehouseName: populated.vendorWarehouseId?.name,
+                quantity: request.quantity,
+                status: request.status,
+                requestedBy: requester?.username || 'N/A',
+                requestedByEmail: requester?.email || '',
+                orderUrl,
+                imageUrl,
+                urgentNote: true,
+                request,
+                sku,
+                product: vendorProduct,
+              }),
+                
+               
+              });
+            }
+          }
+          if (cm) {
+            notifications.push({
+              user: cm._id,
+              content: `New purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
+              url: requestLink,
+              read: false,
+            });
+            if (cm.email) {
+              emails.push({
+                to: cm.email,
+                subject: `New Purchase Request - ${productInfo}`,
+                html: buildB2BEmailTemplate({
+                title: 'New Purchase Request',
+                badge: 'CM Action Required',
+                productInfo,
+                skuInfo,
+                storeName: store?.name,
+                vendorWarehouseName: populated.vendorWarehouseId?.name,
+                quantity: request.quantity,
+                status: request.status,
+                requestedBy: requester?.username || 'N/A',
+                requestedByEmail: requester?.email || '',
+                orderUrl,
+                imageUrl,
+                urgentNote: true,
+                request,
+                sku,
+                product: vendorProduct,
+              }),
+              
+              
+               
+              });
+            }
+          }
+          break;
+        }
+        case 'DM_APPROVED': {
+          const actorName = actor?.username || 'District Manager';
+          // Notify CM, Admin, Store Manager
+          if (cm) {
+            notifications.push({
+              user: cm._id,
+              content: `DM ${actorName} approved purchase request for ${productInfo}. Awaiting your approval.`,
+              url: requestLink,
+              read: false,
+            });
+            if (cm.email) {
+              emails.push({
+                to: cm.email,
+                subject: `Request Approved by DM - ${productInfo}`,
+                html: `
+                  <h2>DM Approval Received</h2>
+                  <p><strong>Store:</strong> ${store?.name || 'N/A'}</p>
+                  <p><strong>Product:</strong> ${productInfo}</p>
+                  <p><strong>${skuInfo}</strong></p>
+                  <p><strong>Approved By:</strong> ${actorName}</p>
+                  <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}">Review Request</a></p>
+                `,
+              });
+            }
+          }
+          admins.forEach((admin) => {
+            notifications.push({
+              user: admin._id,
+              type: 'ORDER',
+              content: `DM ${actorName} approved purchase request for ${productInfo} (Qty: ${request.quantity})`,
+              resourceId: request._id,
+              resourceModel: 'B2BPurchaseRequest',
+              priority: 'medium',
+              read: false,
+            });    
+
+          });
+          if (requester) {
+            notifications.push({
+              user: requester._id,
+              content: `Your purchase request for ${productInfo} was approved by DM ${actorName}. Status: ${request.status}`,
+              url: requestLink,
+              read: false,
+            });
+            if (requester.email) {
+              emails.push({
+                to: requester.email,
+                subject: `Purchase Request Approved by DM - ${productInfo}`,
+                html: buildB2BEmailTemplate({
+                title: 'Request Approved by District Manager',
+                badge: 'Approval Update',
+                productInfo,
+                skuInfo,
+                storeName: store?.name,
+                vendorWarehouseName: populated.vendorWarehouseId?.name,
+                quantity: request.quantity,
+                status: request.status,
+                requestedBy: requester?.username || 'N/A',
+                requestedByEmail: requester?.email || '',
+                approvedBy: actorName,
+                orderUrl,
+                imageUrl,
+                urgentNote: true,
+                request,
+                sku,
+                product: vendorProduct,
+              }),
+               
+              });
+            }
+          }
+          break;
+        }
+        case 'CM_APPROVED': {
+          const actorName = actor?.username || 'Corporate Manager';
+          // Notify Admin, Store Manager
+          admins.forEach((admin) => {
+            notifications.push({
+              user: admin._id,
+              type: 'ORDER',
+              content: `CM ${actorName} approved purchase request for ${productInfo} (Qty: ${request.quantity}). Awaiting final admin approval.`,
+              resourceId: request._id,
+              resourceModel: 'B2BPurchaseRequest',
+              priority: 'high',
+              read: false,
+            });
+          });
+          if (requester) {
+            notifications.push({
+              user: requester._id,
+              content: `Your purchase request for ${productInfo} was approved by CM ${actorName}. Awaiting admin approval.`,
+              url: requestLink,
+              read: false,
+            });
+            if (requester.email) {
+              emails.push({
+                to: requester.email,
+                subject: `Purchase Request Approved by CM - ${productInfo}`,
+                html: buildB2BEmailTemplate({
+                title: 'Request Approved by Corporate Manager',
+                badge: 'Awaiting Admin Approval',
+                productInfo,
+                skuInfo,
+                storeName: store?.name,
+                quantity: request.quantity,
+                status: request.status,
+                requestedBy: requester?.username || 'N/A',
+                approvedBy: actorName,
+                orderUrl,
+                imageUrl,
+                vendorWarehouseName: populated.vendorWarehouseId?.name,
+                requestedByEmail: requester?.email || '',
+                urgentNote: true,
+                request,
+                sku,
+                product: vendorProduct,
+              }),
+                
+               
+              });
+            }
+          }
+          break;
+        }
+        case 'ADMIN_APPROVED': {
+          const actorName = actor?.username || 'Admin';
+          // Notify Store Manager, DM, CM, Vendor (if applicable)
+          if (requester) {
+            notifications.push({
+              user: requester._id,
+              content: `Your purchase request for ${productInfo} was FINALLY APPROVED by Admin. Inventory added to store.`,
+              url: requestLink,
+              read: false,
+            });
+            if (requester.email) {
+              emails.push({
+                to: requester.email,
+                subject: `Purchase Request APPROVED - ${productInfo}`,
+                html: buildB2BEmailTemplate({
+                title: 'Purchase Request Approved',
+                badge: 'Inventory Added to Store',
+                productInfo,
+                skuInfo,
+                storeName: store?.name,
+                quantity: request.quantity,
+                status: 'APPROVED - Inventory added to store',
+                requestedBy: requester?.username || 'N/A',
+                approvedBy: actorName,
+                orderUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/marketplace/store-inventory`,
+                imageUrl,
+                vendorWarehouseName: populated.vendorWarehouseId?.name, 
+                product: vendorProduct,
+                requestedByEmail: requester?.email || '',
+                urgentNote: false,
+                request,
+                sku,
+              }),
+              
+               
+              });
+            }
+          }
+          if (dm) {
+            notifications.push({
+              user: dm._id,
+              content: `purchase request for ${productInfo} was approved by Admin. Inventory moved to ${store?.name || 'store'}.`,
+              url: requestLink,
+              read: false,
+            });
+          }
+          if (cm) {
+            notifications.push({
+              user: cm._id,
+              content: `purchase request for ${productInfo} was approved by Admin. Inventory moved to ${store?.name || 'store'}.`,
+              url: requestLink,
+              read: false,
+            });
+          }
+          break;
+        }
+        case 'REJECTED': {
+          const actorName = actor?.username || 'Approver';
+          const reason = request.rejection?.reason || 'No reason provided';
+          // Notify Store Manager, DM, CM, Admin
+          if (requester) {
+            notifications.push({
+              user: requester._id,
+              content: `Your purchase request for ${productInfo} was REJECTED by ${actorName}. Reason: ${reason}`,
+              url: requestLink,
+              read: false,
+            });
+            if (requester.email) {
+              emails.push({
+                to: requester.email,
+                subject: `Purchase Request Rejected - ${productInfo}`,
+                html: buildB2BEmailTemplate({
+                title: 'Purchase Request Rejected',
+                badge: 'Request Rejected',
+                productInfo,
+                skuInfo,
+                storeName: store?.name,
+                quantity: request.quantity,
+                status: 'REJECTED',
+                requestedBy: requester?.username || 'N/A',
+                approvedBy: actorName,
+                reason,
+                orderUrl,
+                imageUrl,
+                vendorWarehouseName: populated.vendorWarehouseId?.name,
+                requestedByEmail: requester?.email || '',
+                urgentNote: false,
+                request,
+                sku,
+                product: vendorProduct,
+              }),
+               
+              });
+            }
+          }
+          break;
+        }
+      }
+
+      // Save notifications (non-blocking)
+      if (notifications.length > 0) {
+        const customerNotifications = notifications.filter((n) => !n.type).map(({ user, content, url, read }) => ({
+          user,
+          content,
+          url,
+          read,
+        }));
+        const adminNotifications = notifications.filter((n) => n.type).map(({ user, type, content, resourceId, resourceModel, priority, read }) => ({
+          user,
+          type,
+          content,
+          resourceId,
+          resourceModel,
+          priority,
+          read,
+        }));
+
+        await Promise.all([
+          customerNotifications.length > 0 ? Notification.insertMany(customerNotifications) : Promise.resolve(),
+          adminNotifications.length > 0 ? AdminNotification.insertMany(adminNotifications) : Promise.resolve(),
+        ]);
+      }
+          console.log('email debug:', {
+        event,
+        requestId: String(request._id),
+        requesterEmail: requester?.email,
+        dmEmail: dm?.email,
+        cmEmail: cm?.email,
+        adminCount: admins.length,
+        emailsCount: emails.length,
+        emailsTo: emails.map((e) => e.to),
+      });
+
+      // Send emails (non-blocking, fire and forget)
+      if (emails.length > 0) {
+        // Promise.all(emails.map((mail) => sendEmail(mail))).catch((err) => console.error('email error:', err));
+        Promise.all(emails.map((mail) => sendEmail(mail))).then((results) => {
+        console.log('email results:', results);
+
+        const failed = results.filter((r) => !r.success);
+        if (failed.length) {
+          console.error('failed emails:', failed);
+        }
+      }).catch((err) => {
+        console.error('email error:', err);
+      });
+      }
+    } catch (error) {
+      console.error('notification error:', error);
+      // Don't throw - notifications are non-critical
+    }
+  };
 
 /**
  * POST /api/v2/b2b/purchase
@@ -533,6 +813,25 @@ const notifyB2BEvent = async ({ event, request, actor }) => {
  * 1. Cart-based (recommended): { cartId } - creates requests for all cart items
  * 2. Single-item (backward compatible): { vendorProductId, skuId, quantity, storeWarehouseId }
  */
+
+const inventoryCounter = require("../models/InvCounter.model");
+
+const generateOrderNumber = async () => {
+  const now = new Date();
+
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+
+  const counter = await inventoryCounter.findByIdAndUpdate(
+    `B2B-${year}-${month}`,
+    { $inc: { seq: 1 } },
+    { new: true, upsert: true }
+  );
+
+  const serial = String(counter.seq).padStart(7, "0");
+
+  return `INV-${year}-${month}-${serial}`;
+};
 const createPurchaseRequest = async (req, res) => {
   try {
     const actor = req.b2bActor;
@@ -667,7 +966,10 @@ const createPurchaseRequest = async (req, res) => {
           message: `Vendor warehouse missing for SKU ${item.skuId.sku}`,
         });
       }
+        const orderNumber = await generateOrderNumber();
+
         const request = await B2BPurchaseRequest.create({
+          orderNumber,
           vendorProductId: item.vendorProductId._id,
           skuId: item.skuId._id,
           vendorWarehouseId: item.warehouseId,
@@ -697,7 +999,10 @@ const createPurchaseRequest = async (req, res) => {
         success: true,
         message: `Purchase requests created (${createdRequests.length} items)`,
         data: {
-          requestIds: createdRequests.map((r) => r._id),
+            requests: createdRequests.map((r) => ({
+              id: r._id,
+              orderNumber: r.orderNumber,
+            })),
           status: initialStatus,
           totalAmount: cartTotal,
           walletBalance,
@@ -778,9 +1083,10 @@ const createPurchaseRequest = async (req, res) => {
       message: 'vendorWarehouseId required',
     });
     }
-
+    const orderNumber = await generateOrderNumber();
 
     const created = await B2BPurchaseRequest.create({
+      orderNumber,
       vendorProductId: vendorProduct._id,
       skuId: sku._id,
       vendorWarehouseId,
@@ -804,6 +1110,7 @@ const createPurchaseRequest = async (req, res) => {
       success: true,
       message: 'Purchase request created',
       purchaseId: created._id,
+      orderNumber: created.orderNumber,
       status: created.status,
       data: {
         requestId: created._id,
@@ -884,27 +1191,46 @@ const getPurchaseStatus = async (req, res) => {
       getId(request.storeWarehouseId) === selectedWarehouse ||
       userWarehouses.includes(getId(request.storeWarehouseId));
 
-      console.log('B2B canView debug:', {
-      actorId,
-      role,
-      isAdminViewer,
-      requestedBy: getId(request.requestedBy),
-      dmUserId: getId(request.dmUserId),
-      cmUserId: getId(request.cmUserId),
-      storeWarehouseId: getId(request.storeWarehouseId),
-      selectedWarehouse,
-      userWarehouses,
-    });
+    //   console.log('canView debug:', {
+    //   actorId,
+    //   role,
+    //   isAdminViewer,
+    //   requestedBy: getId(request.requestedBy),
+    //   dmUserId: getId(request.dmUserId),
+    //   cmUserId: getId(request.cmUserId),
+    //   storeWarehouseId: getId(request.storeWarehouseId),
+    //   selectedWarehouse,
+    //   userWarehouses,
+    // });
     if (!canView) return res.status(403).json({ success: false, message: 'Access denied' });
+    
+    const skuObjectId = request.skuId?._id || request.skuId;
 
+    const inventories = skuObjectId
+      ? await SkuInventory.find({ skuId: skuObjectId })
+          .select('quantity')
+          .lean()
+      : [];
+
+    const vendorStock = inventories.reduce(
+      (sum, inv) => sum + Number(inv.quantity || 0),
+      0
+    );
 
     const [withRequester] = await resolveRequestedByDetails([request]);
+    const data = {
+    ...withRequester,
+    vendorStock,
+    availableVendorStock: vendorStock,
+    insufficientVendorStock: Number(withRequester.quantity || 0) > vendorStock,
+    shortageQuantity: Math.max(0, Number(withRequester.quantity || 0) - vendorStock),
+    };
 
     return res.status(200).json({
       success: true,
       message: 'Status retrieved',
-      status: withRequester.status,
-      data: withRequester,
+      status: data.status,
+      data,
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to fetch purchase status', error: error.message });
@@ -1065,17 +1391,55 @@ const listPurchaseRequests = async (req, res) => {
         .populate('vendorProductId', 'vendorModel title brand category')
         .populate('skuId', 'sku price currency metalColor metalType size attributes images')
         .populate('storeWarehouseId', 'name isMain')
+        .populate('vendorWarehouseId', 'name isMain')
         .lean(),
     ]);
+
+      const skuIds = [
+        ...new Set(
+          requests
+            .map((r) => r.skuId?._id || r.skuId)
+            .filter(Boolean)
+            .map(String)
+        ),
+      ];
+
+      const inventoryMap = new Map();
+
+      if (skuIds.length > 0) {
+        const inventories = await SkuInventory.find({
+          skuId: { $in: skuIds },
+        })
+          .select('skuId quantity')
+          .lean();
+
+        inventories.forEach((inv) => {
+          const key = String(inv.skuId);
+          inventoryMap.set(key, (inventoryMap.get(key) || 0) + Number(inv.quantity || 0));
+        });
+      }
 
     const withRequester = await resolveRequestedByDetails(requests);
     const viewerModel = req.b2bActor?.model || 'User';
     const data = attachUnreadChatCount(withRequester, req.user._id, viewerModel);
 
+    const dataWithInventory = data.map((r) => {
+    const skuId = String(r.skuId?._id || r.skuId || '');
+    const vendorStock = inventoryMap.get(skuId) || 0;
+
+    return {
+      ...r,
+      vendorStock,
+      availableVendorStock: vendorStock,
+      insufficientVendorStock: Number(r.quantity || 0) > vendorStock,
+      shortageQuantity: Math.max(0, Number(r.quantity || 0) - vendorStock),
+    };
+    });
+
     return res.status(200).json({
       success: true,
       message: 'Purchase requests retrieved successfully',
-      data,
+      data: dataWithInventory,
       pagination: {
         total,
         page,
@@ -1195,7 +1559,7 @@ const approvePurchaseRequest = async (req, res) => {
         session,
       });
 
-      // Deduct wallet balance (InventoryWallet for B2B purchases)
+      // Deduct wallet balance (InventoryWallet for purchases)
       const itemTotal = (fresh.cartItemPrice || 0) * fresh.quantity;
       if (itemTotal > 0) {
         const inventoryWalletQuery = InventoryWallet.findOne({ warehouse: fresh.storeWarehouseId });
@@ -1685,7 +2049,7 @@ const rejectPurchaseReturn = async (req, res) => {
 
 /**
  * GET /api/v2/b2b/store-inventory
- * Admin-only: view store inventory created from approved B2B purchases.
+ * Admin-only: view store inventory created from approved purchases.
  *
  * Optional query:
  * - storeWarehouseId=<id>
@@ -1717,7 +2081,7 @@ const listStoreInventory = async (req, res) => {
 
 /**
  * GET /api/v2/b2b/store-inventory/my
- * Store managers can view inventory that was added to their store via approved B2B purchase requests.
+ * Store managers can view inventory that was added to their store via approved purchase requests.
  */
 const listMyStoreInventory = async (req, res) => {
   try {

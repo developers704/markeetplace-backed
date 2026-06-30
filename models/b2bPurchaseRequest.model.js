@@ -59,12 +59,19 @@ const approvalStepSchema = new mongoose.Schema(
 
 const b2bPurchaseRequestSchema = new mongoose.Schema(
   {
+        orderNumber: {
+        type: String,
+        unique: true,
+        index: true,
+        },
+    
     vendorProductId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'VendorProduct',
       required: true,
       index: true,
     },
+
     skuId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Sku',
@@ -103,6 +110,7 @@ const b2bPurchaseRequestSchema = new mongoose.Schema(
         index: true,
       },
       requestedAt: { type: Date, default: null },
+   
       requestedBy: { type: mongoose.Schema.Types.ObjectId, default: null },
       requestedByModel: { type: String, enum: ['Customer', 'User'], default: null },
       processedAt: { type: Date, default: null },
