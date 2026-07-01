@@ -16,11 +16,13 @@ const {
   postStoreTransferChatMessage,
   markStoreTransferChatSeen,
   getMyStoreInventory,
+  getMyStoreInventoryFacets,
   createBatchStoreTransferOrders,
 } = require('../controllers/b2bStoreTransfer.controller');
 
 router.use(authMiddleware, attachRoleContext);
 
+router.get('/my-store-inventory/facets', getMyStoreInventoryFacets);
 router.get('/my-store-inventory', getMyStoreInventory);
 router.post('/batch', createBatchStoreTransferOrders);
 router.post('/', createStoreTransferOrder);

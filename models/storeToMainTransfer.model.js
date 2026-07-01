@@ -3,10 +3,10 @@ const mongoose = require('mongoose');
 /**
  * Store → Main Store Transfer (batch).
  * One document = one transfer request with multiple SKU items.
- * Lifecycle: SUBMITTED → WIP (Received) → APPROVED (stock+wallet applied) | REJECTED
+ * Lifecycle: SUBMITTED → WIP (request received) → APPROVED (stock applied) → RECEIVED (inventory confirmed) | REJECTED
  */
 
-const STATUSES = ['SUBMITTED', 'WIP', 'APPROVED', 'REJECTED'];
+const STATUSES = ['SUBMITTED', 'WIP', 'APPROVED', 'RECEIVED', 'REJECTED'];
 
 const transferItemSchema = new mongoose.Schema(
   {
@@ -21,6 +21,11 @@ const transferItemSchema = new mongoose.Schema(
     lineTotal: { type: Number, required: true, min: 0 },
     /** idempotency: set when inventory/wallet applied for this item */
     inventoryAppliedAt: { type: Date, default: null },
+    /** set when admin rejects this line without moving stock */
+    rejectedAt: { type: Date, default: null },
+    rejectionReason: { type: String, default: '', trim: true },
+    /** set after approval when main store confirms physical inventory received (status only) */
+    receivedAt: { type: Date, default: null },
   },
   { _id: true },
 );
@@ -82,15 +87,48 @@ storeToMainTransferSchema.index({ createdAt: -1 });
 storeToMainTransferSchema.pre('save', async function (next) {
   if (this.isNew && !this.ticketNumber) {
     try {
-      const count = await mongoose.model('StoreToMainTransfer').countDocuments();
-      const year = new Date().getFullYear();
-      this.ticketNumber = `STM-${year}-${String(count + 1).padStart(5, '0')}`;
-    } catch (e) {
-      return next(e);
+      const now = new Date();
+
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, '0');
+      const day = String(now.getDate()).padStart(2, '0');
+
+      // 2025-07-01
+      const datePrefix = `${year}-${month}-${day}`;
+
+      // Count today's transfers
+      const start = new Date(year, now.getMonth(), now.getDate(), 0, 0, 0);
+      const end = new Date(year, now.getMonth(), now.getDate() + 1, 0, 0, 0);
+
+      const count = await mongoose.model('StoreToMainTransfer').countDocuments({
+        createdAt: {
+          $gte: start,
+          $lt: end,
+        },
+      });
+
+      const sequence = String(count + 1).padStart(7, '0');
+
+      this.ticketNumber = `STM-${datePrefix}-${sequence}`;
+    } catch (err) {
+      return next(err);
     }
   }
+
   next();
 });
+// storeToMainTransferSchema.pre('save', async function (next) {
+//   if (this.isNew && !this.ticketNumber) {
+//     try {
+//       const count = await mongoose.model('StoreToMainTransfer').countDocuments();
+//       const year = new Date().getFullYear();
+//       this.ticketNumber = `STM-${year}-${String(count + 1).padStart(5, '0')}`;
+//     } catch (e) {
+//       return next(e);
+//     }
+//   }
+//   next();
+// });
 
 const StoreToMainTransfer = mongoose.model('StoreToMainTransfer', storeToMainTransferSchema);
 module.exports = StoreToMainTransfer;

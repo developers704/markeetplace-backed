@@ -33,6 +33,8 @@ const skuSchema = new mongoose.Schema(
     // Images for the selected SKU (first image typically used for card)
     images: [{ type: String, default: [] }],
     gallery: [{ type: String, default: [] }],
+    /** Product video URLs (from CSV Video_Link column) */
+    videos: [{ type: String, default: [] }],
 
     // Flexible attributes (diamond specs, gender, etc.)
     attributes: {

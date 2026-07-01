@@ -102,6 +102,7 @@ async function streamParseVendorCatalog(csvFilePath) {
 
           const images = parseCsvList(pick(row, ['images', 'image', 'featureimageslink']));
           const gallery = parseCsvList(pick(row, ['gallery', 'galleryimagelink']));
+          const videos = parseCsvList(pick(row, ['videolink', 'videolinks', 'video']));
 
           const attributes = {};
           Object.keys(row).forEach((k) => {
@@ -150,6 +151,7 @@ async function streamParseVendorCatalog(csvFilePath) {
             currency: 'USD',
             images,
             gallery,
+            videos,
             attributes,
           });
         } catch (rowErr) {
@@ -364,6 +366,7 @@ async function bulkUpsertVendorChunk(groups, vendorKeys, now) {
               currency: r.currency || 'USD',
               images: r.images || [],
               gallery: r.gallery || [],
+              videos: r.videos || [],
               attributes: r.attributes || {},
               isActive: true,
               updatedAt: now,

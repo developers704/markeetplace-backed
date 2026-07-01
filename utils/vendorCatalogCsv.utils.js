@@ -65,6 +65,8 @@ const KNOWN_KEYS = new Set([
   'featureimageslink',
   'gallery',
   'galleryimagelink',
+  'videolink',
+  'videolinks',
   'title',
   'name',
   'description',

@@ -82,6 +82,101 @@ async function rebuildInventoryCaches(skuId) {
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+const parseMulti = (value) =>
+  String(value || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+const sortFacetStrings = (arr = []) =>
+  [...new Set(arr.map((v) => String(v || '').trim()).filter(Boolean))].sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: 'base' }),
+  );
+
+function resolveUserWarehouseId(req) {
+  const selectedWarehouse = req.user?.selectedWarehouse
+    ? String(req.user.selectedWarehouse)
+    : null;
+  const userWarehouses = Array.isArray(req.user?.warehouse)
+    ? req.user.warehouse.map((w) => String(w._id || w))
+    : [];
+  return selectedWarehouse || userWarehouses[0] || null;
+}
+
+function buildMyStoreInventoryBasePipeline(warehouseId) {
+  return [
+    {
+      $match: {
+        warehouse: new mongoose.Types.ObjectId(warehouseId),
+        quantity: { $gt: 0 },
+      },
+    },
+    {
+      $lookup: {
+        from: 'skus',
+        localField: 'skuId',
+        foreignField: '_id',
+        as: 'skuDoc',
+      },
+    },
+    { $unwind: { path: '$skuDoc', preserveNullAndEmptyArrays: false } },
+    {
+      $lookup: {
+        from: 'vendorproducts',
+        localField: 'skuDoc.productId',
+        foreignField: '_id',
+        as: 'productDoc',
+      },
+    },
+    { $unwind: { path: '$productDoc', preserveNullAndEmptyArrays: false } },
+  ];
+}
+
+function applyMyStoreInventoryFilters(pipeline, query = {}) {
+  const metalColors = parseMulti(query.metalColor);
+  const metalTypes = parseMulti(query.metalType);
+  const brands = parseMulti(query.brand);
+  const styles = parseMulti(query.style);
+  const stoneTypes = parseMulti(query.stonetype);
+  const vendors = parseMulti(query.vendor);
+
+  if (metalColors.length) {
+    pipeline.push({ $match: { 'skuDoc.metalColor': { $in: metalColors } } });
+  }
+  if (metalTypes.length) {
+    pipeline.push({ $match: { 'skuDoc.metalType': { $in: metalTypes } } });
+  }
+  if (brands.length) {
+    pipeline.push({ $match: { 'productDoc.brand': { $in: brands } } });
+  }
+  if (styles.length) {
+    pipeline.push({ $match: { 'skuDoc.attributes.style': { $in: styles } } });
+  }
+  if (stoneTypes.length) {
+    pipeline.push({ $match: { 'skuDoc.attributes.stonetype': { $in: stoneTypes } } });
+  }
+  if (vendors.length) {
+    pipeline.push({ $match: { 'skuDoc.attributes.vendor': { $in: vendors } } });
+  }
+
+  const search = String(query.search || '').trim();
+  if (search) {
+    const rx = new RegExp(escapeRegex(search), 'i');
+    pipeline.push({
+      $match: {
+        $or: [
+          { 'skuDoc.sku': rx },
+          { 'productDoc.vendorModel': rx },
+          { 'productDoc.title': rx },
+          { 'productDoc.brand': rx },
+        ],
+      },
+    });
+  }
+
+  return pipeline;
+}
+
 const createStoreTransferOrder = async (req, res) => {
   try {
     const actor = req.b2bActor;
@@ -950,13 +1045,7 @@ const postStoreTransferChatMessage = async (req, res) => {
  */
 const getMyStoreInventory = async (req, res) => {
   try {
-    const selectedWarehouse = req.user?.selectedWarehouse
-      ? String(req.user.selectedWarehouse)
-      : null;
-    const userWarehouses = Array.isArray(req.user?.warehouse)
-      ? req.user.warehouse.map((w) => String(w._id || w))
-      : [];
-    const warehouseId = selectedWarehouse || userWarehouses[0] || null;
+    const warehouseId = resolveUserWarehouseId(req);
 
     if (!warehouseId || !isObjectId(warehouseId)) {
       return res.status(400).json({
@@ -968,48 +1057,9 @@ const getMyStoreInventory = async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const skip = (page - 1) * limit;
-    const search = String(req.query.search || '').trim();
 
-    const baseMatch = {
-      warehouse: new mongoose.Types.ObjectId(warehouseId),
-      quantity: { $gt: 0 },
-    };
-
-    let pipeline = [
-      { $match: baseMatch },
-      {
-        $lookup: {
-          from: 'skus',
-          localField: 'skuId',
-          foreignField: '_id',
-          as: 'skuDoc',
-        },
-      },
-      { $unwind: { path: '$skuDoc', preserveNullAndEmptyArrays: false } },
-      {
-        $lookup: {
-          from: 'vendorproducts',
-          localField: 'skuDoc.productId',
-          foreignField: '_id',
-          as: 'productDoc',
-        },
-      },
-      { $unwind: { path: '$productDoc', preserveNullAndEmptyArrays: false } },
-    ];
-
-    if (search) {
-      const rx = new RegExp(escapeRegex(search), 'i');
-      pipeline.push({
-        $match: {
-          $or: [
-            { 'skuDoc.sku': rx },
-            { 'productDoc.vendorModel': rx },
-            { 'productDoc.title': rx },
-            { 'productDoc.brand': rx },
-          ],
-        },
-      });
-    }
+    let pipeline = buildMyStoreInventoryBasePipeline(warehouseId);
+    pipeline = applyMyStoreInventoryFilters(pipeline, req.query);
 
     pipeline.push({
       $addFields: {
@@ -1093,6 +1143,81 @@ const getMyStoreInventory = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: error.message || 'Failed to fetch store inventory',
+    });
+  }
+};
+
+/**
+ * GET /my-store-inventory/facets
+ * Distinct filter values for the user's store inventory.
+ */
+const getMyStoreInventoryFacets = async (req, res) => {
+  try {
+    const warehouseId = resolveUserWarehouseId(req);
+
+    if (!warehouseId || !isObjectId(warehouseId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'No store warehouse selected. Please select a warehouse first.',
+      });
+    }
+
+    const pipeline = [
+      ...buildMyStoreInventoryBasePipeline(warehouseId),
+      {
+        $facet: {
+          metalColors: [
+            { $match: { 'skuDoc.metalColor': { $nin: [null, ''] } } },
+            { $group: { _id: '$skuDoc.metalColor' } },
+            { $sort: { _id: 1 } },
+          ],
+          metalTypes: [
+            { $match: { 'skuDoc.metalType': { $nin: [null, ''] } } },
+            { $group: { _id: '$skuDoc.metalType' } },
+            { $sort: { _id: 1 } },
+          ],
+          brands: [
+            { $match: { 'productDoc.brand': { $nin: [null, ''] } } },
+            { $group: { _id: '$productDoc.brand' } },
+            { $sort: { _id: 1 } },
+          ],
+          styles: [
+            { $match: { 'skuDoc.attributes.style': { $nin: [null, ''] } } },
+            { $group: { _id: '$skuDoc.attributes.style' } },
+            { $sort: { _id: 1 } },
+          ],
+          stoneTypes: [
+            { $match: { 'skuDoc.attributes.stonetype': { $nin: [null, ''] } } },
+            { $group: { _id: '$skuDoc.attributes.stonetype' } },
+            { $sort: { _id: 1 } },
+          ],
+          vendors: [
+            { $match: { 'skuDoc.attributes.vendor': { $nin: [null, ''] } } },
+            { $group: { _id: '$skuDoc.attributes.vendor' } },
+            { $sort: { _id: 1 } },
+          ],
+        },
+      },
+    ];
+
+    const [facet] = await SkuInventory.aggregate(pipeline);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        metalColors: sortFacetStrings((facet?.metalColors || []).map((x) => x?._id)),
+        metalTypes: sortFacetStrings((facet?.metalTypes || []).map((x) => x?._id)),
+        brands: sortFacetStrings((facet?.brands || []).map((x) => x?._id)),
+        styles: sortFacetStrings((facet?.styles || []).map((x) => x?._id)),
+        stoneTypes: sortFacetStrings((facet?.stoneTypes || []).map((x) => x?._id)),
+        vendors: sortFacetStrings((facet?.vendors || []).map((x) => x?._id)),
+      },
+      warehouseId,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch inventory facets',
     });
   }
 };
@@ -1247,5 +1372,6 @@ module.exports = {
   postStoreTransferChatMessage,
   markStoreTransferChatSeen,
   getMyStoreInventory,
+  getMyStoreInventoryFacets,
   createBatchStoreTransferOrders,
 };
