@@ -1,5 +1,5 @@
 const express = require('express');
-const { getCartAnalytics, getDetailedCartData, getTopPerformingCustomers, getCustomerActivities,  getCustomerBreakdown, getActivitySummary } = require('../controllers/analytics.controller');
+const { getCartAnalytics, getDetailedCartData, getDetailedCartById, getTopPerformingCustomers, getCustomerActivities,  getCustomerBreakdown, getActivitySummary } = require('../controllers/analytics.controller');
 const router = express.Router();
 const authMiddleware = require('../middlewares/authMiddleware');
 const checkSuperuserOrPermission = require('../middlewares/checkSuperuserOrPermission.js');
@@ -7,6 +7,7 @@ const checkSuperuserOrPermission = require('../middlewares/checkSuperuserOrPermi
 
 router.get('/cart', authMiddleware, getCartAnalytics);
 router.get('/cartdetailed-data', authMiddleware, getDetailedCartData);
+router.get('/cartdetailed-data/:id', authMiddleware, getDetailedCartById);
 
 // Admin apis:
 router.post('/top-performing-customers', authMiddleware, checkSuperuserOrPermission, getTopPerformingCustomers);

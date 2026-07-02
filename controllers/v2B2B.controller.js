@@ -373,6 +373,7 @@ const buildB2BEmailTemplate = ({
 
       // Fetch all admins for admin notifications
       const admins = await User.find({ isAdmin: true }).select('_id email username').lean();
+      const purchaseRequestResolver = await User.find({isRequestResolver:true}).select('_id email username').lean();
 
       let notifications = [];
       let emails = [];
@@ -455,6 +456,46 @@ const buildB2BEmailTemplate = ({
               read: false,
             });
           });
+          purchaseRequestResolver.forEach((resolveruser) => {
+            if (resolveruser.email) {
+              emails.push({
+                to: resolveruser.email,
+                subject: `New Purchase Request - ${productInfo}`,
+                html: buildB2BEmailTemplate({
+                title: 'New Purchase Request',
+                badge: 'Admin Review',
+                productInfo,
+                skuInfo,
+                storeName: store?.name,
+                vendorWarehouseName: populated.vendorWarehouseId?.name,
+                quantity: request.quantity,
+                status: request.status,
+                requestedBy: requester?.username || 'N/A',
+                requestedByEmail: requester?.email || '',
+                orderUrl,
+                imageUrl,
+                urgentNote: true,
+                request,
+                sku,
+                product: vendorProduct,
+              }),
+              
+              
+              });
+            }
+          });
+              purchaseRequestResolver.forEach((resolveruser) => {
+              notifications.push({
+              user: resolveruser._id,
+              type: 'ORDER',
+              content: `New purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
+              resourceId: request._id,
+              resourceModel: 'B2BPurchaseRequest',
+              priority: 'high',
+              read: false,
+            });
+          });
+
 
           if (dm) {
             notifications.push({
@@ -564,6 +605,19 @@ const buildB2BEmailTemplate = ({
             });    
 
           });
+          
+          purchaseRequestResolver.forEach((resolveruser) => {
+            notifications.push({
+              user: resolveruser._id,
+              type: 'ORDER',
+              content: `DM ${actorName} approved purchase request for ${productInfo} (Qty: ${request.quantity})`,
+              resourceId: request._id,
+              resourceModel: 'B2BPurchaseRequest',
+              priority: 'medium',
+              read: false,
+            });    
+
+          });
           if (requester) {
             notifications.push({
               user: requester._id,
@@ -606,6 +660,17 @@ const buildB2BEmailTemplate = ({
           admins.forEach((admin) => {
             notifications.push({
               user: admin._id,
+              type: 'ORDER',
+              content: `CM ${actorName} approved purchase request for ${productInfo} (Qty: ${request.quantity}). Awaiting final admin approval.`,
+              resourceId: request._id,
+              resourceModel: 'B2BPurchaseRequest',
+              priority: 'high',
+              read: false,
+            });
+          });
+          purchaseRequestResolver.forEach((resolveruser) => {
+            notifications.push({
+              user: resolveruser._id,
               type: 'ORDER',
               content: `CM ${actorName} approved purchase request for ${productInfo} (Qty: ${request.quantity}). Awaiting final admin approval.`,
               resourceId: request._id,
@@ -773,22 +838,22 @@ const buildB2BEmailTemplate = ({
           adminNotifications.length > 0 ? AdminNotification.insertMany(adminNotifications) : Promise.resolve(),
         ]);
       }
-          console.log('email debug:', {
-        event,
-        requestId: String(request._id),
-        requesterEmail: requester?.email,
-        dmEmail: dm?.email,
-        cmEmail: cm?.email,
-        adminCount: admins.length,
-        emailsCount: emails.length,
-        emailsTo: emails.map((e) => e.to),
-      });
+      //   console.log('email debug:', {
+      //   event,
+      //   requestId: String(request._id),
+      //   requesterEmail: requester?.email,
+      //   dmEmail: dm?.email,
+      //   cmEmail: cm?.email,
+      //   adminCount: admins.length,
+      //   emailsCount: emails.length,
+      //   emailsTo: emails.map((e) => e.to),
+      // });
 
       // Send emails (non-blocking, fire and forget)
       if (emails.length > 0) {
         // Promise.all(emails.map((mail) => sendEmail(mail))).catch((err) => console.error('email error:', err));
         Promise.all(emails.map((mail) => sendEmail(mail))).then((results) => {
-        console.log('email results:', results);
+        // console.log('email results:', results);
 
         const failed = results.filter((r) => !r.success);
         if (failed.length) {
@@ -1204,10 +1269,26 @@ const getPurchaseStatus = async (req, res) => {
     // });
     if (!canView) return res.status(403).json({ success: false, message: 'Access denied' });
     
-    const skuObjectId = request.skuId?._id || request.skuId;
+    // const skuObjectId = request.skuId?._id || request.skuId;
 
-    const inventories = skuObjectId
-      ? await SkuInventory.find({ skuId: skuObjectId })
+    // const inventories = skuObjectId
+    //   ? await SkuInventory.find({ skuId: skuObjectId })
+    //       .select('quantity')
+    //       .lean()
+    //   : [];
+
+    // const vendorStock = inventories.reduce(
+    //   (sum, inv) => sum + Number(inv.quantity || 0),
+    //   0
+    // );
+    const skuObjectId = request.skuId?._id || request.skuId;
+    const vendorWarehouseId = request.vendorWarehouseId;
+
+    const inventories = skuObjectId && vendorWarehouseId
+      ? await SkuInventory.find({
+          skuId: skuObjectId,
+          warehouse: vendorWarehouseId,
+        })
           .select('quantity')
           .lean()
       : [];
@@ -1251,6 +1332,7 @@ const getPurchaseStatus = async (req, res) => {
  *
  * Optional: status=PENDING_DM,PENDING_ADMIN,... (comma-separated)
  * Optional (admin): storeWarehouseId=<id>
+ * Optional: startDate=YYYY-MM-DD, endDate=YYYY-MM-DD (filters on createdAt)
  */
 // const listPurchaseRequests = async (req, res) => {
 //   try {
@@ -1378,6 +1460,21 @@ const listPurchaseRequests = async (req, res) => {
       }
     }
 
+    const startDate = String(req.query.startDate || '').trim();
+    const endDate = String(req.query.endDate || '').trim();
+    if (startDate) {
+      const start = new Date(`${startDate}T00:00:00.000`);
+      if (!Number.isNaN(start.getTime())) {
+        filter.createdAt = { ...(filter.createdAt || {}), $gte: start };
+      }
+    }
+    if (endDate) {
+      const end = new Date(`${endDate}T23:59:59.999`);
+      if (!Number.isNaN(end.getTime())) {
+        filter.createdAt = { ...(filter.createdAt || {}), $lte: end };
+      }
+    }
+
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
     const skip = (page - 1) * limit;
@@ -1404,17 +1501,43 @@ const listPurchaseRequests = async (req, res) => {
         ),
       ];
 
+      // const inventoryMap = new Map();
+
+      // if (skuIds.length > 0) {
+      //   const inventories = await SkuInventory.find({
+      //     skuId: { $in: skuIds },
+      //   })
+      //     .select('skuId quantity')
+      //     .lean();
+
+      //   inventories.forEach((inv) => {
+      //     const key = String(inv.skuId);
+      //     inventoryMap.set(key, (inventoryMap.get(key) || 0) + Number(inv.quantity || 0));
+      //   });
+      // }
       const inventoryMap = new Map();
 
-      if (skuIds.length > 0) {
+      const skuWarehousePairs = requests
+        .map((r) => ({
+          skuId: String(r.skuId?._id || r.skuId || ''),
+          warehouseId: String(r.vendorWarehouseId?._id || r.vendorWarehouseId || ''),
+        }))
+        .filter((x) => x.skuId && x.warehouseId);
+
+      const vendorWarehouseIds = [
+        ...new Set(skuWarehousePairs.map((x) => x.warehouseId)),
+      ];
+
+      if (skuIds.length > 0 && vendorWarehouseIds.length > 0) {
         const inventories = await SkuInventory.find({
           skuId: { $in: skuIds },
+          warehouse: { $in: vendorWarehouseIds },
         })
-          .select('skuId quantity')
+          .select('skuId warehouse quantity')
           .lean();
 
         inventories.forEach((inv) => {
-          const key = String(inv.skuId);
+          const key = `${String(inv.skuId)}_${String(inv.warehouse)}`;
           inventoryMap.set(key, (inventoryMap.get(key) || 0) + Number(inv.quantity || 0));
         });
       }
@@ -1425,7 +1548,9 @@ const listPurchaseRequests = async (req, res) => {
 
     const dataWithInventory = data.map((r) => {
     const skuId = String(r.skuId?._id || r.skuId || '');
-    const vendorStock = inventoryMap.get(skuId) || 0;
+    // const vendorStock = inventoryMap.get(skuId) || 0;
+    const vendorWarehouseId = String(r.vendorWarehouseId?._id || r.vendorWarehouseId || '');
+    const vendorStock = inventoryMap.get(`${skuId}_${vendorWarehouseId}`) || 0;
 
     return {
       ...r,
@@ -1481,20 +1606,36 @@ const approvePurchaseRequest = async (req, res) => {
 
     // DM approval (no transaction needed)
     if (role === 'district manager' && !actor.isSuperUser) {
-      if (request.status !== 'PENDING_DM') return res.status(400).json({ success: false, message: 'Request is not pending DM approval' });
+      // if (request.status !== 'PENDING_DM') return res.status(400).json({ success: false, message: 'Request is not pending DM approval' });
+      if (!['PENDING_DM', 'PENDING_CM'].includes(request.status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Request is not pending DM/CM approval',
+      });
+    }
       if (String(request.dmUserId) !== actorId) return res.status(403).json({ success: false, message: 'You are not the assigned DM for this store' });
 
       request.approvals.dm = { userId: actor.id, userModel: actor.model, approvedAt: now };
 
       // Auto-skip CM if store doesn't require CM approval (v2)
-      const storeWarehouse = await Warehouse.findById(request.storeWarehouseId).select('requireCMApproval').lean();
-      const requireCM = storeWarehouse?.requireCMApproval !== false; // Default true if not set
+      // const storeWarehouse = await Warehouse.findById(request.storeWarehouseId).select('requireCMApproval').lean();
+      // const requireCM = storeWarehouse?.requireCMApproval !== false; // Default true if not set
 
-      if (requireCM) {
-        request.status = 'PENDING_CM';
-      } else {
-        request.status = 'PENDING_ADMIN'; // Skip CM, go directly to Admin
-      }
+      // if (requireCM) {
+      //   request.status = 'PENDING_CM';
+      // } else {
+      //   request.status = 'PENDING_ADMIN'; // Skip CM, go directly to Admin
+      // }
+      const storeWarehouse = await Warehouse.findById(request.storeWarehouseId)
+      .select('requireDMApproval requireCMApproval')
+      .lean();
+
+      const requireDM = storeWarehouse?.requireDMApproval !== false;
+      const requireCM = storeWarehouse?.requireCMApproval !== false;
+
+      // DM ne approve kar diya.
+      // Agar CM bhi required hai tab bhi admin ke paas bhej do.
+      request.status = 'PENDING_ADMIN';
 
       await request.save();
 
@@ -1507,7 +1648,13 @@ const approvePurchaseRequest = async (req, res) => {
 
     // CM approval (no transaction needed)
     if (role === 'corporate manager' && !actor.isSuperUser) {
-      if (request.status !== 'PENDING_CM') return res.status(400).json({ success: false, message: 'Request is not pending CM approval' });
+      // if (request.status !== 'PENDING_CM') return res.status(400).json({ success: false, message: 'Request is not pending CM approval' });
+    if (!['PENDING_DM', 'PENDING_CM'].includes(request.status)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Request is not pending DM/CM approval',
+    });
+  }
       if (String(request.cmUserId) !== actorId) return res.status(403).json({ success: false, message: 'You are not the assigned CM for this store' });
 
       request.approvals.cm = { userId: actor.id, userModel: actor.model, approvedAt: now };

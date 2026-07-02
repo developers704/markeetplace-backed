@@ -15,6 +15,24 @@ const {
 const isObjectId = (v) => mongoose.isValidObjectId(String(v || '').trim());
 const MAX_REPLY_PREVIEW = 88;
 
+function applyCreatedAtRangeFilter(filter, query = {}) {
+  const startDate = String(query.startDate || '').trim();
+  const endDate = String(query.endDate || '').trim();
+  if (startDate) {
+    const start = new Date(`${startDate}T00:00:00.000`);
+    if (!Number.isNaN(start.getTime())) {
+      filter.createdAt = { ...(filter.createdAt || {}), $gte: start };
+    }
+  }
+  if (endDate) {
+    const end = new Date(`${endDate}T23:59:59.999`);
+    if (!Number.isNaN(end.getTime())) {
+      filter.createdAt = { ...(filter.createdAt || {}), $lte: end };
+    }
+  }
+  return filter;
+}
+
 function getRequesterId(order) {
   const rb = order.requestedBy;
   if (!rb) return '';
@@ -334,6 +352,7 @@ const listAdminSpecialOrders = async (req, res) => {
         { customerNumber: { $regex: search.trim(), $options: 'i' } },
       ];
     }
+    applyCreatedAtRangeFilter(filter, req.query);
 
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));

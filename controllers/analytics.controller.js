@@ -1,6 +1,7 @@
 const Order = require('../models/order.model');
 const Cart = require('../models/cart.model');
 const Customer = require('../models/customer.model');
+const B2BCart = require('../models/b2bCart.model');
 
 
 const getCartAnalytics = async (req, res) => {
@@ -943,46 +944,114 @@ const getCustomerBreakdown = async (req, res) => {
 
 
 const getDetailedCartData = async (req, res) => {
-    try {
-        const detailedCarts = await Cart.find({ 
-            total: { $gt: 0 },
-            customer: { $exists: true, $ne: null }
-        })
-        .populate({
-            path: 'customer',
-            select: 'username email phone_number'
-        })
-        .populate([
-            {
-                path: 'items',
-                populate: {
-                    path: 'item',
-                    model: 'Product',
-                    select: 'name sku image prices gallery description brand category',
-                    populate: [
-                        { path: 'brand', select: 'name' },
-                        { path: 'category', select: 'name' }
-                    ]
-                }
-            },
-            {
-                path: 'items',
-                populate: {
-                    path: 'item',
-                    model: 'SpecialProduct',
-                    select: 'name sku image prices gallery description specialCategory',
-                    populate: {
-                        path: 'specialCategory',
-                        select: 'name'
-                    }
-                }
-            }
-        ]);
+  try {
+    const detailedCarts = await B2BCart.find({
+      subtotal: { $gt: 0 },
+      customer: { $exists: true, $ne: null },
+    })
+      .populate({
+        path: 'customer',
+        select: 'username email phone_number',
+      })
+      .populate({
+        path: 'storeWarehouseId',
+        select: 'name',
+      })
+      .populate({
+        path: 'items.vendorProductId',
+        select: 'vendorModel title brand category images',
+        populate: [
+          {
+            path: 'brand',
+            select: 'name',
+          },
+          {
+            path: 'category',
+            select: 'name',
+          },
+        ],
+      })
+      .populate({
+        path: 'items.skuId',
+        select: 'sku price currency metalColor metalType size images attributes',
+      })
+      .populate({
+        path: 'items.warehouseId',
+        select: 'name',
+      })
+      .lean();
 
-        res.status(200).json(detailedCarts);
-    } catch (error) {
-        res.status(500).json({ message: error.message });
+    return res.status(200).json({
+      success: true,
+      count: detailedCarts.length,
+      data: detailedCarts,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+const getDetailedCartById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const cart = await B2BCart.findOne({
+      _id: id,
+      subtotal: { $gt: 0 },
+      customer: { $exists: true, $ne: null },
+    })
+      .populate({
+        path: 'customer',
+        select: 'username email phone_number',
+      })
+      .populate({
+        path: 'storeWarehouseId',
+        select: 'name',
+      })
+      .populate({
+        path: 'items.vendorProductId',
+        select: 'vendorModel title brand category images',
+        populate: [
+          {
+            path: 'brand',
+            select: 'name',
+          },
+          {
+            path: 'category',
+            select: 'name',
+          },
+        ],
+      })
+      .populate({
+        path: 'items.skuId',
+        select: 'sku price currency metalColor metalType size images attributes',
+      })
+      .populate({
+        path: 'items.warehouseId',
+        select: 'name',
+      })
+      .lean();
+
+    if (!cart) {
+      return res.status(404).json({
+        success: false,
+        message: 'Cart not found',
+      });
     }
+
+    return res.status(200).json({
+      success: true,
+      data: cart,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
 };
 
 
@@ -990,6 +1059,7 @@ const getDetailedCartData = async (req, res) => {
 module.exports = {
     getCartAnalytics,
     getDetailedCartData,
+    getDetailedCartById,
     getTopPerformingCustomers,
     getCustomerActivities,
     getCustomerBreakdown,

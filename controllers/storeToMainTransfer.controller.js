@@ -9,6 +9,24 @@ const { sumSkuInventory, deductSkuInventory } = require('./v2B2B.controller');
 
 const isObjectId = (v) => mongoose.isValidObjectId(String(v || '').trim());
 
+function applyCreatedAtRangeFilter(filter, query = {}) {
+  const startDate = String(query.startDate || '').trim();
+  const endDate = String(query.endDate || '').trim();
+  if (startDate) {
+    const start = new Date(`${startDate}T00:00:00.000`);
+    if (!Number.isNaN(start.getTime())) {
+      filter.createdAt = { ...(filter.createdAt || {}), $gte: start };
+    }
+  }
+  if (endDate) {
+    const end = new Date(`${endDate}T23:59:59.999`);
+    if (!Number.isNaN(end.getTime())) {
+      filter.createdAt = { ...(filter.createdAt || {}), $lte: end };
+    }
+  }
+  return filter;
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function isAdmin(req) {
@@ -477,6 +495,7 @@ const listAdminOrders = async (req, res) => {
       const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       filter.$or = [{ ticketNumber: rx }, { receiptNumber: rx }];
     }
+    applyCreatedAtRangeFilter(filter, req.query);
 
     const [rows, total] = await Promise.all([
       StoreToMainTransfer.find(filter)
