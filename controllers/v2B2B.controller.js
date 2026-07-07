@@ -191,6 +191,55 @@ const money = (value, currency = 'USD') => {
   return `${currency} ${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
+const buildB2BPurchaseNotificationContent = ({
+  headline,
+  request,
+  sku,
+  product,
+  store,
+  requester,
+  status,
+  quantity,
+  approvedBy,
+  reason,
+  vendorWarehouseName,
+}) => {
+  const attrs = sku?.attributes || {};
+  const unitPrice = request?.cartItemPrice ?? sku?.price ?? 0;
+  const currency = request?.cartItemCurrency ?? sku?.currency ?? 'USD';
+  const qty = quantity ?? request?.quantity ?? 0;
+  const totalPrice = Number(unitPrice || 0) * Number(qty || 0);
+  const productTitle = attrs?.descriptionname || product?.title || product?.vendorModel || '-';
+  const metal = [sku?.metalColor, sku?.metalType, sku?.size].filter(Boolean).join(' ');
+
+  return [
+    headline,
+    request?.orderNumber ? `Order #: ${request.orderNumber}` : null,
+    `Request ID: ${request?._id}`,
+    `Status: ${status ?? request?.status}`,
+    `Product: ${productTitle}`,
+    `SKU: ${sku?.sku || '-'}`,
+    product?.vendorModel ? `Vendor Model: ${product.vendorModel}` : null,
+    product?.brand ? `Brand: ${product.brand}` : null,
+    attrs?.modelno ? `Model No: ${attrs.modelno}` : null,
+    attrs?.style ? `Style: ${attrs.style}` : null,
+    attrs?.vendor ? `Vendor: ${attrs.vendor}` : null,
+    metal ? `Metal/Size: ${metal}` : null,
+    attrs?.avgweight ? `Avg Weight: ${attrs.avgweight}` : null,
+    `Quantity: ${qty}`,
+    `Unit Price: ${money(unitPrice, currency)}`,
+    `Total: ${money(totalPrice, currency)}`,
+    store?.name ? `Store: ${store.name}` : null,
+    vendorWarehouseName ? `Vendor Warehouse: ${vendorWarehouseName}` : null,
+    requester?.username ? `Requested By: ${requester.username}` : null,
+    requester?.email ? `Requester Email: ${requester.email}` : null,
+    approvedBy ? `Action By: ${approvedBy}` : null,
+    reason ? `Reason: ${reason}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n');
+};
+
 const buildB2BEmailTemplate = ({
   title,
   badge,
@@ -351,8 +400,9 @@ const buildB2BEmailTemplate = ({
     try {
       const populated = await B2BPurchaseRequest.findById(request._id)
         .populate('vendorProductId', 'vendorModel title brand category')
-        .populate('skuId', 'sku metalColor metalType size images')
+        .populate('skuId', 'sku metalColor metalType size images attributes price currency')
         .populate('storeWarehouseId', 'name')
+        .populate('vendorWarehouseId', 'name')
         .populate('requestedBy', 'username email')
         .populate('dmUserId', 'username email')
         .populate('cmUserId', 'username email')
@@ -364,11 +414,26 @@ const buildB2BEmailTemplate = ({
       const requester = populated.requestedBy;
       const dm = populated.dmUserId;
       const cm = populated.cmUserId;
+      const vendorWarehouseName = populated.vendorWarehouseId?.name;
       const imageUrl = getProductImageUrl(sku);
+
+      const purchaseNotify = (headline, extra = {}) =>
+        buildB2BPurchaseNotificationContent({
+          headline,
+          request: populated,
+          sku,
+          product: vendorProduct,
+          store,
+          requester,
+          quantity: request.quantity,
+          status: request.status,
+          vendorWarehouseName,
+          ...extra,
+        });
       
       const productInfo = `${sku?.attributes?.descriptionname || '-'} (${sku?.sku || '-'})`;
       const skuInfo = `SKU: ${sku?.sku || 'N/A'} | ${sku?.metalColor || ''} ${sku?.metalType || ''} ${sku?.size || ''}`.trim();
-      const requestLink = `/marketplace/b2b-approvals/${request._id}`;
+      const requestLink = `/profile-details/b2b-order/${request._id}`;
       const orderUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}${requestLink}`;
 
       // Fetch all admins for admin notifications
@@ -410,7 +475,7 @@ const buildB2BEmailTemplate = ({
         if (requester?._id) {
         notifications.push({
           user: requester._id,
-          content: `Your purchase request for ${productInfo} has been created. Status: ${request.status}`,
+          content: purchaseNotify('Your purchase request has been created.'),
           url: requestLink,
           read: false,
         });
@@ -449,7 +514,7 @@ const buildB2BEmailTemplate = ({
               notifications.push({
               user: admin._id,
               type: 'ORDER',
-              content: `New purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
+              content: purchaseNotify(`New purchase request from ${requester?.username || 'Store Manager'} — admin review required.`),
               resourceId: request._id,
               resourceModel: 'B2BPurchaseRequest',
               priority: 'high',
@@ -488,7 +553,7 @@ const buildB2BEmailTemplate = ({
               notifications.push({
               user: resolveruser._id,
               type: 'ORDER',
-              content: `New purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
+              content: purchaseNotify(`New purchase request from ${requester?.username || 'Store Manager'} — review required.`),
               resourceId: request._id,
               resourceModel: 'B2BPurchaseRequest',
               priority: 'high',
@@ -500,7 +565,7 @@ const buildB2BEmailTemplate = ({
           if (dm) {
             notifications.push({
               user: dm._id,
-              content: `New purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
+              content: purchaseNotify(`New purchase request from ${requester?.username || 'Store Manager'} — DM action required.`),
               url: requestLink,
               read: false,
             });
@@ -534,7 +599,7 @@ const buildB2BEmailTemplate = ({
           if (cm) {
             notifications.push({
               user: cm._id,
-              content: `New purchase request from ${requester?.username || 'Store Manager'} for ${productInfo} (Qty: ${request.quantity})`,
+              content: purchaseNotify(`New purchase request from ${requester?.username || 'Store Manager'} — CM action required.`),
               url: requestLink,
               read: false,
             });
@@ -574,7 +639,9 @@ const buildB2BEmailTemplate = ({
           if (cm) {
             notifications.push({
               user: cm._id,
-              content: `DM ${actorName} approved purchase request for ${productInfo}. Awaiting your approval.`,
+              content: purchaseNotify(`DM ${actorName} approved this purchase request. Awaiting your approval.`, {
+                approvedBy: actorName,
+              }),
               url: requestLink,
               read: false,
             });
@@ -597,7 +664,7 @@ const buildB2BEmailTemplate = ({
             notifications.push({
               user: admin._id,
               type: 'ORDER',
-              content: `DM ${actorName} approved purchase request for ${productInfo} (Qty: ${request.quantity})`,
+              content: purchaseNotify(`DM ${actorName} approved this purchase request.`, { approvedBy: actorName }),
               resourceId: request._id,
               resourceModel: 'B2BPurchaseRequest',
               priority: 'medium',
@@ -610,7 +677,7 @@ const buildB2BEmailTemplate = ({
             notifications.push({
               user: resolveruser._id,
               type: 'ORDER',
-              content: `DM ${actorName} approved purchase request for ${productInfo} (Qty: ${request.quantity})`,
+              content: purchaseNotify(`DM ${actorName} approved this purchase request.`, { approvedBy: actorName }),
               resourceId: request._id,
               resourceModel: 'B2BPurchaseRequest',
               priority: 'medium',
@@ -621,7 +688,7 @@ const buildB2BEmailTemplate = ({
           if (requester) {
             notifications.push({
               user: requester._id,
-              content: `Your purchase request for ${productInfo} was approved by DM ${actorName}. Status: ${request.status}`,
+              content: purchaseNotify(`Your purchase request was approved by DM ${actorName}.`, { approvedBy: actorName }),
               url: requestLink,
               read: false,
             });
@@ -661,7 +728,9 @@ const buildB2BEmailTemplate = ({
             notifications.push({
               user: admin._id,
               type: 'ORDER',
-              content: `CM ${actorName} approved purchase request for ${productInfo} (Qty: ${request.quantity}). Awaiting final admin approval.`,
+              content: purchaseNotify(`CM ${actorName} approved this purchase request. Awaiting final admin approval.`, {
+                approvedBy: actorName,
+              }),
               resourceId: request._id,
               resourceModel: 'B2BPurchaseRequest',
               priority: 'high',
@@ -672,7 +741,9 @@ const buildB2BEmailTemplate = ({
             notifications.push({
               user: resolveruser._id,
               type: 'ORDER',
-              content: `CM ${actorName} approved purchase request for ${productInfo} (Qty: ${request.quantity}). Awaiting final admin approval.`,
+              content: purchaseNotify(`CM ${actorName} approved this purchase request. Awaiting final admin approval.`, {
+                approvedBy: actorName,
+              }),
               resourceId: request._id,
               resourceModel: 'B2BPurchaseRequest',
               priority: 'high',
@@ -682,7 +753,9 @@ const buildB2BEmailTemplate = ({
           if (requester) {
             notifications.push({
               user: requester._id,
-              content: `Your purchase request for ${productInfo} was approved by CM ${actorName}. Awaiting admin approval.`,
+              content: purchaseNotify(`Your purchase request was approved by CM ${actorName}. Awaiting admin approval.`, {
+                approvedBy: actorName,
+              }),
               url: requestLink,
               read: false,
             });
@@ -722,7 +795,10 @@ const buildB2BEmailTemplate = ({
           if (requester) {
             notifications.push({
               user: requester._id,
-              content: `Your purchase request for ${productInfo} was FINALLY APPROVED by Admin. Inventory added to store.`,
+              content: purchaseNotify('Your purchase request was FINALLY APPROVED by Admin. Inventory added to store.', {
+                approvedBy: actorName,
+                status: 'APPROVED - Inventory added to store',
+              }),
               url: requestLink,
               read: false,
             });
@@ -757,7 +833,10 @@ const buildB2BEmailTemplate = ({
           if (dm) {
             notifications.push({
               user: dm._id,
-              content: `purchase request for ${productInfo} was approved by Admin. Inventory moved to ${store?.name || 'store'}.`,
+              content: purchaseNotify(`Purchase request approved by Admin. Inventory moved to ${store?.name || 'store'}.`, {
+                approvedBy: actorName,
+                status: 'APPROVED - Inventory added to store',
+              }),
               url: requestLink,
               read: false,
             });
@@ -765,7 +844,10 @@ const buildB2BEmailTemplate = ({
           if (cm) {
             notifications.push({
               user: cm._id,
-              content: `purchase request for ${productInfo} was approved by Admin. Inventory moved to ${store?.name || 'store'}.`,
+              content: purchaseNotify(`Purchase request approved by Admin. Inventory moved to ${store?.name || 'store'}.`, {
+                approvedBy: actorName,
+                status: 'APPROVED - Inventory added to store',
+              }),
               url: requestLink,
               read: false,
             });
@@ -779,7 +861,11 @@ const buildB2BEmailTemplate = ({
           if (requester) {
             notifications.push({
               user: requester._id,
-              content: `Your purchase request for ${productInfo} was REJECTED by ${actorName}. Reason: ${reason}`,
+              content: purchaseNotify(`Your purchase request was REJECTED by ${actorName}.`, {
+                approvedBy: actorName,
+                status: 'REJECTED',
+                reason,
+              }),
               url: requestLink,
               read: false,
             });

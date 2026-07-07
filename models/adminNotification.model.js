@@ -28,7 +28,7 @@ const adminNotificationSchema = new mongoose.Schema({
     },
     resourceModel: {
       type: String,
-      enum: ['Inventory', 'Product', 'Order', 'Review', 'WalletRequest', 'Warehouse', 'Order', 'CertificateRequest', 'B2BPurchaseRequest']
+      enum: ['Inventory', 'Product', 'Order', 'Review', 'WalletRequest', 'Warehouse', 'Order', 'CertificateRequest', 'B2BPurchaseRequest', 'B2bStoreTransferOrder']
     },
     priority: {
       type: String,

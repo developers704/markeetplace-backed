@@ -11,6 +11,8 @@ const { sumSkuInventory, deductSkuInventory } = require('./v2B2B.controller');
 const { emitB2bStoreTransferChatMessage } = require('../socket/b2bStoreTransferChat.socket');
 const { emitAdminChatUnreadChanged } = require('../socket/adminChat.socket');
 const { emitCustomerChatUnreadChanged } = require('../socket/customerChat.socket');
+const { sendStoreTransferCreatedEmails } = require('../utils/b2bStoreTransferEmail');
+const { sendStoreTransferCreatedNotifications } = require('../utils/b2bStoreTransferNotifications');
 
 const isObjectId = (v) => mongoose.isValidObjectId(String(v || '').trim());
 const MAX_REPLY_PREVIEW = 88;
@@ -326,10 +328,24 @@ const createStoreTransferOrder = async (req, res) => {
 
     const populated = await B2bStoreTransferOrder.findById(order._id)
       .populate('vendorProductId', 'vendorModel title brand')
-      .populate('skuId', 'sku price currency metalColor metalType size images')
+      .populate('skuId', 'sku price currency metalColor metalType size images attributes')
       .populate('sourceWarehouseId', 'name')
       .populate('destWarehouseId', 'name')
       .lean();
+
+    sendStoreTransferCreatedEmails({
+      order,
+      populated,
+      requester: req.user,
+      destWarehouseId: destWh,
+    }).catch((err) => console.error('[b2bStoreTransfer] email error:', err));
+
+    sendStoreTransferCreatedNotifications({
+      order,
+      populated,
+      requester: req.user,
+      destWarehouseId: destWh,
+    }).catch((err) => console.error('[b2bStoreTransfer] notification error:', err));
 
     return res.status(201).json({
       success: true,

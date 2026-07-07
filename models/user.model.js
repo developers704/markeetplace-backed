@@ -41,6 +41,11 @@ const userSchema = new mongoose.Schema({
         required: true,
         default: false
     },
+    isAdmin: {
+        type: Boolean,
+        default: false,
+        index: true,
+    },
     role: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'UserRole',

@@ -354,7 +354,7 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASS,
   },
   logger: true,
-  debug: true,
+  // debug: true,
 });
 
 const sendEmail = async ({ to, subject, html, text }) => {
@@ -368,7 +368,7 @@ const sendEmail = async ({ to, subject, html, text }) => {
       replyTo: process.env.EMAIL_FROM || process.env.EMAIL_USER,
     });
 
-    console.log("✅ SMTP Email sent:", info.messageId);
+    // console.log("✅ SMTP Email sent:", info.messageId);
     return { success: true, messageId: info.messageId };
   } catch (error) {
     console.error("❌ SMTP Email Error:", error.message);
