@@ -1,4 +1,5 @@
 const { sendEmail } = require('../config/sendMails');
+const { Parser } = require('json2csv');
 const SpecialOrder = require('../models/specialOrder.model');
 const { attachUnreadChatCount, markChatMessagesSeen } = require('../utils/chatUnread');
 const mongoose = require('mongoose');
@@ -319,40 +320,106 @@ const listMySpecialOrders = async (req, res) => {
   }
 };
 
+function buildAdminSpecialOrdersFilter(req) {
+  const status = req.query.status;
+  const storeId = req.query.storeId;
+  const search = req.query.search;
+
+  const statusValues = Array.isArray(status)
+    ? status
+    : typeof status === 'string'
+      ? status.split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+  const storeIds = Array.isArray(storeId)
+    ? storeId
+    : typeof storeId === 'string'
+      ? storeId.split(',').map((id) => id.trim()).filter(Boolean)
+      : [];
+
+  const filter = {};
+  if (statusValues.length) filter.status = { $in: statusValues };
+  if (storeIds.length) {
+    const validStoreIds = storeIds.filter(isObjectId);
+    if (validStoreIds.length) filter.storeId = { $in: validStoreIds };
+  }
+  if (search && search.trim()) {
+    filter.$or = [
+      { ticketNumber: { $regex: search.trim(), $options: 'i' } },
+      { receiptNumber: { $regex: search.trim(), $options: 'i' } },
+      { customerNumber: { $regex: search.trim(), $options: 'i' } },
+    ];
+  }
+  applyCreatedAtRangeFilter(filter, req.query);
+  return filter;
+}
+
+const CSV_FIELDS = [
+  'Ticket Number',
+  'Created At',
+  'Tracking ID',
+  'Reference SKU',
+  'Receipt Number',
+  'ETA',
+  'Store',
+  'Customer Number',
+  'Status',
+  'Last Updated By',
+  'Assigned To',
+  'Type Of Request',
+  'Metal Quality',
+  'Diamond Type',
+  'Requested By',
+  'Requester Email',
+  'Notes',
+  'Tracking Provider',
+  'Tracking URL',
+];
+
+function csvDate(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+function specialOrderToCsvRow(order) {
+  const latestUpdate = Array.isArray(order.updateHistory) ? order.updateHistory.at(-1) : null;
+  return {
+    'Ticket Number': order.ticketNumber || '',
+    'Created At': csvDate(order.createdAt),
+    'Tracking ID': order.trackingId || '',
+    'Reference SKU': order.referenceSkuNumber || '',
+    'Receipt Number': order.receiptNumber || '',
+    ETA: csvDate(order.eta),
+    Store: order.storeId?.name || '',
+    'Customer Number': order.customerNumber || '',
+    Status: order.status || '',
+    'Last Updated By': latestUpdate?.updatedByName || '',
+    'Assigned To': order.assignedTo || '',
+    'Type Of Request': order.typeOfRequest || '',
+    'Metal Quality': order.metalQuality || '',
+    'Diamond Type': order.diamondType || '',
+    'Requested By': order.requestedBy?.username || '',
+    'Requester Email': order.requestedBy?.email || '',
+    Notes: order.notes || '',
+    'Tracking Provider': order.trackingProvider || '',
+    'Tracking URL': order.trackingUrl || '',
+  };
+}
+
 /**
  * GET /api/special-orders/admin (admin list - all requests)
  */
 const listAdminSpecialOrders = async (req, res) => {
   try {
-    const status = req.query.status;
-    const storeId = req.query.storeId;
-    const search = req.query.search;
-
-    const statusValues = Array.isArray(status)
-      ? status
-      : typeof status === 'string'
-      ? status.split(',').map((s) => s.trim()).filter(Boolean)
-      : []
-    const storeIds = Array.isArray(storeId)
-      ? storeId
-      : typeof storeId === 'string'
-      ? storeId.split(',').map((id) => id.trim()).filter(Boolean)
-      : []
-
-    const filter = {};
-    if (statusValues.length) filter.status = { $in: statusValues };
-    if (storeIds.length) {
-      const validStoreIds = storeIds.filter(isObjectId)
-      if (validStoreIds.length) filter.storeId = { $in: validStoreIds };
-    }
-    if (search && search.trim()) {
-      filter.$or = [
-        { ticketNumber: { $regex: search.trim(), $options: 'i' } },
-        { receiptNumber: { $regex: search.trim(), $options: 'i' } },
-        { customerNumber: { $regex: search.trim(), $options: 'i' } },
-      ];
-    }
-    applyCreatedAtRangeFilter(filter, req.query);
+    const filter = buildAdminSpecialOrdersFilter(req);
 
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
@@ -816,10 +883,44 @@ const postSpoChatMessage = async (req, res) => {
   }
 };
 
+const exportAdminSpecialOrdersCsv = async (req, res) => {
+  try {
+    const filter = buildAdminSpecialOrdersFilter(req);
+
+    const orders = await SpecialOrder.find(filter)
+      .populate('storeId', 'name')
+      .populate('requestedBy', 'username email')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const csvRows = orders.map(specialOrderToCsvRow);
+    const parser = new Parser({ fields: CSV_FIELDS });
+    const csv = parser.parse(csvRows.length ? csvRows : [{}]);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const startDate = String(req.query.startDate || '').trim();
+    const endDate = String(req.query.endDate || '').trim();
+    const rangeSuffix = startDate && endDate ? `-${startDate}_to_${endDate}` : '';
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=special-orders${rangeSuffix}-${stamp}.csv`,
+    );
+    return res.status(200).send(`\uFEFF${csv}`);
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to export special orders',
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createSpecialOrder,
   listMySpecialOrders,
   listAdminSpecialOrders,
+  exportAdminSpecialOrdersCsv,
   getSpecialOrderById,
   updateSpecialOrder,
   finalizeSpecialOrder,

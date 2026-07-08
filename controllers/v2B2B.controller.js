@@ -13,6 +13,7 @@ const StoreInventory = require('../models/storeInventory.model');
 const Notification = require('../models/notification.model');
 const AdminNotification = require('../models/adminNotification.model');
 const { sendEmail } = require('../config/sendMails');
+const { Parser } = require('json2csv');
 const B2BCart = require('../models/b2bCart.model');
 const InventoryWallet = require('../models/inventoryWallet.model');
 const { emitB2bPurchaseChatMessage, emitB2bPurchaseChatSeen } = require('../socket/b2bPurchaseChat.socket');
@@ -161,6 +162,196 @@ const resolveRequestedByDetails = async (requests) => {
     return { ...r, requestedByUser: requestedByUser || null };
   });
 };
+
+function buildPurchaseRequestsFilter(req) {
+  const actor = req.b2bActor;
+  const role = String(actor?.roleName || '').toLowerCase().trim();
+  const view = String(req.query.view || 'approvals').toLowerCase().trim();
+  const statusParam = String(req.query.status || '').trim();
+  const statusList = statusParam
+    ? statusParam
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean)
+    : [];
+
+  const filter = {};
+  const returnPending = String(req.query.returnPending || '').trim() === '1';
+
+  if (returnPending) {
+    filter.status = 'APPROVED';
+    filter['returnRequest.status'] = 'PENDING';
+  }
+
+  if (view === 'my-orders') {
+    const scope = String(req.query.scope || 'mine').toLowerCase().trim();
+    if (scope === 'store') {
+      const wid = selectedWarehouseObjectId(req.user);
+      if (!wid) {
+        return { error: 'No warehouse selected. Choose a store warehouse to view store-wide orders.' };
+      }
+      filter.storeWarehouseId = wid;
+    } else {
+      filter.requestedBy = actor.id;
+    }
+
+    if (!returnPending && statusList.length) {
+      filter.status = { $in: statusList };
+    }
+  } else if (actor?.isSuperUser || role === 'admin') {
+    if (!returnPending && statusList.length) {
+      filter.status = { $in: statusList };
+    }
+    if (req.query.storeWarehouseId && isObjectId(req.query.storeWarehouseId)) {
+      filter.storeWarehouseId = req.query.storeWarehouseId;
+    }
+  } else if (role === 'district manager') {
+    filter.dmUserId = actor.id;
+    if (!returnPending && statusList.length) {
+      filter.status = { $in: statusList };
+    }
+  } else if (role === 'corporate manager') {
+    filter.cmUserId = actor.id;
+    if (!returnPending && statusList.length) {
+      filter.status = { $in: statusList };
+    }
+  } else {
+    filter.requestedBy = actor.id;
+    if (!returnPending && statusList.length) {
+      filter.status = { $in: statusList };
+    }
+  }
+
+  const startDate = String(req.query.startDate || '').trim();
+  const endDate = String(req.query.endDate || '').trim();
+  if (startDate) {
+    const start = new Date(`${startDate}T00:00:00.000`);
+    if (!Number.isNaN(start.getTime())) {
+      filter.createdAt = { ...(filter.createdAt || {}), $gte: start };
+    }
+  }
+  if (endDate) {
+    const end = new Date(`${endDate}T23:59:59.999`);
+    if (!Number.isNaN(end.getTime())) {
+      filter.createdAt = { ...(filter.createdAt || {}), $lte: end };
+    }
+  }
+
+  return { filter };
+}
+
+async function attachVendorStockToRequests(requests) {
+  const skuIds = [
+    ...new Set(
+      requests
+        .map((r) => r.skuId?._id || r.skuId)
+        .filter(Boolean)
+        .map(String),
+    ),
+  ];
+
+  const inventoryMap = new Map();
+  const skuWarehousePairs = requests
+    .map((r) => ({
+      skuId: String(r.skuId?._id || r.skuId || ''),
+      warehouseId: String(r.vendorWarehouseId?._id || r.vendorWarehouseId || ''),
+    }))
+    .filter((x) => x.skuId && x.warehouseId);
+
+  const vendorWarehouseIds = [...new Set(skuWarehousePairs.map((x) => x.warehouseId))];
+
+  if (skuIds.length > 0 && vendorWarehouseIds.length > 0) {
+    const inventories = await SkuInventory.find({
+      skuId: { $in: skuIds },
+      warehouse: { $in: vendorWarehouseIds },
+    })
+      .select('skuId warehouse quantity')
+      .lean();
+
+    inventories.forEach((inv) => {
+      const key = `${String(inv.skuId)}_${String(inv.warehouse)}`;
+      inventoryMap.set(key, (inventoryMap.get(key) || 0) + Number(inv.quantity || 0));
+    });
+  }
+
+  return requests.map((r) => {
+    const skuId = String(r.skuId?._id || r.skuId || '');
+    const vendorWarehouseId = String(r.vendorWarehouseId?._id || r.vendorWarehouseId || '');
+    const vendorStock = inventoryMap.get(`${skuId}_${vendorWarehouseId}`) || 0;
+
+    return {
+      ...r,
+      vendorStock,
+      availableVendorStock: vendorStock,
+      insufficientVendorStock: Number(r.quantity || 0) > vendorStock,
+      shortageQuantity: Math.max(0, Number(r.quantity || 0) - vendorStock),
+    };
+  });
+}
+
+const B2B_PURCHASE_CSV_FIELDS = [
+  'Order ID',
+  'Created At',
+  'Vendor Model',
+  'SKU',
+  'Product Title',
+  'Brand',
+  'Metal Type',
+  'Metal Color',
+  'Size',
+  'Quantity',
+  'Store',
+  'Vendor Warehouse',
+  'Requested By',
+  'Requester Email',
+  'Vendor Stock',
+  // 'Shortage Quantity',
+  'Status',
+  'Return Request Status',
+  'DM Approved At',
+  'CM Approved At',
+  'Admin Approved At',
+];
+
+function b2bPurchaseCsvDate(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+function b2bPurchaseRequestToCsvRow(request) {
+  return {
+    'Order ID': request.orderNumber || '',
+    'Created At': b2bPurchaseCsvDate(request.createdAt),
+    'Vendor Model': request.vendorProductId?.vendorModel || '',
+    SKU: request.skuId?.sku || '',
+    'Product Title': request.skuId?.attributes.descriptionname || '',
+    Brand: request.vendorProductId?.brand || '',
+    'Metal Type': request.skuId?.metalType || '',
+    'Metal Color': request.skuId?.metalColor || '',
+    Size: request.skuId?.size || '',
+    Quantity: Number(request.quantity || 0),
+    Store: request.storeWarehouseId?.name || '',
+    'Vendor Warehouse': request.vendorWarehouseId?.name || '',
+    'Requested By': request.requestedByUser?.username || '',
+    'Requester Email': request.requestedByUser?.email || '',
+    'Vendor Stock': Number(request.vendorStock || 0),
+    // 'Shortage Quantity': Number(request.shortageQuantity || 0),
+    Status: request.status || '',
+    'Return Request Status': request.returnRequest?.status || '',
+    'DM Approved At': b2bPurchaseCsvDate(request.approvals?.dm?.approvedAt),
+    'CM Approved At': b2bPurchaseCsvDate(request.approvals?.cm?.approvedAt),
+    'Admin Approved At': b2bPurchaseCsvDate(request.approvals?.admin?.approvedAt),
+  };
+}
 
 /**
  * Helper: Send notifications and emails for purchase lifecycle events
@@ -1669,6 +1860,50 @@ const listPurchaseRequests = async (req, res) => {
   }
 };
 
+const exportPurchaseRequestsCsv = async (req, res) => {
+  try {
+    const built = buildPurchaseRequestsFilter(req);
+    if (built.error) {
+      return res.status(400).json({ success: false, message: built.error });
+    }
+    const { filter } = built;
+
+    const requests = await B2BPurchaseRequest.find(filter)
+      .sort({ createdAt: -1 })
+      .populate('vendorProductId', 'vendorModel title brand category')
+      .populate('skuId', 'sku price currency metalColor metalType size attributes images')
+      .populate('storeWarehouseId', 'name isMain')
+      .populate('vendorWarehouseId', 'name isMain')
+      .lean();
+
+    const withRequester = await resolveRequestedByDetails(requests);
+    const dataWithInventory = await attachVendorStockToRequests(withRequester);
+    const csvRows = dataWithInventory.map(b2bPurchaseRequestToCsvRow);
+    const parser = new Parser({ fields: B2B_PURCHASE_CSV_FIELDS });
+    const csv = parser.parse(csvRows.length ? csvRows : [{}]);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const startDate = String(req.query.startDate || '').trim();
+    const endDate = String(req.query.endDate || '').trim();
+    const rangeSuffix = startDate && endDate ? `-${startDate}_to_${endDate}` : '';
+    const statusParam = String(req.query.status || '').trim().toLowerCase();
+    const statusSuffix = statusParam ? `-${statusParam.replace(/,/g, '-')}` : '';
+    const returnSuffix = String(req.query.returnPending || '').trim() === '1' ? '-return-pending' : '';
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=b2b-purchase-requests${statusSuffix}${returnSuffix}${rangeSuffix}-${stamp}.csv`,
+    );
+    return res.status(200).send(`\uFEFF${csv}`);
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to export purchase requests',
+      error: error.message,
+    });
+  }
+};
+
 /**
  * POST /api/v2/b2b/approve/:requestId
  * DM -> PENDING_CM
@@ -2713,6 +2948,7 @@ module.exports = {
   createPurchaseRequest,
   getPurchaseStatus,
   listPurchaseRequests,
+  exportPurchaseRequestsCsv,
   approvePurchaseRequest,
   rejectPurchaseRequest,
   rollbackPurchaseApproval,

@@ -7,6 +7,7 @@ const {
   createSpecialOrder,
   listMySpecialOrders,
   listAdminSpecialOrders,
+  exportAdminSpecialOrdersCsv,
   getSpecialOrderById,
   updateSpecialOrder,
   finalizeSpecialOrder,
@@ -25,6 +26,7 @@ router.use(authMiddleware);
 
 router.post('/', uploadSpoAttachments, createSpecialOrder);
 router.get('/', listMySpecialOrders);
+router.get('/admin/export/csv', checkSpecialOrderAdmin, exportAdminSpecialOrdersCsv);
 router.get('/admin', listAdminSpecialOrders);
 
 router.patch('/:id/finalize', finalizeSpecialOrder);

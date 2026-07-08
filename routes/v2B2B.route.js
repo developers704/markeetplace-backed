@@ -8,6 +8,7 @@ const {
   createPurchaseRequest,
   getPurchaseStatus,
   listPurchaseRequests,
+  exportPurchaseRequestsCsv,
   approvePurchaseRequest,
   rejectPurchaseRequest,
   rollbackPurchaseApproval,
@@ -39,6 +40,7 @@ router.get('/requests/:purchaseId/chat-messages', listB2bPurchaseChatMessages);
 router.post('/requests/:purchaseId/chat-messages', postB2bPurchaseChatMessage);
 router.post('/requests/:purchaseId/chat-messages/seen', markB2bPurchaseChatSeen);
 
+router.get('/requests/export/csv', exportPurchaseRequestsCsv);
 router.get('/requests', listPurchaseRequests);
 router.post('/approve/:requestId', approvePurchaseRequest);
 router.post('/reject/:requestId', rejectPurchaseRequest);
