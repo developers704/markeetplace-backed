@@ -974,7 +974,7 @@ const generateOrderNumber = async () => {
   const month = String(now.getMonth() + 1).padStart(2, "0");
 
   const counter = await inventoryCounter.findByIdAndUpdate(
-    `B2B-${year}-${month}`,
+    `B2B-ORDER`,
     { $inc: { seq: 1 } },
     { new: true, upsert: true }
   );
@@ -983,6 +983,7 @@ const generateOrderNumber = async () => {
 
   return `INV-${year}-${month}-${serial}`;
 };
+
 const createPurchaseRequest = async (req, res) => {
   try {
     const actor = req.b2bActor;
