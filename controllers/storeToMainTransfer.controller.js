@@ -1,11 +1,14 @@
 const mongoose = require('mongoose');
+const { Parser } = require('json2csv');
 const StoreToMainTransfer = require('../models/storeToMainTransfer.model');
 const Sku = require('../models/sku.model');
 const VendorProduct = require('../models/vendorProduct.model');
 const SkuInventory = require('../models/skuInventory.model');
 const StoreInventory = require('../models/storeInventory.model');
 const InventoryWallet = require('../models/inventoryWallet.model');
+const Warehouse = require('../models/warehouse.model');
 const { sumSkuInventory, deductSkuInventory } = require('./v2B2B.controller');
+const { sendMerchandiseReturnCreatedEmails, sendMerchandiseReturnEventEmails } = require('../utils/merchandiseReturnEmail');
 
 const isObjectId = (v) => mongoose.isValidObjectId(String(v || '').trim());
 
@@ -39,6 +42,30 @@ function isAdmin(req) {
     role === 'superuser' ||
     !!req.user?.is_superuser
   );
+}
+
+function getActorFromReq(req) {
+  return {
+    username: req.user?.username || req.user?.name || 'Admin',
+    email: req.user?.email || '',
+  };
+}
+
+function triggerMerchandiseReturnEmails(transferId, event, options = {}) {
+  setImmediate(async () => {
+    try {
+      await sendMerchandiseReturnEventEmails({
+        transferId,
+        event,
+        actor: options.actor,
+        reason: options.reason,
+        previousStatus: options.previousStatus,
+        itemIds: options.itemIds,
+      });
+    } catch (emailErr) {
+      console.error(`[storeToMainTransfer] ${event} email error:`, emailErr.message || emailErr);
+    }
+  });
 }
 
 async function incrementSkuInventory({ skuId, warehouseId, quantity, session }) {
@@ -75,7 +102,7 @@ function populateQuery(q) {
   return q
     .populate('sourceWarehouseId', 'name')
     .populate('destWarehouseId', 'name')
-    .populate('requestedBy', 'username userId')
+    .populate('requestedBy', 'username email userId')
     .populate('approvedBy', 'username userId')
     .populate('items.skuId', 'sku price tagPrice currency images gallery metalColor metalType size attributes')
     .populate('items.vendorProductId', 'vendorModel title brand description');
@@ -421,6 +448,28 @@ const createBatchOrders = async (req, res) => {
       requestedByModel: actor.model,
     });
 
+    setImmediate(async () => {
+      try {
+        const [sourceWarehouse, destWarehouse] = await Promise.all([
+          Warehouse.findById(sourceWarehouseId).select('_id name storeEmail').lean(),
+          Warehouse.findById(destWarehouseId).select('_id name').lean(),
+        ]);
+
+        await sendMerchandiseReturnCreatedEmails({
+          transfer: transfer.toObject ? transfer.toObject() : transfer,
+          sourceWarehouse,
+          destWarehouse,
+          requester: {
+            _id: req.user?._id || actor.id,
+            username: req.user?.username || req.user?.name || 'Store User',
+            email: req.user?.email || '',
+          },
+        });
+      } catch (emailErr) {
+        console.error('[storeToMainTransfer] createBatchOrders email error:', emailErr.message || emailErr);
+      }
+    });
+
     return res.status(201).json({
       success: true,
       message: `Transfer request submitted${errors.length ? `, ${errors.length} items skipped` : ''}`,
@@ -596,12 +645,17 @@ const patchStatus = async (req, res) => {
     if (!valid.includes(String(status || '').toUpperCase()))
       return res.status(400).json({ success: false, message: `Status must be one of: ${valid.join(', ')}` });
 
-    const order = await StoreToMainTransfer.findByIdAndUpdate(
-      id,
-      { status: String(status).toUpperCase() },
-      { new: true },
-    );
+    const order = await StoreToMainTransfer.findById(id);
     if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+
+    const previousStatus = order.status;
+    order.status = String(status).toUpperCase();
+    await order.save();
+
+    triggerMerchandiseReturnEmails(order._id, 'STATUS_UPDATED', {
+      actor: getActorFromReq(req),
+      previousStatus,
+    });
 
     return res.status(200).json({ success: true, data: order });
   } catch (error) {
@@ -625,6 +679,7 @@ const approveOrder = async (req, res) => {
 
     const now = new Date();
     let approvedSkuIds = [];
+    let approvedItemIds = [];
     let finalDocId = null;
 
     const finalDoc = await runWithOptionalTransaction(async (session) => {
@@ -705,6 +760,7 @@ const approveOrder = async (req, res) => {
 
         item.inventoryAppliedAt = now;
         approvedSkuIds.push(String(item.skuId));
+        approvedItemIds.push(String(item._id));
       }
 
       if (sourceInventoryOps.length > 0) {
@@ -792,6 +848,11 @@ const approveOrder = async (req, res) => {
         rebuildCaches(skuId).catch(() => {});
       });
     });
+
+    triggerMerchandiseReturnEmails(finalDoc._id, 'APPROVED', {
+      actor: getActorFromReq(req),
+      itemIds: approvedItemIds,
+    });
   } catch (error) {
     return res.status(400).json({
       success: false,
@@ -834,6 +895,12 @@ const approveItems = async (req, res) => {
     }
 
     const populated = await populateQuery(StoreToMainTransfer.findById(finalDoc._id)).lean();
+
+    triggerMerchandiseReturnEmails(finalDoc._id, 'APPROVED', {
+      actor: getActorFromReq(req),
+      itemIds: itemIds.map(String),
+    });
+
     return res.status(200).json({
       success: true,
       message: `${itemIds.length} item(s) approved`,
@@ -877,6 +944,13 @@ const rejectOrder = async (req, res) => {
     await doc.save();
 
     const populated = await populateQuery(StoreToMainTransfer.findById(doc._id)).lean();
+
+    triggerMerchandiseReturnEmails(doc._id, 'REJECTED', {
+      actor: getActorFromReq(req),
+      reason: reasonText,
+      itemIds: pending.map((item) => String(item._id)),
+    });
+
     return res.status(200).json({ success: true, message: 'Rejected', data: populated });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
@@ -920,6 +994,13 @@ const rejectItems = async (req, res) => {
 
     await doc.save();
     const populated = await populateQuery(StoreToMainTransfer.findById(doc._id)).lean();
+
+    triggerMerchandiseReturnEmails(doc._id, 'REJECTED', {
+      actor: getActorFromReq(req),
+      reason: reasonText,
+      itemIds: itemIds.map(String),
+    });
+
     return res.status(200).json({
       success: true,
       message: `${itemIds.length} item(s) rejected`,
@@ -963,6 +1044,12 @@ const markItemsReceived = async (req, res) => {
     await doc.save();
 
     const populated = await populateQuery(StoreToMainTransfer.findById(doc._id)).lean();
+
+    triggerMerchandiseReturnEmails(doc._id, 'RECEIVED', {
+      actor: getActorFromReq(req),
+      itemIds: itemIds.map(String),
+    });
+
     return res.status(200).json({
       success: true,
       message: `${marked} item(s) marked as inventory received`,
@@ -984,10 +1071,12 @@ const receiveAllApproved = async (req, res) => {
 
     const now = new Date();
     let marked = 0;
+    const receivedItemIds = [];
 
     for (const item of doc.items) {
       if (!item.inventoryAppliedAt || item.rejectedAt || item.receivedAt) continue;
       item.receivedAt = now;
+      receivedItemIds.push(String(item._id));
       marked += 1;
     }
 
@@ -999,6 +1088,12 @@ const receiveAllApproved = async (req, res) => {
     await doc.save();
 
     const populated = await populateQuery(StoreToMainTransfer.findById(doc._id)).lean();
+
+    triggerMerchandiseReturnEmails(doc._id, 'RECEIVED', {
+      actor: getActorFromReq(req),
+      itemIds: receivedItemIds,
+    });
+
     return res.status(200).json({
       success: true,
       message: `${marked} item(s) marked as inventory received`,
@@ -1009,10 +1104,129 @@ const receiveAllApproved = async (req, res) => {
   }
 };
 
+const CSV_FIELDS = [
+  'Ticket Number',
+  'Receipt Number',
+  'Order Status',
+  'Source Store',
+  'Destination Store',
+  'Requested By',
+  'Requester Email',
+  // 'Order Total',
+  'Note',
+  'Order Created At',
+  'SKU',
+  'Vendor Model',
+  'Quantity',
+  'Unit Price',
+  'Line Total',
+  'Currency',
+  'Item Status',
+  'Item Rejection Reason',
+];
+
+function csvDate(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+function csvItemStatusLabel(item) {
+  if (item?.rejectedAt) return 'Rejected';
+  if (item?.receivedAt) return 'Received';
+  if (item?.inventoryAppliedAt) return 'Approved';
+  return 'Pending';
+}
+
+function storeToMainTransferToCsvRows(order) {
+  const items = Array.isArray(order.items) ? order.items : [];
+  const base = {
+    'Ticket Number': order.ticketNumber || '',
+    'Receipt Number': order.receiptNumber || '',
+    'Order Status': order.status || '',
+    'Source Store': order.sourceWarehouseId?.name || '',
+    'Destination Store': order.destWarehouseId?.name || '',
+    'Requested By': order.requestedBy?.username || '',
+    'Requester Email': order.requestedBy?.email || '',
+    // 'Order Total': Number(order.totalAmount || 0),
+    Note: order.note || '',
+    'Order Created At': csvDate(order.createdAt),
+  };
+
+  if (!items.length) return [base];
+
+  return items.map((item) => ({
+    ...base,
+    SKU: item.skuCode || item.skuId?.sku || '',
+    'Vendor Model': item.vendorModel || item.vendorProductId?.vendorModel || '',
+    Quantity: Number(item.quantity || 0),
+    'Unit Price': Number(item.unitPrice || 0),
+    'Line Total': Number(item.lineTotal || 0),
+    Currency: item.currency || 'USD',
+    'Item Status': csvItemStatusLabel(item),
+    'Item Rejection Reason': item.rejectionReason || '',
+  }));
+}
+
+const exportAdminOrdersCsv = async (req, res) => {
+  try {
+    if (!isAdmin(req)) {
+      return res.status(403).json({ success: false, message: 'Admin only' });
+    }
+
+    const { status, sourceWarehouseId, search } = req.query;
+    const filter = {};
+
+    if (status) filter.status = String(status).toUpperCase();
+
+    if (sourceWarehouseId && isObjectId(sourceWarehouseId)) {
+      filter.sourceWarehouseId = new mongoose.Types.ObjectId(sourceWarehouseId);
+    }
+
+    if (search) {
+      const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ ticketNumber: rx }, { receiptNumber: rx }];
+    }
+
+    applyCreatedAtRangeFilter(filter, req.query);
+
+    const rows = await populateQuery(StoreToMainTransfer.find(filter))
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const csvRows = rows.flatMap(storeToMainTransferToCsvRows);
+    const parser = new Parser({ fields: CSV_FIELDS });
+    const csv = parser.parse(csvRows.length ? csvRows : [{}]);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const suffix = filter.status ? `-${String(filter.status).toLowerCase()}` : '';
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=store-to-main-transfers${suffix}-${stamp}.csv`,
+    );
+    return res.status(200).send(`\uFEFF${csv}`);
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to export merchandise returns',
+    });
+  }
+};
+
 module.exports = {
   createBatchOrders,
   listMyOrders,
   listAdminOrders,
+  exportAdminOrdersCsv,
   getOrder,
   getOrderItem,
   patchStatus,

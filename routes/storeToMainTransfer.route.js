@@ -15,6 +15,7 @@ const {
   rejectItems,
   markItemsReceived,
   receiveAllApproved,
+  exportAdminOrdersCsv,
 } = require('../controllers/storeToMainTransfer.controller');
 
 router.use(authMiddleware, attachRoleContext);
@@ -24,6 +25,7 @@ router.post('/', createBatchOrders);
 router.get('/mine', listMyOrders);
 
 // Admin routes
+router.get('/admin/export/csv', requireAdmin(), exportAdminOrdersCsv);
 router.get('/admin', requireAdmin(), listAdminOrders);
 router.patch('/:id/status', requireAdmin(), patchStatus);
 router.post('/:id/approve', requireAdmin(), approveOrder);
