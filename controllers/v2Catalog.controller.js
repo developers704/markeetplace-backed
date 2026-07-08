@@ -26,7 +26,7 @@ const normalizeKey = (value) => String(value || '').trim().toUpperCase();
 const RESERVED_QUERY_KEYS = new Set([
   'page', 'limit', 'cursor', 'lastProductId', 'search', 'brand', 'category', 'subcategory', 'subsubcategory',
   'categoryId', 'subcategoryId', 'subsubcategoryId', 'minPrice', 'maxPrice', 'sort', 'srule', 'skuOrder', 'skuSort',
-  'minQuantity', 'metalColor', 'metalType', 'size', 'stonetype', 'centerclarity', 'warehouseIds',
+  'minTagPrice', 'maxTagPrice', 'minQuantity', 'metalColor', 'metalType', 'size', 'stonetype', 'centerclarity', 'warehouseIds',
 ]);
 
 const SKU_SORT_VALUES = new Set(['sku-newest', 'sku-oldest']);
@@ -221,6 +221,16 @@ const getListingFilterFacets = async (listingMatch = {}) => {
             },
           },
         ],
+        tagPriceRange: [
+          { $match: { 'defaultSku.tagPrice': { $ne: null } } },
+          {
+            $group: {
+              _id: null,
+              min: { $min: '$defaultSku.tagPrice' },
+              max: { $max: '$defaultSku.tagPrice' },
+            },
+          },
+        ],
         metalColors: [
           { $match: { 'defaultSku.metalColor': { $nin: [null, ''] } } },
           { $group: { _id: '$defaultSku.metalColor' } },
@@ -273,6 +283,7 @@ const getListingFilterFacets = async (listingMatch = {}) => {
 
   const facet = (await ProductListing.aggregate(pipeline))?.[0] || {};
   const price = facet?.priceRange?.[0] || {};
+  const tagPrice = facet?.tagPriceRange?.[0] || {};
   return {
     brands: sortStrings((facet?.brands || []).map((x) => x?._id)),
     metalColors: sortStrings((facet?.metalColors || []).map((x) => x?._id)),
@@ -287,6 +298,10 @@ const getListingFilterFacets = async (listingMatch = {}) => {
     priceRange: {
       min: Number.isFinite(Number(price?.min)) ? Number(price.min) : 0,
       max: Number.isFinite(Number(price?.max)) ? Number(price.max) : 0,
+    },
+    tagPriceRange: {
+      min: Number.isFinite(Number(tagPrice?.min)) ? Number(tagPrice.min) : 0,
+      max: Number.isFinite(Number(tagPrice?.max)) ? Number(tagPrice.max) : 0,
     },
   };
 };
@@ -646,6 +661,8 @@ const listVendorProducts = async (req, res) => {
     const subsubcategoryRaw = req?.query?.subsubcategory;
     const minPrice = parseFloat(req?.query?.minPrice) || null;
     const maxPrice = parseFloat(req?.query?.maxPrice) || null;
+    const minTagPrice = parseFloat(req?.query?.minTagPrice) || null;
+    const maxTagPrice = parseFloat(req?.query?.maxTagPrice) || null;
     const { scopeRule: sortRule, skuOrder, isOwnInventorySort } = resolveListingSort(req.query);
     const selectedWarehouseId = isOwnInventorySort ? getSelectedWarehouseIdFromRequest(req) : null;
     const minQuantity = typeof req.query.minQuantity !== 'undefined' && req.query.minQuantity !== ''
@@ -697,6 +714,8 @@ const listVendorProducts = async (req, res) => {
       subsubcategoryId,
       minPrice,
       maxPrice,
+      minTagPrice,
+      maxTagPrice,
       minQuantity,
       search: (search || '').trim(),
       metalColor: metalColorRaw ? String(metalColorRaw).trim() : '',
@@ -744,6 +763,8 @@ async function buildListingPayload(query, context = {}) {
   const subsubcategoryRaw = query.subsubcategory;
   const minPrice = parseFloat(query.minPrice) || null;
   const maxPrice = parseFloat(query.maxPrice) || null;
+  const minTagPrice = parseFloat(query.minTagPrice) || null;
+  const maxTagPrice = parseFloat(query.maxTagPrice) || null;
   const { scopeRule: sortRule, skuOrder, isOwnInventorySort, isMainInventorySort } = resolveListingSort(query);
   const selectedWarehouseId = isOwnInventorySort ? extractWarehouseId(context?.selectedWarehouseId) : null;
   const minQuantity = typeof query.minQuantity !== 'undefined' && query.minQuantity !== ''
@@ -835,6 +856,8 @@ async function buildListingPayload(query, context = {}) {
     if (subsubcategoryId) listingMatch.subsubcategoryId = { $in: [subsubcategoryId, subsubcategoryId.toString()] };
     if (minPrice != null && minPrice > 0) listingMatch.minPrice = { $gte: minPrice };
     if (maxPrice != null && maxPrice > 0) listingMatch.maxPrice = { $lte: maxPrice };
+    if (minTagPrice != null && minTagPrice > 0) listingMatch['defaultSku.tagPrice'] = { ...(listingMatch['defaultSku.tagPrice'] || {}), $gte: minTagPrice };
+    if (maxTagPrice != null && maxTagPrice > 0) listingMatch['defaultSku.tagPrice'] = { ...(listingMatch['defaultSku.tagPrice'] || {}), $lte: maxTagPrice };
     if (!isOwnInventorySort && sortRule !== 'ismain' && warehouseIds.length === 0) {
       listingMatch.totalInventory = minQuantity != null && minQuantity > 0
         ? { $gte: minQuantity }
