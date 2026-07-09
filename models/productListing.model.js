@@ -36,6 +36,7 @@ const productListingSchema = new mongoose.Schema(
       _id: mongoose.Schema.Types.ObjectId,
       sku: String,
       price: Number,
+      tagPrice: Number,
       currency: String,
       images: [String],
       gallery: [String],

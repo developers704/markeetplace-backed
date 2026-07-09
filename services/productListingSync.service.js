@@ -140,14 +140,23 @@ async function syncProductListing(productId, bumpCacheVersion = true) {
   let subcategoryDoc = null;
   let subsubcategoryDoc = null;
   const catId = vp.category && vp.category._id ? vp.category._id : vp.category;
-  if (catId && mongoose.Types.ObjectId.isValid(catId)) {
-    categoryDoc = await Category.findById(catId).lean();
+  const categoryObjectId = catId && mongoose.Types.ObjectId.isValid(catId)
+    ? new mongoose.Types.ObjectId(catId)
+    : null;
+  if (categoryObjectId) {
+    categoryDoc = await Category.findById(categoryObjectId).lean();
   }
-  if (vp.subcategory) {
-    subcategoryDoc = await SubCategory.findById(vp.subcategory).lean();
+  const subcategoryObjectId = vp.subcategory && mongoose.Types.ObjectId.isValid(vp.subcategory)
+    ? new mongoose.Types.ObjectId(vp.subcategory)
+    : null;
+  if (subcategoryObjectId) {
+    subcategoryDoc = await SubCategory.findById(subcategoryObjectId).lean();
   }
-  if (vp.subsubcategory) {
-    subsubcategoryDoc = await SubSubCategory.findById(vp.subsubcategory).lean();
+  const subsubcategoryObjectId = vp.subsubcategory && mongoose.Types.ObjectId.isValid(vp.subsubcategory)
+    ? new mongoose.Types.ObjectId(vp.subsubcategory)
+    : null;
+  if (subsubcategoryObjectId) {
+    subsubcategoryDoc = await SubSubCategory.findById(subsubcategoryObjectId).lean();
   }
 
   // const searchText = [vp.title, vp.brand, vp.vendorModel].filter(Boolean).join(' ');
@@ -171,11 +180,11 @@ async function syncProductListing(productId, bumpCacheVersion = true) {
     brand: vp.brand || '',
     brandKey: vp.brandKey || normalizeKey(vp.brand),
     description: vp.description || '',
-    categoryId: categoryDoc?._id ?? catId ?? null,
+    categoryId: categoryDoc?._id ?? categoryObjectId ?? null,
     categoryDoc: categoryDoc ? { _id: categoryDoc._id, name: categoryDoc.name, description: categoryDoc.description, image: categoryDoc.image } : null,
-    subcategoryId: vp.subcategory ?? null,
+    subcategoryId: subcategoryObjectId ?? null,
     subcategoryDoc: subcategoryDoc ? { _id: subcategoryDoc._id, name: subcategoryDoc.name, description: subcategoryDoc.description, image: subcategoryDoc.image } : null,
-    subsubcategoryId: vp.subsubcategory ?? null,
+    subsubcategoryId: subsubcategoryObjectId ?? null,
     subsubcategoryDoc: subsubcategoryDoc ? { _id: subsubcategoryDoc._id, name: subsubcategoryDoc.name, description: subsubcategoryDoc.description, image: subsubcategoryDoc.image } : null,
     minPrice,
     maxPrice,
@@ -186,6 +195,7 @@ async function syncProductListing(productId, bumpCacheVersion = true) {
     _id: defaultSkuDoc._id,
     sku: defaultSkuDoc.sku,
     price: defaultSkuDoc.price,
+    tagPrice: defaultSkuDoc.tagPrice,
     currency: defaultSkuDoc.currency || 'USD',
     // images: defaultSkuDoc.images || [],
     // gallery: defaultSkuDoc.gallery || [],
