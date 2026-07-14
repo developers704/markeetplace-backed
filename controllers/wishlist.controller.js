@@ -1,229 +1,274 @@
 const Wishlist = require('../models/wishlist.model');
 const Product = require('../models/product.model');
-const Cart = require('../models/cart.model');
-const Inventory = require('../models/inventory.model');
 const SpecialProduct = require('../models/specialProduct.model.js');
 const VendorProduct = require('../models/vendorProduct.model');
 const Sku = require('../models/sku.model');
+const Customer = require('../models/customer.model');
+const UserRole = require('../models/userRole.model');
+
+const readSkuAttr = (sku, key) => {
+  if (!sku?.attributes) return '';
+  const attrs = sku.attributes;
+  if (attrs instanceof Map) {
+    return String(attrs.get(key) ?? '').trim();
+  }
+  return String(attrs[key] ?? '').trim();
+};
+
+const resolveWarehouseId = (user) => {
+  const sw = user?.selectedWarehouse;
+  if (!sw) return null;
+  if (typeof sw === 'object' && sw._id) return String(sw._id);
+  return String(sw);
+};
+
+const sameWishlistEntry = (a, b) =>
+  String(a.product) === String(b.product) &&
+  a.productType === b.productType &&
+  String(a.skuId || '') === String(b.skuId || '') &&
+  String(a.sellerWarehouseId || '') === String(b.sellerWarehouseId || '');
+
+/**
+ * Wishlist is scoped by the user's LOGIN store (JWT selectedWarehouse),
+ * NOT the inventory/seller warehouse picked on the product page.
+ */
+const matchesWarehouseFilter = (
+  item,
+  warehouseId,
+  wishlistCustomerId,
+  currentUserId,
+  warehouseCustomerIdSet,
+) => {
+  const ownerId = String(item.addedBy || wishlistCustomerId || '');
+  const stamped = item.sellerWarehouseId ? String(item.sellerWarehouseId) : '';
+
+  // Always show the current user's own saved items (even if stamped with
+  // inventory warehouse instead of login store — legacy / frontend mismatch).
+  if (ownerId === String(currentUserId)) return true;
+
+  // Shared warehouse list: items stamped for this login store
+  if (stamped && stamped === String(warehouseId)) return true;
+
+  // Legacy entries with no warehouse stamp — include if owner belongs to store
+  if (!stamped && warehouseCustomerIdSet.has(String(wishlistCustomerId))) return true;
+
+  return false;
+};
+
+async function resolveCanAddToCart(user) {
+  if (!user?.role) return false;
+  const role = await UserRole.findById(user.role).select('permissions').lean();
+  if (!role?.permissions) return false;
+  const perms = role.permissions;
+  const cartPerm = perms instanceof Map ? perms.get('Cart') : perms.Cart;
+  return !!(cartPerm?.View || cartPerm?.Create);
+}
+
+async function formatVendorWishlistProduct(item) {
+  const vendorProduct = await VendorProduct.findById(item.product)
+    .select('title vendorModel defaultSku')
+    .lean();
+
+  if (!vendorProduct) return null;
+
+  let skuData = null;
+  if (item.skuId) {
+    skuData = await Sku.findById(item.skuId)
+      .select('sku price tagPrice currency images gallery attributes')
+      .lean();
+  }
+  if (!skuData && vendorProduct.defaultSku) {
+    skuData = await Sku.findById(vendorProduct.defaultSku)
+      .select('sku price tagPrice currency images gallery attributes')
+      .lean();
+  }
+  if (!skuData) {
+    skuData = await Sku.findOne({ productId: item.product, isActive: true })
+      .select('sku price tagPrice currency images gallery attributes')
+      .sort({ createdAt: 1 })
+      .lean();
+  }
+
+  const descriptionName =
+    readSkuAttr(skuData, 'descriptionname') ||
+    vendorProduct.title ||
+    '';
+  const images = skuData?.images?.length
+    ? skuData.images
+    : (skuData?.gallery?.length ? skuData.gallery : []);
+  const price = skuData?.price ?? skuData?.tagPrice ?? 0;
+
+  return {
+    _id: vendorProduct._id,
+    name: descriptionName,
+    descriptionName,
+    vendorModel: vendorProduct.vendorModel || '',
+    sku: skuData?.sku || '',
+    image: images[0] || '',
+    gallery: images,
+    defaultSkuId: skuData?._id || null,
+    prices: [{ amount: price }],
+    _wishlistProductType: 'vendor',
+  };
+}
+
+async function formatRegularWishlistProduct(item, city) {
+  const populatedProduct = await Product.findById(item.product)
+    .populate('category', 'name')
+    .populate('prices.city')
+    .select('name title image gallery prices category')
+    .lean();
+
+  if (!populatedProduct) return null;
+
+  populatedProduct.name = populatedProduct.name || populatedProduct.title;
+
+  if (city && Array.isArray(populatedProduct.prices)) {
+    populatedProduct.prices = populatedProduct.prices.filter(
+      (price) => price.city && String(price.city._id) === String(city),
+    );
+  }
+
+  return populatedProduct;
+}
+
+async function formatSpecialWishlistProduct(item, city) {
+  const populatedProduct = await SpecialProduct.findById(item.product)
+    .populate('specialCategory', 'name')
+    .populate('prices.city')
+    .select('name title image gallery prices specialCategory')
+    .lean();
+
+  if (!populatedProduct) return null;
+
+  populatedProduct.name = populatedProduct.name || populatedProduct.title;
+
+  if (city && Array.isArray(populatedProduct.prices)) {
+    populatedProduct.prices = populatedProduct.prices.filter(
+      (price) => price.city && String(price.city._id) === String(city),
+    );
+  }
+
+  return populatedProduct;
+}
 
 const addToWishlist = async (req, res) => {
-    try {
-      const { productId, productType , isMain , sellerWarehouseId, skuId } = req.body;
-      const customerId = req.user._id;
-  
-      // Check if the product exists
-      // const product = await Product.findById(productId);
-      let product;
-      if (productType === 'regular') {
-        product = await Product.findById(productId);
-      } else if (productType === 'special') {
-        product = await SpecialProduct.findById(productId);
-      } else if (productType === 'vendor') {
-        product = await VendorProduct.findById(productId);
-        if (product && skuId) {
-          const sku = await Sku.findOne({ _id: skuId, productId });
-          if (!sku) {
-            return res.status(404).json({ message: 'SKU not found for this vendor product' });
-          }
+  try {
+    const { productId, productType, isMain, skuId } = req.body;
+    const customerId = req.user._id;
+    const addedByUsername = req.user.username || '';
+    // Always stamp with LOGIN selected warehouse (JWT) — not inventory warehouse from product page
+    const loginWarehouseId = resolveWarehouseId(req.user);
+
+    if (!loginWarehouseId) {
+      return res.status(400).json({
+        message: 'No store selected. Please select a warehouse / store and try again.',
+      });
+    }
+
+    let product;
+    if (productType === 'regular') {
+      product = await Product.findById(productId);
+    } else if (productType === 'special') {
+      product = await SpecialProduct.findById(productId);
+    } else if (productType === 'vendor') {
+      product = await VendorProduct.findById(productId);
+      if (product && skuId) {
+        const sku = await Sku.findOne({ _id: skuId, productId });
+        if (!sku) {
+          return res.status(404).json({ message: 'SKU not found for this vendor product' });
         }
       }
-      if (!product) {
-        return res.status(404).json({ message: 'Product not found' });
-      }
-
-      const wishlistEntry = {
-        productType,
-        product: productId,
-        isMain,
-        sellerWarehouseId,
-      };
-      if (productType === 'vendor' && skuId) {
-        wishlistEntry.skuId = skuId;
-      }
-  
-      // Use $addToSet to avoid duplicate product entries
-      let wishlist = await Wishlist.findOneAndUpdate(
-        { customer: customerId },
-        { $addToSet: { products: wishlistEntry } }, 
-        { new: true, upsert: true } // new returns the updated document, upsert creates a new wishlist if it doesn't exist
-      );
-  
-      res.status(200).json({ message: 'Product added to wishlist', wishlist });
-    } catch (error) {
-      console.error(error); // Log the error for debugging
-      res.status(500).json({ message: 'Internal server error' });
     }
-  };
 
+    if (!product) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
+
+    const wishlistEntry = {
+      productType,
+      product: productId,
+      isMain,
+      sellerWarehouseId: loginWarehouseId,
+      addedBy: customerId,
+      addedByUsername,
+    };
+
+    if (productType === 'vendor' && skuId) {
+      wishlistEntry.skuId = skuId;
+    }
+
+    let wishlist = await Wishlist.findOne({ customer: customerId });
+    if (!wishlist) {
+      wishlist = new Wishlist({ customer: customerId, products: [wishlistEntry] });
+      await wishlist.save();
+      return res.status(200).json({ message: 'Product added to wishlist', wishlist });
+    }
+
+    const alreadyExists = wishlist.products.some((item) => sameWishlistEntry(item, wishlistEntry));
+    if (alreadyExists) {
+      return res.status(200).json({ message: 'Product already in wishlist', wishlist });
+    }
+
+    // Same product+sku stamped under a different warehouse (e.g. inventory WH) — replace stamp
+    const sameProductSkuIndex = wishlist.products.findIndex(
+      (item) =>
+        String(item.product) === String(productId) &&
+        item.productType === productType &&
+        String(item.skuId || '') === String(skuId || ''),
+    );
+    if (sameProductSkuIndex > -1) {
+      wishlist.products[sameProductSkuIndex].sellerWarehouseId = loginWarehouseId;
+      wishlist.products[sameProductSkuIndex].addedBy = customerId;
+      wishlist.products[sameProductSkuIndex].addedByUsername = addedByUsername;
+      if (isMain !== undefined) wishlist.products[sameProductSkuIndex].isMain = isMain;
+      await wishlist.save();
+      return res.status(200).json({ message: 'Product added to wishlist', wishlist });
+    }
+
+    wishlist.products.push(wishlistEntry);
+    await wishlist.save();
+
+    res.status(200).json({ message: 'Product added to wishlist', wishlist });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
 
 const removeFromWishlist = async (req, res) => {
   try {
     const { productId, productType } = req.params;
+    const { skuId, sellerWarehouseId } = req.query;
     const customerId = req.user._id;
 
-    // const wishlist = await Wishlist.findOne({ customer: customerId });
-
-    const wishlist = await Wishlist.findOneAndUpdate(
-      { customer: customerId },
-      { $pull: { products: { product: productId, productType } } },
-      { new: true }
-    );
-
+    const wishlist = await Wishlist.findOne({ customer: customerId });
     if (!wishlist) {
       return res.status(404).json({ message: 'Wishlist not found' });
     }
 
+    const beforeCount = wishlist.products.length;
+    // Own wishlist document only — remove by product + sku (ignore warehouse stamp mismatch)
+    wishlist.products = wishlist.products.filter((item) => {
+      if (String(item.product) !== String(productId) || item.productType !== productType) {
+        return true;
+      }
+      if (skuId && String(item.skuId || '') !== String(skuId)) {
+        return true;
+      }
+      return false;
+    });
 
-    // wishlist.products = wishlist.products.filter(id => id.toString() !== productId);
-    // await wishlist.save();
+    if (wishlist.products.length === beforeCount) {
+      return res.status(404).json({ message: 'Wishlist item not found' });
+    }
 
+    await wishlist.save();
     res.status(200).json({ message: 'Product removed from wishlist', wishlist });
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
 };
-
-// const toggleWishlistProduct = async (req, res) => {
-//   try {
-//     const { productId } = req.body;
-//     const customerId = req.user._id;
-
-//     // Check if the product exists
-//     const product = await Product.findById(productId);
-//     if (!product) {
-//       return res.status(404).json({ message: 'Product not found' });
-//     }
-
-//     // Find the customer's wishlist
-//     let wishlist = await Wishlist.findOne({ customer: customerId });
-
-//     if (!wishlist) {
-//       // Create a new wishlist if none exists and add the product
-//       wishlist = new Wishlist({ customer: customerId, products: [productId] });
-//       await wishlist.save();
-
-//       // Populate the products field in the newly created wishlist
-//       wishlist = await Wishlist.findById(wishlist._id).populate('products');
-//       return res.status(200).json({ message: 'Product added to wishlist', wishlist });
-//     }
-
-//     // Check if the product is already in the wishlist
-//     const productIndex = wishlist.products.findIndex(id => id.toString() === productId);
-
-//     if (productIndex > -1) {
-//       // Remove the product if it exists
-//       wishlist.products.splice(productIndex, 1);
-//       await wishlist.save();
-//     } else {
-//       // Add the product if it doesn't exist
-//       wishlist.products.push(productId);
-//       await wishlist.save();
-//     }
-
-//     // Populate the products field after updating the wishlist
-//     wishlist = await Wishlist.findOne({ customer: customerId }).populate('products');
-
-//     res.status(200).json({
-//       message: productIndex > -1 ? 'Product removed from wishlist' : 'Product added to wishlist',
-//       wishlist,
-//     });
-//   } catch (error) {
-//     console.error(error);
-//     res.status(500).json({ message: 'Internal server error' });
-//   }
-// };
-
-
-// const getWishlist = async (req, res) => {
-//   try {
-//     const customerId = req.user._id;
-//     const { city } = req.query;
-
-//     let wishlist = await Wishlist.findOne({ customer: customerId })
-//       .populate({
-//         path: 'products',
-//         populate: [
-//           { path: "category", select: "name" },
-//           { path: "subcategory", select: "name" },
-//           { path: "brand", select: "name" },
-//           { path: "tags", select: "name" },
-//           {
-//             path: "discounts",
-//             populate: {
-//               path: "discountId",
-//               select: "discountType value code",
-//             },
-//           },
-//           { path: "dealOfTheDay", select: "startDateTime endDateTime discountType discountValue cities" },
-//           "variants",
-//           { path: "prices.city", model: "City" },
-//         ]
-//       })
-//       .lean();
-
-//     if (!wishlist) {
-//       return res.status(404).json({ message: 'Wishlist not found' });
-//     }
-
-//     if (city && wishlist.products) {
-//       wishlist.products = wishlist.products
-//         .map((product) => {
-//           // Filter prices by city
-//           if (product.prices && Array.isArray(product.prices)) {
-//             product.prices = product.prices.filter(
-//               (price) => price.city && price.city._id.toString() === city
-//             );
-//           } else {
-//             product.prices = [];
-//           }
-
-//           // Filter discounts based on city
-//           if (product.discounts && Array.isArray(product.discounts)) {
-//             product.discounts = product.discounts.filter(
-//               (discount) =>
-//                 discount.cityIds && discount.cityIds.some(
-//                   (cityId) => cityId.toString() === city
-//                 )
-//             );
-//           } else {
-//             product.discounts = [];
-//           }
-
-//           // Filter deal of the day based on city
-//           if (product.dealOfTheDay && Array.isArray(product.dealOfTheDay)) {
-//             product.dealOfTheDay = product.dealOfTheDay.filter((deal) =>
-//               deal.cities.some((dealCityId) => dealCityId.toString() === city)
-//             );
-//           } else {
-//             product.dealOfTheDay = [];
-//           }
-
-//           return product;
-//         })
-//         .filter((product) => product.prices.length > 0);
-
-//       // Fetch inventory data for the filtered products
-//       const productsWithInventory = await Promise.all(
-//         wishlist.products.map(async (product) => {
-//           const inventory = await Inventory.findOne(
-//             { product: product._id, city }
-//           ).select("city quantity vat");
-
-//           product.inventory = inventory || null;
-//           product.isOutOfStock = !inventory || inventory.quantity === 0;
-//           return product;
-//         })
-//       );
-
-//       wishlist.products = productsWithInventory;
-//     }
-
-//     res.status(200).json(wishlist);
-//   } catch (error) {
-//     res.status(400).json({ message: error.message });
-//   }
-// };
-
 
 const toggleWishlistProduct = async (req, res) => {
   try {
@@ -246,19 +291,34 @@ const toggleWishlistProduct = async (req, res) => {
     let wishlist = await Wishlist.findOne({ customer: customerId });
 
     if (!wishlist) {
-      wishlist = new Wishlist({ customer: customerId, products: [{ productType, product: productId }] });
+      wishlist = new Wishlist({
+        customer: customerId,
+        products: [{
+          productType,
+          product: productId,
+          addedBy: customerId,
+          addedByUsername: req.user.username || '',
+          sellerWarehouseId: resolveWarehouseId(req.user),
+        }],
+      });
       await wishlist.save();
       return res.status(200).json({ message: 'Product added to wishlist', wishlist });
     }
 
     const productIndex = wishlist.products.findIndex(
-      item => item.product.toString() === productId && item.productType === productType
+      (item) => String(item.product) === String(productId) && item.productType === productType,
     );
 
     if (productIndex > -1) {
       wishlist.products.splice(productIndex, 1);
     } else {
-      wishlist.products.push({ productType, product: productId });
+      wishlist.products.push({
+        productType,
+        product: productId,
+        addedBy: customerId,
+        addedByUsername: req.user.username || '',
+        sellerWarehouseId: resolveWarehouseId(req.user),
+      });
     }
 
     await wishlist.save();
@@ -273,240 +333,129 @@ const toggleWishlistProduct = async (req, res) => {
   }
 };
 
-
-// const getWishlist = async (req, res) => {
-//   try {
-//     const customerId = req.user._id;
-//     const { city } = req.query;
-
-//     let wishlist = await Wishlist.findOne({ customer: customerId })
-//       .populate({
-//         path: 'products.product',
-//         populate: [
-//           { path: "category", select: "name" },
-//           { path: "subcategory", select: "name" },
-//           { path: "brand", select: "name" },
-//           { path: "tags", select: "name" },
-//           { path: "prices.city", model: "City" },
-//         ]
-//       })
-//       .lean();
-
-//     if (!wishlist) {
-//       return res.status(404).json({ message: 'Wishlist not found' });
-//     }
-
-//     wishlist.products = await Promise.all(wishlist.products.map(async (item) => {
-//       if (item.productType === 'regular') {
-//         item.product = await Product.findById(item.product)
-//           .populate("category", "name")
-//           .populate("subcategory", "name")
-//           .populate("brand", "name")
-//           .populate("tags", "name")
-//           .populate("prices.city")
-//           .lean();
-//       } else if (item.productType === 'special') {
-//         item.product = await SpecialProduct.findById(item.product)
-//           .populate("specialCategory", "name")
-//           .populate("specialSubcategory", "name")
-//           .populate("prices.city")
-//           .lean();
-//       }
-
-//       if (city && item.product.prices && Array.isArray(item.product.prices)) {
-//         item.product.prices = item.product.prices.filter(
-//           (price) => price.city && price.city._id.toString() === city
-//         );
-//       }
-
-//       return item;
-//     }));
-
-//     wishlist.products = wishlist.products.filter((item) => item.product && item.product.prices && item.product.prices.length > 0);
-
-//     res.status(200).json(wishlist);
-//   } catch (error) {
-//     res.status(400).json({ message: error.message });
-//   }
-// };
-
-
-// const getWishlist = async (req, res) => {
-//   try {
-//     const customerId = req.user._id;
-//     const { city } = req.query;
-
-//     let wishlist = await Wishlist.findOne({ customer: customerId })
-//       .populate({
-//         path: 'products.product',
-//         populate: [
-//           { path: "category", select: "name" },
-//           { path: "subcategory", select: "name" },
-//           { path: "brand", select: "name" },
-//           { path: "tags", select: "name" },
-//           { path: "prices.city", model: "City" },
-//         ]
-//       })
-//       .lean();
-
-//     if (!wishlist) {
-//       return res.status(404).json({ message: 'Wishlist not found' });
-//     }
-
-//     wishlist.products = await Promise.all(wishlist.products.map(async (item) => {
-//       if (item.productType === 'regular') {
-//         item.product = await Product.findById(item.product)
-//           .populate("category", "name")
-//           .populate("subcategory", "name")
-//           .populate("brand", "name")
-//           .populate("tags", "name")
-//           .populate("prices.city")
-//           .lean();
-//       } else if (item.productType === 'special') {
-//         item.product = await SpecialProduct.findById(item.product)
-//           .populate("specialCategory", "name")
-//           .populate("prices.city")
-//           .lean();
-//       }
-
-//       if (city && item.product && item.product.prices && Array.isArray(item.product.prices)) {
-//         item.product.prices = item.product.prices.filter(
-//           (price) => price.city && price.city._id.toString() === city
-//         );
-//       }
-
-//       return item;
-//     }));
-
-//     wishlist.products = wishlist.products.filter((item) => item.product && item.product.prices && item.product.prices.length > 0);
-
-//     res.status(200).json(wishlist);
-//   } catch (error) {
-//     res.status(400).json({ message: error.message });
-//   }
-// };
-
-
 const getWishlist = async (req, res) => {
   try {
     const customerId = req.user._id;
     const { city } = req.query;
+    const warehouseId = resolveWarehouseId(req.user);
 
-    let wishlist = await Wishlist.findOne({ customer: customerId }).lean();
-
-    if (!wishlist) {
-      return res.status(404).json({ message: 'Wishlist not found' });
+    if (!warehouseId) {
+      return res.status(200).json({
+        warehouseId: null,
+        canAddToCart: await resolveCanAddToCart(req.user),
+        products: [],
+      });
     }
 
-    wishlist.products = await Promise.all(wishlist.products.map(async (item) => {
-      let populatedProduct;
-      if (item.productType === 'regular') {
-        populatedProduct = await Product.findById(item.product)
-          .populate("category", "name")
-          .populate("subcategory", "name")
-          .populate("brand", "name")
-          .populate("tags", "name")
-          .populate("prices.city")
-          .lean();
-      } else if (item.productType === 'special') {
-        populatedProduct = await SpecialProduct.findById(item.product)
-          .populate("specialCategory", "name")
-          .populate("specialSubcategory", "name")
-          .populate("prices.city")
-          .lean();
-      } else if (item.productType === 'vendor') {
-        populatedProduct = await VendorProduct.findById(item.product)
-          .populate('subcategory', 'name')
-          .populate('subsubcategory', 'name')
-          .populate({
-            path: 'defaultSku',
-            select: 'sku price tagPrice currency images metalColor metalType size',
-          })
-          .lean();
+    const warehouseCustomers = await Customer.find({ warehouse: warehouseId })
+      .select('_id')
+      .lean();
+    const warehouseCustomerIds = warehouseCustomers.map((c) => c._id);
+    const warehouseCustomerIdSet = new Set(warehouseCustomerIds.map(String));
 
-        if (populatedProduct) {
-          let skuData = null;
-          if (item.skuId) {
-            skuData = await Sku.findById(item.skuId)
-              .select('sku price tagPrice currency images metalColor metalType size')
-              .lean();
-          }
-          if (!skuData && populatedProduct.defaultSku) {
-            skuData = populatedProduct.defaultSku;
-          }
+    // Always include current user even if warehouse membership query misses them
+    if (!warehouseCustomerIdSet.has(String(customerId))) {
+      warehouseCustomerIds.push(customerId);
+      warehouseCustomerIdSet.add(String(customerId));
+    }
 
-          populatedProduct.name = populatedProduct.title;
-          populatedProduct._wishlistProductType = 'vendor';
-          if (skuData) {
-            populatedProduct.sku = skuData.sku;
-            populatedProduct.defaultSkuId = skuData._id;
-            populatedProduct.prices = [{ amount: skuData.price ?? skuData.tagPrice ?? 0 }];
-            populatedProduct.gallery = skuData.images?.length ? skuData.images : [];
-          } else {
-            populatedProduct.prices = [{ amount: 0 }];
-          }
+    const wishlists = await Wishlist.find({ customer: { $in: warehouseCustomerIds } }).lean();
+    const canAddToCart = await resolveCanAddToCart(req.user);
+
+    const warehouseItems = [];
+    for (const wishlist of wishlists) {
+      for (const item of wishlist.products || []) {
+        if (
+          !matchesWarehouseFilter(
+            item,
+            warehouseId,
+            wishlist.customer,
+            customerId,
+            warehouseCustomerIdSet,
+          )
+        ) {
+          continue;
         }
+        warehouseItems.push({
+          ...item,
+          isOwn: String(item.addedBy || wishlist.customer) === String(customerId),
+        });
       }
+    }
 
-      if (populatedProduct && city && populatedProduct.prices && Array.isArray(populatedProduct.prices)) {
-        populatedProduct.prices = populatedProduct.prices.filter(
-          (price) => price.city && price.city._id.toString() === city
-        );
-      }
+    const products = (
+      await Promise.all(
+        warehouseItems.map(async (item) => {
+          let populatedProduct = null;
 
-      return { ...item, product: populatedProduct };
-    }));
+          if (item.productType === 'regular') {
+            populatedProduct = await formatRegularWishlistProduct(item, city);
+          } else if (item.productType === 'special') {
+            populatedProduct = await formatSpecialWishlistProduct(item, city);
+          } else if (item.productType === 'vendor') {
+            populatedProduct = await formatVendorWishlistProduct(item);
+          }
 
-    wishlist.products = wishlist.products.filter((item) => {
-      if (!item.product) return false;
-      if (item.productType === 'vendor') return true;
-      return item.product.prices && item.product.prices.length > 0;
+          if (!populatedProduct) return null;
+          if (item.productType !== 'vendor') {
+            if (!populatedProduct.prices || populatedProduct.prices.length === 0) {
+              return null;
+            }
+          }
+
+          return {
+            _id: item._id,
+            productType: item.productType,
+            skuId: item.skuId || null,
+            sellerWarehouseId: item.sellerWarehouseId || warehouseId,
+            addedByUsername: item.addedByUsername || '',
+            isOwn: item.isOwn,
+            canAddToCart,
+            product: populatedProduct,
+          };
+        }),
+      )
+    ).filter(Boolean);
+
+    res.status(200).json({
+      warehouseId,
+      canAddToCart,
+      products,
     });
-
-    res.status(200).json(wishlist);
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
 };
 
-
 const clearWishlist = async (req, res) => {
   try {
-      const customerId = req.user._id;
+    const customerId = req.user._id;
+    const warehouseId = resolveWarehouseId(req.user);
 
-      // Find the wishlist by customer ID
-      // const wishlist = await Wishlist.findOne({ customer: customerId });
+    const wishlist = await Wishlist.findOne({ customer: customerId });
+    if (!wishlist) {
+      return res.status(404).json({ message: 'Wishlist not found' });
+    }
 
-      const wishlist = await Wishlist.findOneAndUpdate(
-        { customer: customerId },
-        { $set: { products: [] } },
-        { new: true }
-      )
+    if (warehouseId) {
+      wishlist.products = wishlist.products.filter(
+        (item) => String(item.sellerWarehouseId || '') !== String(warehouseId),
+      );
+    } else {
+      wishlist.products = [];
+    }
 
-      if (!wishlist) {
-          return res.status(404).json({ message: 'Wishlist not found' });
-      }
-
-      // Clear all products from the wishlist
-      // wishlist.products = []; // Set products to an empty array
-
-      // Save the updated wishlist
-      // const updatedWishlist = await wishlist.save();
-
-      res.status(200).json({ message: 'All products removed from wishlist', wishlist });
+    await wishlist.save();
+    res.status(200).json({ message: 'All products removed from wishlist', wishlist });
   } catch (error) {
-      res.status(400).json({ message: error.message });
+    res.status(400).json({ message: error.message });
   }
 };
-
-
-
-
 
 module.exports = {
   addToWishlist,
   removeFromWishlist,
   getWishlist,
   clearWishlist,
-  toggleWishlistProduct
+  toggleWishlistProduct,
 };

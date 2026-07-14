@@ -301,14 +301,14 @@ const acceptPolicy = async (req, res) => {
      
         
         // Check if this policy applies to this customer
-        const isApplicable = policy.applicableRoles.some(role => role.equals(customer.role)) || 
-        policy.applicableWarehouses.some(warehouse => warehouse.equals(customer.warehouse));
+        // const isApplicable = policy.applicableRoles.some(role => role.equals(customer.role)) || 
+        // policy.applicableWarehouses.some(warehouse => warehouse.equals(customer.warehouse));
         
-        if (!isApplicable) {
-            return res.status(400).json({ 
-                message: 'This policy is not applicable to your role or warehouse' 
-            });
-        }
+        // if (!isApplicable) {
+        //     return res.status(400).json({ 
+        //         message: 'This policy is not applicable to your role or warehouse' 
+        //     });
+        // }
         // Save both signature and photo
         const signatureFile = req.files.signedDocument[0];
         const photoFile = req.files.photoFile[0];

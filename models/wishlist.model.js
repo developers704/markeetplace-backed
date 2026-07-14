@@ -27,6 +27,15 @@ const wishlistSchema = new mongoose.Schema({
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Sku',
     },
+    addedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Customer',
+    },
+    addedByUsername: {
+      type: String,
+      trim: true,
+      default: '',
+    },
   }]
 }, { timestamps: true });
 

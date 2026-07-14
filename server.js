@@ -217,6 +217,14 @@ cron.schedule('0 1 * * *', async () => {
   }
 });
 
+// Prefetch Laravo catalog into Redis every night at 12:00 AM (Asia/Karachi)
+try {
+  const { scheduleLaravoCacheWarmup } = require('./services/laravoCacheWarmup.service');
+  scheduleLaravoCacheWarmup();
+} catch (error) {
+  console.error('Laravo cache warmup scheduler not started:', error.message);
+}
+
 // Define a route
 app.get('/', (req, res) => {
   res.send('2pl');

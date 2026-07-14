@@ -481,12 +481,14 @@ const createUser = async (req, res) => {
         if (existingUserByEmail || existingCustomerByEmail) {
             return res.status(400).json({ message: 'Email already exists' });
         }
-        const usernameRegex = new RegExp(`^${escapeRegex(normalizedUsername)}$`, 'i');
-        const existingUserByUsername = await User.findOne({ username: usernameRegex });
-        const existingCustomerByUsername = await Customer.findOne({ username: usernameRegex });
-        if (existingUserByUsername || existingCustomerByUsername) {
-            return res.status(400).json({ message: 'Username already exists' });
-        }
+
+        // const usernameRegex = new RegExp(`^${escapeRegex(normalizedUsername)}$`, 'i');
+        // const existingUserByUsername = await User.findOne({ username: usernameRegex });
+        // const existingCustomerByUsername = await Customer.findOne({ username: usernameRegex });
+        // if (existingUserByUsername || existingCustomerByUsername) {
+        //     return res.status(400).json({ message: 'Username already exists' });
+        // }
+        
         const userIdRegex = new RegExp(`^${escapeRegex(normalizedUserId)}$`, 'i');
         const existingUserByUserId = await User.findOne({ userId: userIdRegex });
         const existingCustomerByUserId = await Customer.findOne({ userId: userIdRegex });

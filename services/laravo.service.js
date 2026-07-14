@@ -1,6 +1,10 @@
 const axios = require('axios');
+const crypto = require('crypto');
+const { getClient } = require('../config/redis');
 
 const BASE_URL = 'https://www.laravo.com/api/v2';
+const LARAVO_CACHE_TTL_SEC = Number(process.env.LARAVO_CACHE_TTL_SEC) || 60 * 60 * 24; // 24h
+const LARAVO_CACHE_PREFIX = 'laravo:v1';
 
 function requirePrivateKey() {
   const key = String(process.env.LARAVO_PRIVATE_KEY || '').trim();
@@ -14,6 +18,47 @@ function requirePrivateKey() {
 
 function laravoHeaders() {
   return { privatekey: requirePrivateKey() };
+}
+
+function stableHash(value) {
+  return crypto.createHash('sha1').update(JSON.stringify(value ?? null)).digest('hex').slice(0, 16);
+}
+
+function buildCacheKey(parts = []) {
+  return [LARAVO_CACHE_PREFIX, ...parts.map((p) => String(p ?? '').trim() || '-')].join(':');
+}
+
+async function getCachedJson(cacheKey) {
+  const redis = getClient();
+  if (!redis) return null;
+  try {
+    const raw = await redis.get(cacheKey);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (err) {
+    console.warn('[Laravo] Redis get failed:', err.message);
+    return null;
+  }
+}
+
+async function setCachedJson(cacheKey, value, ttlSec = LARAVO_CACHE_TTL_SEC) {
+  const redis = getClient();
+  if (!redis) return;
+  try {
+    await redis.setex(cacheKey, ttlSec, JSON.stringify(value));
+  } catch (err) {
+    console.warn('[Laravo] Redis set failed:', err.message);
+  }
+}
+
+async function withLaravoCache(cacheKey, loader, { force = false } = {}) {
+  if (!force) {
+    const cached = await getCachedJson(cacheKey);
+    if (cached != null) return cached;
+  }
+  const fresh = await loader();
+  await setCachedJson(cacheKey, fresh);
+  return fresh;
 }
 
 function unwrapLaravoResponse(data) {
@@ -52,7 +97,6 @@ function normalizeProduct(raw = {}) {
   };
 }
 
-const LARAVO_API_PAGE_SIZE = 500;
 const DEFAULT_CLIENT_PAGE_SIZE = 20;
 
 function normalizeProductsPage(payload, clientPagination = null) {
@@ -102,6 +146,10 @@ function getVariantGroupKey(product) {
   return vid || String(product.id);
 }
 
+function getProductIdentity(product) {
+  return String(product?.id || product?.laravoGuid || product?.guid || '').trim();
+}
+
 function sortVariantProducts(variants) {
   return [...variants].sort((a, b) => {
     const aDefault = String(a.raw?.v_default) === '1' ? 0 : 1;
@@ -110,8 +158,23 @@ function sortVariantProducts(variants) {
   });
 }
 
+/** Laravo brand ("all types") pages can repeat the same SKU — keep one row per product id. */
+function dedupeVariants(variants) {
+  const seen = new Set();
+  const unique = [];
+  for (const product of variants) {
+    const id = getProductIdentity(product);
+    if (id) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+    }
+    unique.push(product);
+  }
+  return unique;
+}
+
 function normalizeProductGroup(vid, variants) {
-  const sorted = sortVariantProducts(variants);
+  const sorted = sortVariantProducts(dedupeVariants(variants));
   return {
     vid,
     variants: sorted,
@@ -119,8 +182,44 @@ function normalizeProductGroup(vid, variants) {
   };
 }
 
+/** Card grid only needs id/images/name/price/material/qty — strip heavy description + full raw. */
+function toCatalogCardVariant(product) {
+  const raw = product?.raw || {};
+  return {
+    id: product.id,
+    guid: product.guid || '',
+    laravoGuid: product.laravoGuid ?? null,
+    title: product.title,
+    modelNumber: product.modelNumber || '',
+    brand: product.brand || '',
+    productType: product.productType || '',
+    price: product.price,
+    currency: product.currency || 'USD',
+    image: product.image || null,
+    material: product.material || '',
+    color: product.color || '',
+    raw: {
+      qty: raw.qty != null ? String(raw.qty) : undefined,
+      image_link: raw.image_link || undefined,
+      additional_image_link: raw.additional_image_link || undefined,
+      additional_image_link_more: raw.additional_image_link_more || undefined,
+      vid: raw.vid || undefined,
+      v_default: raw.v_default || undefined,
+    },
+  };
+}
+
+function toCatalogCardGroup(group) {
+  return {
+    vid: group.vid,
+    defaultVariantId: group.defaultVariantId ?? null,
+    variants: (group.variants || []).map(toCatalogCardVariant),
+  };
+}
+
 async function loadAllGroupedProducts(fetchPage) {
   const groupMap = new Map();
+  const seenInGroup = new Map();
   let laravoPage = 1;
   let laravoPageCount = 1;
   let meta = null;
@@ -135,7 +234,16 @@ async function loadAllGroupedProducts(fetchPage) {
     const products = Array.isArray(payload.data) ? payload.data.map(normalizeProduct) : [];
     products.forEach((product) => {
       const key = getVariantGroupKey(product);
-      if (!groupMap.has(key)) groupMap.set(key, []);
+      if (!groupMap.has(key)) {
+        groupMap.set(key, []);
+        seenInGroup.set(key, new Set());
+      }
+      const id = getProductIdentity(product);
+      if (id) {
+        const seen = seenInGroup.get(key);
+        if (seen.has(id)) return;
+        seen.add(id);
+      }
       groupMap.get(key).push(product);
     });
 
@@ -149,13 +257,76 @@ async function loadAllGroupedProducts(fetchPage) {
   return { groups, meta, rawProductCount };
 }
 
-async function paginateGroupedLaravoProducts(fetchPage, options = {}) {
+function groupedCatalogCacheKey(url, options = {}) {
+  const vendorId = options.vendorId != null && options.vendorId !== '' ? String(options.vendorId) : '-';
+  // v2: catalog groups are deduped by product id (old caches had duplicate variants).
+  return buildCacheKey(['grouped-catalog-v2', stableHash(url), `v${vendorId}`]);
+}
+
+function matchesProductId(product, id) {
+  const needle = String(id);
+  return (
+    String(product?.id) === needle ||
+    String(product?.laravoGuid) === needle ||
+    String(product?.guid) === needle
+  );
+}
+
+async function getCachedGroupedCatalog(url, options = {}) {
+  const force = !!options.forceRefresh;
+  const cacheKey = groupedCatalogCacheKey(url, options);
+
+  return withLaravoCache(
+    cacheKey,
+    () =>
+      loadAllGroupedProducts((laravoPage) =>
+        fetchLaravoProductsPage(url, buildLaravoRequestConfig(laravoPage, options), { force }),
+      ),
+    { force },
+  );
+}
+
+/** Resolve product+variants from an already-warm Redis catalog (no Laravo HTTP). */
+async function findProductInCachedGroupedCatalog(brandId, productId, options = {}) {
+  const id = String(productId || '').trim();
+  if (!id || !brandId) return null;
+
+  const urls = [];
+  if (options.productTypeId) {
+    urls.push(`${BASE_URL}/active-data/brands/${brandId}/product-types/${options.productTypeId}`);
+  }
+  urls.push(`${BASE_URL}/active-data/brands/${brandId}`);
+
+  for (const url of urls) {
+    const cached = await getCachedJson(groupedCatalogCacheKey(url, options));
+    const groups = Array.isArray(cached?.groups) ? cached.groups : [];
+    if (!groups.length) continue;
+
+    for (const group of groups) {
+      const variants = Array.isArray(group?.variants) ? group.variants : [];
+      const product = variants.find((item) => matchesProductId(item, id));
+      if (product) {
+        const unique = variants.length ? sortVariantProducts(dedupeVariants(variants)) : [product];
+        return {
+          product,
+          variants: unique,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+async function paginateGroupedLaravoProducts(url, options = {}) {
   const limit = Math.min(100, Math.max(1, Number(options.limit) || DEFAULT_CLIENT_PAGE_SIZE));
   const page = Math.max(1, Number(options.page) || 1);
 
-  const { groups, meta, rawProductCount } = await loadAllGroupedProducts(fetchPage);
+  const { groups, meta, rawProductCount } = await getCachedGroupedCatalog(url, options);
   const startIndex = (page - 1) * limit;
-  const pageGroups = groups.slice(startIndex, startIndex + limit);
+  const pageGroups = groups
+    .slice(startIndex, startIndex + limit)
+    .map(toCatalogCardGroup);
   const totalGroups = groups.length;
   const clientPagination = buildClientPagination(totalGroups, page, limit, pageGroups.length);
 
@@ -169,7 +340,6 @@ async function paginateGroupedLaravoProducts(fetchPage, options = {}) {
     pageCount: clientPagination.pageCount,
     rowRange: null,
     groupedProducts: pageGroups,
-    products: pageGroups.flatMap((group) => group.variants),
     pagination: {
       ...clientPagination,
       rawProductCount,
@@ -178,32 +348,58 @@ async function paginateGroupedLaravoProducts(fetchPage, options = {}) {
   };
 }
 
-async function getActiveData() {
-  const { data } = await axios.get(`${BASE_URL}/active-data`, {
-    headers: laravoHeaders(),
-    timeout: 30000,
-  });
-  const payload = unwrapLaravoResponse(data);
-  const summary = Array.isArray(payload.summary) ? payload.summary : [];
+function listCacheKey(scope, brandId, productTypeId, options = {}) {
+  const page = Math.max(1, Number(options.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(options.limit) || DEFAULT_CLIENT_PAGE_SIZE));
+  const vendorId = options.vendorId != null && options.vendorId !== '' ? String(options.vendorId) : '-';
+  const searchHash = Array.isArray(options.search) && options.search.length
+    ? stableHash(options.search)
+    : 'nosearch';
+  return buildCacheKey([
+    `${scope}-v3`,
+    brandId,
+    productTypeId || '-',
+    `p${page}`,
+    `l${limit}`,
+    `v${vendorId}`,
+    searchHash,
+  ]);
+}
 
-  return {
-    numberOfBrands: Number(payload.number_of_brands) || summary.length,
-    summary: summary.map((brand) => ({
-      brand: brand.brand,
-      brandId: brand.brand_id,
-      productTypeCount: brand.product_type_count,
-      productTypes: Array.isArray(brand.product_types)
-        ? brand.product_types.map((pt) => ({
-            productType: pt.product_type,
-            fileName: pt.file_name,
-            fileId: pt.file_id,
-            productTypeId: pt.product_type_id ?? pt.file_id,
-            createdAt: pt.created_at,
-            productCount: pt.product_count,
-          }))
-        : [],
-    })),
-  };
+async function getActiveData(options = {}) {
+  const force = !!options.forceRefresh;
+  const cacheKey = buildCacheKey(['active-data']);
+  return withLaravoCache(
+    cacheKey,
+    async () => {
+      const { data } = await axios.get(`${BASE_URL}/active-data`, {
+        headers: laravoHeaders(),
+        timeout: 30000,
+      });
+      const payload = unwrapLaravoResponse(data);
+      const summary = Array.isArray(payload.summary) ? payload.summary : [];
+
+      return {
+        numberOfBrands: Number(payload.number_of_brands) || summary.length,
+        summary: summary.map((brand) => ({
+          brand: brand.brand,
+          brandId: brand.brand_id,
+          productTypeCount: brand.product_type_count,
+          productTypes: Array.isArray(brand.product_types)
+            ? brand.product_types.map((pt) => ({
+                productType: pt.product_type,
+                fileName: pt.file_name,
+                fileId: pt.file_id,
+                productTypeId: pt.product_type_id ?? pt.file_id,
+                createdAt: pt.created_at,
+                productCount: pt.product_count,
+              }))
+            : [],
+        })),
+      };
+    },
+    { force },
+  );
 }
 
 function buildLaravoRequestConfig(laravoPage, options = {}) {
@@ -222,56 +418,74 @@ function buildLaravoRequestConfig(laravoPage, options = {}) {
 }
 
 async function getBrandProducts(brandId, options = {}) {
-  const url = `${BASE_URL}/active-data/brands/${brandId}`;
-  const hasSearch = Array.isArray(options.search) && options.search.length > 0;
+  const force = !!options.forceRefresh;
+  const cacheKey = listCacheKey('brand-products', brandId, null, options);
+  return withLaravoCache(
+    cacheKey,
+    async () => {
+      const url = `${BASE_URL}/active-data/brands/${brandId}`;
+      const hasSearch = Array.isArray(options.search) && options.search.length > 0;
 
-  if (hasSearch) {
-    const laravoPage = Math.max(1, Number(options.page) || 1);
-    const payload = await fetchLaravoProductsPage(
-      url,
-      buildLaravoRequestConfig(laravoPage, options),
-    );
-    return normalizeProductsPage(payload);
-  }
+      if (hasSearch) {
+        const laravoPage = Math.max(1, Number(options.page) || 1);
+        const payload = await fetchLaravoProductsPage(
+          url,
+          buildLaravoRequestConfig(laravoPage, options),
+          { force },
+        );
+        return normalizeProductsPage(payload);
+      }
 
-  return paginateGroupedLaravoProducts(
-    (laravoPage) => fetchLaravoProductsPage(url, buildLaravoRequestConfig(laravoPage, options)),
-    options,
+      return paginateGroupedLaravoProducts(url, options);
+    },
+    { force },
   );
 }
 
-async function fetchLaravoProductsPage(url, config) {
-  const { data } = await axios.get(url, config);
-  return unwrapLaravoResponse(data);
+async function fetchLaravoProductsPage(url, config, { force = false } = {}) {
+  // Cache raw Laravo API pages too — avoids re-fetching every page during grouping
+  const page = config?.params?.page ?? 1;
+  const bodyHash = config?.data ? stableHash(config.data) : 'nobody';
+  const cacheKey = buildCacheKey(['raw-page', stableHash(url), `p${page}`, bodyHash]);
+
+  return withLaravoCache(
+    cacheKey,
+    async () => {
+      const { data } = await axios.get(url, config);
+      return unwrapLaravoResponse(data);
+    },
+    { force },
+  );
 }
 
 async function getBrandProductTypeProducts(brandId, productTypeId, options = {}) {
-  const url = `${BASE_URL}/active-data/brands/${brandId}/product-types/${productTypeId}`;
-  const hasSearch = Array.isArray(options.search) && options.search.length > 0;
+  const force = !!options.forceRefresh;
+  const cacheKey = listCacheKey('brand-type-products', brandId, productTypeId, options);
+  return withLaravoCache(
+    cacheKey,
+    async () => {
+      const url = `${BASE_URL}/active-data/brands/${brandId}/product-types/${productTypeId}`;
+      const hasSearch = Array.isArray(options.search) && options.search.length > 0;
 
-  if (hasSearch) {
-    const laravoPage = Math.max(1, Number(options.page) || 1);
-    const payload = await fetchLaravoProductsPage(
-      url,
-      buildLaravoRequestConfig(laravoPage, options),
-    );
-    return normalizeProductsPage(payload);
-  }
+      if (hasSearch) {
+        const laravoPage = Math.max(1, Number(options.page) || 1);
+        const payload = await fetchLaravoProductsPage(
+          url,
+          buildLaravoRequestConfig(laravoPage, options),
+          { force },
+        );
+        return normalizeProductsPage(payload);
+      }
 
-  return paginateGroupedLaravoProducts(
-    (laravoPage) => fetchLaravoProductsPage(url, buildLaravoRequestConfig(laravoPage, options)),
-    options,
+      return paginateGroupedLaravoProducts(url, options);
+    },
+    { force },
   );
 }
 
-async function getProductById(brandId, productId, options = {}) {
-  const id = String(productId || '').trim();
-  if (!id) {
-    const err = new Error('Product id is required');
-    err.statusCode = 400;
-    throw err;
-  }
-
+async function fetchProductByIdFromLaravo(brandId, productId, options = {}) {
+  const id = String(productId);
+  const force = !!options.forceRefresh;
   const numericId = Number(id);
   const searchValue = Number.isFinite(numericId) && String(numericId) === id ? numericId : id;
   const searchByLaravoGuid = [{ header: 'laravo_guid', operator: '=', value: searchValue }];
@@ -279,19 +493,14 @@ async function getProductById(brandId, productId, options = {}) {
     page: 1,
     vendorId: options.vendorId,
     search: searchByLaravoGuid,
+    forceRefresh: force,
   };
 
   let page = options.productTypeId
     ? await getBrandProductTypeProducts(brandId, options.productTypeId, fetchOptions)
     : await getBrandProducts(brandId, fetchOptions);
 
-  let product =
-    page.products.find(
-      (item) =>
-        String(item.id) === id ||
-        String(item.laravoGuid) === id ||
-        String(item.guid) === id,
-    ) || null;
+  let product = page.products.find((item) => matchesProductId(item, id)) || null;
 
   if (!product) {
     const searchByGuid = [{ header: 'guid', operator: '=', value: id }];
@@ -302,13 +511,7 @@ async function getProductById(brandId, productId, options = {}) {
         })
       : await getBrandProducts(brandId, { ...fetchOptions, search: searchByGuid });
 
-    product =
-      page.products.find(
-        (item) =>
-          String(item.id) === id ||
-          String(item.laravoGuid) === id ||
-          String(item.guid) === id,
-      ) || null;
+    product = page.products.find((item) => matchesProductId(item, id)) || null;
   }
 
   if (!product) {
@@ -326,22 +529,54 @@ async function getProductById(brandId, productId, options = {}) {
           page: 1,
           vendorId: options.vendorId,
           search: [{ header: 'vid', operator: '=', value: vid }],
+          forceRefresh: force,
         })
       : await getBrandProducts(brandId, {
           page: 1,
           vendorId: options.vendorId,
           search: [{ header: 'vid', operator: '=', value: vid }],
+          forceRefresh: force,
         });
 
     if (variantPage.products.length) {
-      variants = variantPage.products;
+      variants = sortVariantProducts(dedupeVariants(variantPage.products));
     }
   }
 
-  return {
-    product,
-    variants,
-  };
+  return { product, variants };
+}
+
+async function getProductById(brandId, productId, options = {}) {
+  const id = String(productId || '').trim();
+  if (!id) {
+    const err = new Error('Product id is required');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const force = !!options.forceRefresh;
+  const cacheKey = buildCacheKey([
+    'product-v2',
+    brandId,
+    id,
+    options.productTypeId || '-',
+    options.vendorId != null && options.vendorId !== '' ? String(options.vendorId) : '-',
+  ]);
+
+  return withLaravoCache(
+    cacheKey,
+    async () => {
+      // Prefer warm Redis catalog (list/warmup already loaded) — ms, no Laravo HTTP.
+      if (!force) {
+        const fromCatalog = await findProductInCachedGroupedCatalog(brandId, id, options);
+        if (fromCatalog) return fromCatalog;
+      }
+
+      // Cold catalog only: targeted Laravo search (then cached for next hit).
+      return fetchProductByIdFromLaravo(brandId, id, options);
+    },
+    { force },
+  );
 }
 
 module.exports = {
@@ -349,4 +584,6 @@ module.exports = {
   getBrandProducts,
   getBrandProductTypeProducts,
   getProductById,
+  LARAVO_CACHE_TTL_SEC,
+  DEFAULT_CLIENT_PAGE_SIZE,
 };
