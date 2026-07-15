@@ -202,6 +202,57 @@ function buildTitle(d) {
   ].filter(Boolean).join(' ') || 'Diamond';
 }
 
+/**
+ * List/grid cards only — minimal fields used by the product grid.
+ * Detail page uses GET /products/:id (normalizeDiamond) for the full payload.
+ */
+function toCardDiamond(diamond) {
+  if (!diamond) return null;
+
+  const image =
+    typeof diamond.image === 'string' && diamond.image.trim()
+      ? diamond.image.trim()
+      : null;
+
+  const card = {
+    id:            diamond.id,
+    rapnetId:      diamond.rapnetId,
+    title:         diamond.title,
+    shape:         diamond.shape,
+    carat:         diamond.carat,
+    color:         diamond.color,
+    clarity:       diamond.clarity,
+    polish:        diamond.polish,
+    symmetry:      diamond.symmetry,
+    lab:           diamond.lab,
+    location:      diamond.location,
+    price:         diamond.price,
+    pricePerCarat: diamond.pricePerCarat,
+    image,
+  };
+
+  if (!image) {
+    const media = Array.isArray(diamond.diamondMedia) ? diamond.diamondMedia : [];
+    const poster = media.find(
+      (m) => m?.url && String(m.type ?? '').toLowerCase() === 'image',
+    );
+    if (poster?.url) {
+      card.poster = poster.url;
+    } else {
+      const video =
+        (typeof diamond.video === 'string' && diamond.video.trim()) ||
+        media.find((m) => {
+          const t = String(m?.type ?? '').toLowerCase();
+          return m?.url && (t === 'v360' || t === 'video');
+        })?.url ||
+        null;
+      if (video) card.hasVideo = true;
+    }
+  }
+
+  return card;
+}
+
 // ── Public: Search diamonds ───────────────────────────────────────────────────
 const parseMultiFilter = (value) =>
   String(value || '')
@@ -239,9 +290,15 @@ async function searchDiamonds(filters = {}) {
     page_size:   limit,
   };
 
-  // Carat
-  if (filters.caratFrom) requestBody.carat_from = parseFloat(filters.caratFrom);
-  if (filters.caratTo)   requestBody.carat_to   = parseFloat(filters.caratTo);
+  // Carat / size — RapNet Instant Inventory expects size_from / size_to (not carat_*)
+  if (filters.caratFrom) {
+    const from = parseFloat(filters.caratFrom);
+    if (!Number.isNaN(from)) requestBody.size_from = from;
+  }
+  if (filters.caratTo) {
+    const to = parseFloat(filters.caratTo);
+    if (!Number.isNaN(to)) requestBody.size_to = to;
+  }
 
   // Shapes — array
   const shapes = parseMultiFilter(filters.shape);
@@ -307,9 +364,30 @@ async function searchDiamonds(filters = {}) {
   const searchResults = respBody?.search_results ?? {};
   const total         = searchResults.total_diamonds_found ?? diamonds.length;
 
+  const sizeFrom = filters.caratFrom != null && filters.caratFrom !== ''
+    ? parseFloat(filters.caratFrom)
+    : null;
+  const sizeTo = filters.caratTo != null && filters.caratTo !== ''
+    ? parseFloat(filters.caratTo)
+    : null;
+  const hasSizeFrom = sizeFrom != null && !Number.isNaN(sizeFrom);
+  const hasSizeTo = sizeTo != null && !Number.isNaN(sizeTo);
+
+  // Map to card payload; enforce size range locally in case RapNet ignores filters
+  let cards = diamonds.map(normalizeDiamond).map(toCardDiamond).filter(Boolean);
+  if (hasSizeFrom || hasSizeTo) {
+    cards = cards.filter((d) => {
+      const c = Number(d.carat);
+      if (Number.isNaN(c)) return false;
+      if (hasSizeFrom && c < sizeFrom) return false;
+      if (hasSizeTo && c > sizeTo) return false;
+      return true;
+    });
+  }
+
   return {
     success: true,
-    data:    diamonds.map(normalizeDiamond).filter(Boolean),
+    data:    cards,
     paginatorInfo: {
       total,
       page,
@@ -354,4 +432,11 @@ function capitalize(str) {
   return String(str).charAt(0).toUpperCase() + String(str).slice(1).toLowerCase();
 }
 
-module.exports = { getToken, searchDiamonds, getDiamondById, submitOrder, normalizeDiamond };
+module.exports = {
+  getToken,
+  searchDiamonds,
+  getDiamondById,
+  submitOrder,
+  normalizeDiamond,
+  toCardDiamond,
+};
