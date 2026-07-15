@@ -86,89 +86,110 @@ const createPolicy = async (req, res) => {
 
 const getUserPolicies = async (req, res) => {
     try {
-         const { customerId } = req.params;
-        const { roleId} = req.query;
-        const warehouseId = req?.user?.selectedWarehouse;
-        
+        const { customerId } = req.params;
+        const roleId = req.query.roleId && req.query.roleId !== 'undefined'
+            ? req.query.roleId
+            : undefined;
+        // Prefer query warehouseId; fall back to JWT selected warehouse
+        const warehouseId =
+            (req.query.warehouseId && req.query.warehouseId !== 'undefined'
+                ? req.query.warehouseId
+                : null) ||
+            req?.user?.selectedWarehouse ||
+            undefined;
+
         if (!roleId && !warehouseId) {
-            return res.status(400).json({ message: 'Either roleId or warehouseId is required in query params' });
+            return res.status(400).json({
+                message: 'Either roleId or warehouseId is required',
+            });
         }
-        
-        // Build filter for applicable policies
-        const filter = {
-            isActive: true,
-            $or: []
-        };
-        
-        if (roleId) {
-            filter.$or.push({ applicableRoles: roleId });
+
+        // Match policies for this user's role AND store (when both present)
+        const filter = { isActive: true };
+        if (roleId && warehouseId) {
+            filter.applicableRoles = roleId;
+            filter.applicableWarehouses = warehouseId;
+        } else if (roleId) {
+            filter.applicableRoles = roleId;
+        } else {
+            filter.applicableWarehouses = warehouseId;
         }
-        if (warehouseId) {
-            filter.$or.push({ applicableWarehouses: warehouseId });
-        }
-        
-        // Get all applicable policies
+
         const policies = await Policy.find(filter)
-            .populate('applicableRoles', 'role_name')
-            .populate('applicableWarehouses', 'name location')
-            .sort({ showFirst: -1, sequence: 1, createdAt: -1 });
-        
-        // Get valid policy acceptances for this customer
+            .select(
+                'title policyType content version picture sequence showFirst createdAt updatedAt',
+            )
+            .sort({ showFirst: -1, sequence: 1, createdAt: -1 })
+            .lean();
+
         const acceptances = await PolicyAcceptance.find({
             customer: customerId,
-            policy: { $ne: null } // Only get acceptances where policy exists
-        }).populate('policy', '_id');
-        
-        // Create a map of accepted policies for quick lookup
+            policy: { $ne: null },
+        })
+            .select('policy acceptedAt signedDocumentPath policyVersion')
+            .lean();
+
         const acceptanceMap = new Map();
-        acceptances.forEach(acceptance => {
-            // Add null check before accessing policy._id
-            if (acceptance.policy && acceptance.policy._id) {
-                acceptanceMap.set(acceptance.policy._id.toString(), acceptance);
-            }
+        acceptances.forEach((acceptance) => {
+            const policyRef = acceptance.policy;
+            const policyKey =
+                policyRef && typeof policyRef === 'object'
+                    ? policyRef._id?.toString()
+                    : policyRef?.toString();
+            if (policyKey) acceptanceMap.set(policyKey, acceptance);
         });
-        
-        // Add sign status to each policy
-        const policiesWithSignStatus = policies.map(policy => {
+
+        const policiesWithSignStatus = policies.map((policy) => {
             const acceptance = acceptanceMap.get(policy._id.toString());
-            
             return {
-                ...policy.toObject(),
+                _id: policy._id,
+                title: policy.title,
+                policyType: policy.policyType,
+                content: policy.content,
+                version: policy.version,
+                picture: policy.picture,
+                sequence: policy.sequence,
+                createdAt: policy.createdAt,
+                updatedAt: policy.updatedAt,
                 isSigned: !!acceptance,
-                signedAt: acceptance ? acceptance.acceptedAt : null,
-                signatureData: acceptance ? acceptance.signatureData : null,
-                signedDocumentPath: acceptance ? `uploads/${acceptance.signedDocumentPath}` : null,
-                ipAddress: acceptance ? acceptance.ipAddress : null,
-                userAgent: acceptance ? acceptance.userAgent : null,
-                policyVersion: acceptance ? acceptance.policyVersion : null,
-                acceptanceId: acceptance ? acceptance._id : null
+                signedAt: acceptance?.acceptedAt ?? null,
+                signedDocumentPath: acceptance?.signedDocumentPath
+                    ? `uploads/${acceptance.signedDocumentPath}`
+                    : null,
+                policyVersion:
+                    acceptance?.policyVersion ??
+                    (policy.version != null ? String(policy.version) : null),
             };
         });
-        
-        // Separate signed and unsigned policies
-        const signedPolicies = policiesWithSignStatus.filter(p => p.isSigned);
-        const unsignedPolicies = policiesWithSignStatus.filter(p => !p.isSigned);
-        
+
+        const signedPolicies = policiesWithSignStatus.filter((p) => p.isSigned);
+        const unsignedPolicies = policiesWithSignStatus.filter((p) => !p.isSigned);
+
         res.status(200).json({
             success: true,
             data: {
                 allPolicies: policiesWithSignStatus,
-                signedPolicies: signedPolicies,
-                unsignedPolicies: unsignedPolicies,
+                signedPolicies,
+                unsignedPolicies,
                 statistics: {
                     totalPolicies: policiesWithSignStatus.length,
                     signedCount: signedPolicies.length,
                     unsignedCount: unsignedPolicies.length,
-                    completionPercentage: policiesWithSignStatus.length > 0 
-                        ? Math.round((signedPolicies.length / policiesWithSignStatus.length) * 100) 
-                        : 0
-                }
-            }
+                    completionPercentage:
+                        policiesWithSignStatus.length > 0
+                            ? Math.round(
+                                  (signedPolicies.length /
+                                      policiesWithSignStatus.length) *
+                                      100,
+                              )
+                            : 0,
+                },
+            },
         });
     } catch (error) {
-        res.status(500).json({ 
+        res.status(500).json({
             success: false,
-            message: error.message 
+            message: error.message,
         });
     }
 };

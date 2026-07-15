@@ -929,8 +929,6 @@ const getCustomerCourses = async (req, res) => {
     // Process each course to determine unlock status
     const processedCourses = await Promise.all(
       accessibleCourses.map(async (course, index) => {
-        const courseObj = course.toObject();
-
         // Find user's enrollment in this course
         const userEnrollment = course.enrolledUsers.find(
           enrollment => enrollment.user.toString() === customerId
@@ -987,18 +985,26 @@ const getCustomerCourses = async (req, res) => {
           }
         }
 
+        // Only return fields needed by course cards / navigation (avoid full course tree + enrollments)
         return {
-          ...courseObj,
+          _id: course._id,
+          name: course.name,
+          thumbnail: course.thumbnail || '',
+          level: course.level || '',
+          courseDuration: course.courseDuration || 0,
+          courseType: course.courseType || 'Course',
+          sequence: course.sequence ?? index + 1,
           status,
           canAccess,
-          userProgress: userEnrollment ? {
-            progress: userEnrollment.progress,
-            gradePercentage: userEnrollment.gradePercentage,
-            gradeLabel: userEnrollment.gradeLabel,
-            certificateEarned: userEnrollment.certificateEarned,
-            completionDate: userEnrollment.completionDate,
-            status: userEnrollment.status
-          } : null
+          userProgress: userEnrollment
+            ? {
+                progress: userEnrollment.progress ?? 0,
+                gradePercentage: userEnrollment.gradePercentage ?? 0,
+                gradeLabel: userEnrollment.gradeLabel || null,
+                certificateEarned: !!userEnrollment.certificateEarned,
+                status: userEnrollment.status || status,
+              }
+            : null,
         };
       })
     );
@@ -1205,13 +1211,35 @@ if (!userEnrollment) {
       userQuizResults
     );
 
+    // Slim payload for chapter cards (image, title, progress, section count/nav only)
+    const slimChapters = processedChapters.map((chapter) => ({
+      _id: chapter._id,
+      title: chapter.title,
+      chapterImage: chapter.chapterImage || '',
+      sequence: chapter.sequence,
+      status: chapter.status,
+      canAccess: chapter.canAccess,
+      progress: chapter.progress ?? 0,
+      totalSections: chapter.totalSections ?? (chapter.sections?.length || 0),
+      quiz: chapter.quiz
+        ? { _id: chapter.quiz._id || chapter.quiz }
+        : null,
+      sections: (chapter.sections || []).map((section) => ({
+        _id: section._id,
+        title: section.title,
+        canAccess: section.canAccess,
+        status: section.status,
+        totalContent: section.totalContent ?? 0,
+      })),
+    }));
+
     res.status(200).json({
       success: true,
       data: {
         courseId: course._id,
         courseName: course.name,
         courseDuration: course.courseDuration,
-        chapters: processedChapters
+        chapters: slimChapters
       },
       message: 'Course chapters and sections retrieved successfully'
     });
@@ -1247,10 +1275,6 @@ const getSectionDetails = async (req, res) => {
     const userEnrollment = course.enrolledUsers.find(
       enrollment => enrollment.user.toString() === customerId.toString()
     );
-    
-
-    console.log("user Enrollment", userEnrollment);
-    console.log("user Enrollment", course);
 
     if (!userEnrollment) {
       return res.status(403).json({
@@ -1289,6 +1313,46 @@ const getSectionDetails = async (req, res) => {
       }
     }
 
+    // Unlock map for sibling section list + access checks (shared for quiz/section)
+    const userQuizResults = await getUserQuizResults(courseId, customerId);
+    const processedChapters = await processChaptersWithUnlockStatus(
+      course.chapters,
+      userEnrollment,
+      userQuizResults
+    );
+    const processedChapter = parentChapter
+      ? processedChapters.find(
+          (ch) => ch._id.toString() === parentChapter._id.toString()
+        )
+      : null;
+
+    const siblingSections = (processedChapter?.sections || []).map((section) => ({
+      _id: section._id,
+      title: section.title,
+      canAccess: section.canAccess,
+      status: section.status,
+      totalContent: section.totalContent ?? 0,
+    }));
+
+    if (processedChapter?.quiz) {
+      const quizId = processedChapter.quiz._id || processedChapter.quiz;
+      siblingSections.push({
+        _id: quizId,
+        title: 'Quiz',
+        canAccess:
+          processedChapter.progress === 100 ||
+          processedChapter.status === 'Completed',
+        status:
+          processedChapter.quizProgress?.passed ||
+          (processedChapter.quizProgress?.attempts > 0 &&
+            processedChapter.quizProgress?.passed)
+            ? 'Completed'
+            : 'Unlocked',
+        isQuiz: true,
+        totalContent: 0,
+      });
+    }
+
     // === STEP 3: Load Quiz ONLY if needed ===
     if (parentChapter?.quiz) {
       const quiz = await Quiz.findById(parentChapter.quiz);
@@ -1308,7 +1372,6 @@ const getSectionDetails = async (req, res) => {
 
         if (isQuizOnlyAccess) {
           // For quiz-only access: require all content in the chapter to be completed
-          const userQuizResults = await getUserQuizResults(courseId, customerId);
           allContentCompleted = await isChapterCompleted(parentChapter, userQuizResults, userEnrollment);
         } else {
           // Normal section: require all content in the section to be completed
@@ -1375,6 +1438,9 @@ const getSectionDetails = async (req, res) => {
           quiz: quizDetails,
           isQuiz: true, // Important flag for frontend
           canAccess: true,
+          siblingSections,
+          chapterProgress: processedChapter?.progress ?? 0,
+          chapterStatus: processedChapter?.status || 'Unlocked',
         },
         message: 'Quiz loaded successfully',
       });
@@ -1388,19 +1454,6 @@ const getSectionDetails = async (req, res) => {
       });
     }
 
-    // 🆕 CHECK SECTION ACCESS - Verify user can access this section
-    const userQuizResults = await getUserQuizResults(courseId, customerId);
-    const processedChapters = await processChaptersWithUnlockStatus(
-      course.chapters,
-      userEnrollment,
-      userQuizResults
-    );
-
-    // Find the chapter and section in processed chapters
-    const processedChapter = processedChapters.find(
-      ch => ch._id.toString() === parentChapter._id.toString()
-    );
-    
     const processedSection = processedChapter?.sections?.find(
       sec => sec._id.toString() === targetSection._id.toString()
     );
@@ -1413,21 +1466,6 @@ const getSectionDetails = async (req, res) => {
         canAccess: false
       });
     }
-
-    // 🧠 BLOCK ACCESS IF CHAPTER QUIZ EXISTS BUT NOT ATTEMPTED
-      // if (parentChapter.quiz) {
-      //   const quizResult = userQuizResults[parentChapter._id.toString()];
-
-      //   if (!quizResult || quizResult.attempts === 0) {
-      //     return res.status(403).json({
-      //       success: false,
-      //       message: 'Please attempt the chapter quiz to unlock next sections.',
-      //       canAccess: false,
-      //       reason: 'CHAPTER_QUIZ_NOT_ATTEMPTED'
-      //     });
-      //   }
-      // }
-
 
     // Process content with progress (same as before)
     const sectionProgress = userEnrollment.chapterProgress
@@ -1500,6 +1538,9 @@ const getSectionDetails = async (req, res) => {
         chapterTitle: parentChapter.title,
         canAccess: processedSection?.canAccess || true,
         status: processedSection?.status || 'Unlocked',
+        siblingSections,
+        chapterProgress: processedChapter?.progress ?? 0,
+        chapterStatus: processedChapter?.status || 'Unlocked',
       },
       message: 'Section details retrieved successfully',
     });
