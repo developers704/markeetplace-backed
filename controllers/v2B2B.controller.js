@@ -2891,56 +2891,85 @@ const postB2bPurchaseChatMessage = async (req, res) => {
 const markB2bPurchaseChatSeen = async (req, res) => {
   try {
     const { purchaseId } = req.params;
-    if (!isObjectId(purchaseId)) return res.status(400).json({ success: false, message: 'Invalid id' });
+    if (!isObjectId(purchaseId)) {
+      return res.status(400).json({ success: false, message: 'Invalid id' });
+    }
 
     const order = await B2BPurchaseRequest.findById(purchaseId);
-    if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Not found' });
+    }
     if (!canViewPurchaseRequestDoc(req, order.toObject())) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
-    const actorModel = req.b2bActor?.model || 'User';
-    const actorId = String(req.user?._id || '');
-    if (!actorId) return res.status(400).json({ success: false, message: 'Invalid actor' });
-    const now = new Date();
+    const userId = String(req.user?._id || '');
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'Invalid actor' });
+    }
 
-    let touched = false;
+    const userModel =
+      req.b2bActor?.model ||
+      (req.userType === 'customer' ? 'Customer' : 'User');
+
+    const messageIds = [];
+    const seenAt = new Date();
+
     for (const msg of order.chatMessages || []) {
-      if (String(msg.senderId || '') === actorId) continue;
-      const exists = (msg.seenBy || []).some(
-        (s) =>
-          String(s?.userId || '') === actorId &&
-          String(s?.userModel || '').toLowerCase() === String(actorModel).toLowerCase(),
+      if (String(msg.senderId || '') === userId) continue;
+      const alreadySeen = (msg.seenBy || []).some(
+        (s) => String(s?.userId || '') === userId,
       );
-      if (!exists) {
-        msg.seenBy.push({ userId: req.user._id, userModel: actorModel, seenAt: now });
-        touched = true;
-      }
+      if (alreadySeen) continue;
+
+      msg.seenBy.push({
+        userId: req.user._id,
+        userModel,
+        seenAt,
+      });
+      messageIds.push(String(msg._id));
     }
 
-    if (touched) await order.save();
-    if (touched) {
-      emitB2bPurchaseChatSeen(String(order._id), {
-        viewerId: String(req.user._id),
-        viewerModel: actorModel,
-        seenAt: now.toISOString(),
-      });
-      emitAdminChatUnreadChanged({
-        channel: 'b2b',
-        orderId: String(order._id),
-        action: 'seen',
-      });
-      emitCustomerChatUnreadChanged({
-        channel: 'b2b',
-        orderId: String(order._id),
-        action: 'seen',
-        userId: String(order.requestedBy || ''),
-        warehouseId: String(order.storeWarehouseId || ''),
+    if (messageIds.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: { updated: false, messageIds: [] },
       });
     }
-    return res.status(200).json({ success: true, data: { updated: touched } });
+
+    await order.save();
+
+    emitB2bPurchaseChatSeen(String(order._id), {
+      purchaseId: String(order._id),
+      userId,
+      userModel,
+      seenAt: seenAt.toISOString(),
+      messageIds,
+    });
+
+    emitAdminChatUnreadChanged({
+      channel: 'b2b',
+      orderId: String(order._id),
+      action: 'seen',
+    });
+    emitCustomerChatUnreadChanged({
+      channel: 'b2b',
+      orderId: String(order._id),
+      action: 'seen',
+      userId: String(order.requestedBy || ''),
+      warehouseId: String(order.storeWarehouseId || ''),
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: { updated: true, messageIds },
+    });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    console.error('Mark chat seen error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to mark messages as seen',
+    });
   }
 };
 
