@@ -14,21 +14,39 @@ const { PROJECT_ROOT } = require('../config/uploadPaths');
 const EXPORT_PRODUCT_SELECT = '_id vendorModel brand category subcategory subsubcategory';
 const EXPORT_SKU_SELECT = 'sku price tagPrice productId metalColor metalType size images gallery attributes';
 const EXPORT_FIXED_HEADERS = [
-  'Vendor Model',
-  'SKU',
+  'Sku',
+  'Vendor-Model',
+  'Description-Name',
   'cp-price',
   'Tag Price',
-  'Brand',
+  '99-Price',
   'Category',
-  'Subcategory',
-  'Sub-Subcategory',
-  'Metal Color',
-  'Metal Type',
+  'Subcategory-Department',
+  'Style',
+  'Brand-Design',
+  'Metal-Color',
+  'Metal-Type',
   'Size',
-  'Warehouses',
-  'Total Quantity',
-  'Feature Image Links',
-  'Gallery Image Links',
+  'Gender',
+  'Extent-Width',
+  'AvgWeight',
+  'Stone Type',
+  'Center-Stone',
+  'Center-Carat',
+  'Center-Shape',
+  'Center-Color',
+  'Center-Clarity',
+  'Side-Stone',
+  'Side-Carat',
+  'Side-Shape',
+  'Side-Color',
+  'Side-Clarity',
+  'Dial',
+  'Year',
+  'Model-No',
+  'Featureimages_Link',
+  'Galleryimage_Link',
+  'Vendor',
 ];
 const EXPORT_SKU_BATCH_SIZE = 300;
 const EXPORT_PRODUCT_ID_CHUNK = 2000;
@@ -149,6 +167,69 @@ const collectExportDynamicHeaders = async (productIds) => {
     .sort((a, b) => a.localeCompare(b));
 };
 
+const USED_ATTRIBUTE_KEYS = new Set([
+  'featureimageslink',
+  'featureimagelink',
+  'featureimage_link',
+  'galleryimagelink',
+  'galleryimage_link',
+  'vendormodel',
+  'vendor-model',
+  'descriptionname',
+  'description-name',
+  'cpprice',
+  'cp-price',
+  '99price',
+  '99-price',
+  'department',
+  'subcategorydepartment',
+  'subcategory-department',
+  'style',
+  'brand',
+  'design',
+  'branddesign',
+  'metalcolor',
+  'metal-color',
+  'metaltype',
+  'metal-type',
+  'size',
+  'gender',
+  'extentwidth',
+  'extent-width',
+  'width',
+  'avgweight',
+  'averageweight',
+  'avg-weight',
+  'stonetype',
+  'stone-type',
+  'centerstone',
+  'center-stone',
+  'centercarat',
+  'center-carat',
+  'centershape',
+  'center-shape',
+  'centercolor',
+  'center-color',
+  'centerclarity',
+  'center-clarity',
+  'sidestone',
+  'side-stone',
+  'sidecarat',
+  'side-carat',
+  'sideshape',
+  'side-shape',
+  'sidecolor',
+  'side-color',
+  'sideclarity',
+  'side-clarity',
+  'dial',
+  'year',
+  'modelno',
+  'model-no',
+  'modelnumber',
+  'vendor',
+]);
+
 const loadExportInventoryBySku = async (skuIds, warehouseById) => {
   const invBySku = new Map();
   if (!skuIds.length) return invBySku;
@@ -235,59 +316,235 @@ const buildVendorProductExportRow = (
 ) => {
   const product = productById.get(String(sku.productId));
   const attrs = skuAttributesToObject(sku);
+
+  const getAttr = (...keys) => {
+    for (const key of keys) {
+      const value = attrs?.[key];
+
+      if (
+        value !== undefined &&
+        value !== null &&
+        String(value).trim() !== ''
+      ) {
+        return String(value).trim();
+      }
+    }
+
+    return '';
+  };
+
   const skuInv = invBySku.get(String(sku._id)) || [];
-  const totalQuantity = skuInv.reduce((sum, i) => sum + Number(i?.quantity || 0), 0);
-  const skuWarehouseNames = Array.from(new Set(skuInv.map((i) => i.warehouseName).filter(Boolean)));
+
   const warehouseQtyByName = new Map();
+
   skuInv.forEach((inv) => {
-    if (!inv.warehouseName) return;
+    if (!inv?.warehouseName) return;
+
     warehouseQtyByName.set(
       inv.warehouseName,
-      (warehouseQtyByName.get(inv.warehouseName) || 0) + Number(inv.quantity || 0),
+      (warehouseQtyByName.get(inv.warehouseName) || 0) +
+        Number(inv.quantity || 0),
     );
   });
 
   const featureImages = Array.from(
     new Set(
-      [attrs?.featureimageslink, ...(Array.isArray(sku.images) ? sku.images : [])]
-        .map((v) => String(v || '').trim())
+      [
+        getAttr(
+          'featureimageslink',
+          'featureimagelink',
+          'featureimage_link',
+        ),
+        ...(Array.isArray(sku.images) ? sku.images : []),
+      ]
+        .map((value) => String(value || '').trim())
         .filter(Boolean),
     ),
   );
+
   const galleryImages = Array.from(
     new Set(
-      [attrs?.galleryimagelink, ...(Array.isArray(sku.gallery) ? sku.gallery : [])]
-        .map((v) => String(v || '').trim())
+      [
+        getAttr(
+          'galleryimagelink',
+          'galleryimage_link',
+        ),
+        ...(Array.isArray(sku.gallery) ? sku.gallery : []),
+      ]
+        .map((value) => String(value || '').trim())
         .filter(Boolean),
     ),
   );
 
   const row = {
-    'Vendor Model': product?.vendorModel || '',
-    SKU: sku?.sku || '',
-    'cp-price': sku?.price ?? '',
+    Sku: sku?.sku || '',
+
+    'Vendor-Model':
+      product?.vendorModel ||
+      getAttr('vendormodel', 'vendor-model'),
+
+    'Description-Name':
+      product?.descriptionName ||
+      product?.name ||
+      getAttr('descriptionname', 'description-name'),
+
+    'cp-price':
+      sku?.price !== undefined && sku?.price !== null
+        ? sku.price
+        : getAttr('cpprice', 'cp-price'),
+
     'Tag Price': sku?.tagPrice ?? '',
-    Brand: product?.brand || '',
-    Category: resolveRefName(product?.category, categoryById),
-    Subcategory: resolveRefName(product?.subcategory, subcategoryById),
-    'Sub-Subcategory': resolveRefName(product?.subsubcategory, subsubcategoryById),
-    'Metal Color': sku?.metalColor || '',
-    'Metal Type': sku?.metalType || '',
-    Size: sku?.size || '',
-    Warehouses: skuWarehouseNames.join(', '),
-    'Total Quantity': totalQuantity,
-    'Feature Image Links': featureImages.join(', '),
-    'Gallery Image Links': galleryImages.join(', '),
+
+    '99-Price': getAttr('99price', '99-price'),
+
+    Category: resolveRefName(
+      product?.category,
+      categoryById,
+    ),
+
+    'Subcategory-Department':
+      resolveRefName(
+        product?.subcategory,
+        subcategoryById,
+      ) ||
+      getAttr(
+        'department',
+        'subcategorydepartment',
+        'subcategory-department',
+      ),
+
+    Style: getAttr('style'),
+
+    'Brand-Design':
+      product?.brand ||
+      getAttr('brand', 'design', 'branddesign'),
+
+    'Metal-Color':
+      sku?.metalColor ||
+      getAttr('metalcolor', 'metal-color'),
+
+    'Metal-Type':
+      sku?.metalType ||
+      getAttr('metaltype', 'metal-type'),
+
+    Size:
+      sku?.size ||
+      getAttr('size'),
+
+    Gender: getAttr('gender'),
+
+    'Extent-Width': getAttr(
+      'extentwidth',
+      'extent-width',
+      'width',
+    ),
+
+    AvgWeight: getAttr(
+      'avgweight',
+      'averageweight',
+      'avg-weight',
+    ),
+
+    'Stone Type': getAttr(
+      'stonetype',
+      'stone-type',
+    ),
+
+    'Center-Stone': getAttr(
+      'centerstone',
+      'center-stone',
+    ),
+
+    'Center-Carat': getAttr(
+      'centercarat',
+      'center-carat',
+    ),
+
+    'Center-Shape': getAttr(
+      'centershape',
+      'center-shape',
+    ),
+
+    'Center-Color': getAttr(
+      'centercolor',
+      'center-color',
+    ),
+
+    'Center-Clarity': getAttr(
+      'centerclarity',
+      'center-clarity',
+    ),
+
+    'Side-Stone': getAttr(
+      'sidestone',
+      'side-stone',
+    ),
+
+    'Side-Carat': getAttr(
+      'sidecarat',
+      'side-carat',
+    ),
+
+    'Side-Shape': getAttr(
+      'sideshape',
+      'side-shape',
+    ),
+
+    'Side-Color': getAttr(
+      'sidecolor',
+      'side-color',
+    ),
+
+    'Side-Clarity': getAttr(
+      'sideclarity',
+      'side-clarity',
+    ),
+
+    Dial: getAttr('dial'),
+
+    Year: getAttr('year'),
+
+    'Model-No': getAttr(
+      'modelno',
+      'model-no',
+      'modelnumber',
+    ),
+
+    Featureimages_Link: featureImages.join(', '),
+
+    Galleryimage_Link: galleryImages.join(', '),
+
+    Vendor:
+      product?.vendor?.name ||
+      product?.vendorName ||
+      getAttr('vendor'),
   };
 
-  warehouseQtyHeaders.forEach((header) => {
-    const warehouseName = header.replace('Warehouse Qty - ', '');
-    const qty = Number(warehouseQtyByName.get(warehouseName) || 0);
-    row[header] = qty > 0 ? qty : '';
+  // Optional extra attributes fixed fields ke baad
+  dynamicHeaders.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(row, key)) {
+      return;
+    }
+
+    row[key] =
+      attrs?.[key] !== undefined &&
+      attrs?.[key] !== null
+        ? String(attrs[key])
+        : '';
   });
 
-  dynamicHeaders.forEach((k) => {
-    row[k] = attrs?.[k] != null ? String(attrs[k]) : '';
+  // Warehouse quantity columns bilkul last mein
+  warehouseQtyHeaders.forEach((header) => {
+    const warehouseName = header.replace(
+      'Warehouse Qty - ',
+      '',
+    );
+
+    const qty = Number(
+      warehouseQtyByName.get(warehouseName) || 0,
+    );
+
+    row[header] = qty > 0 ? qty : '';
   });
 
   return row;
@@ -326,17 +583,32 @@ async function runVendorProductExport(exportHistoryId) {
   const productIdDocs = await VendorProduct.find(match).select('_id').lean();
   const productIds = productIdDocs.map((p) => p._id);
 
-  const [warehouseDocs, dynamicHeaders] = await Promise.all([
-    Warehouse.find({}, '_id name').sort({ name: 1 }).lean(),
+  // const [warehouseDocs, dynamicHeaders] = await Promise.all([
+  //   Warehouse.find({}, '_id name').sort({ name: 1 }).lean(),
+  //   collectExportDynamicHeaders(productIds),
+  // ]);
+  const [warehouseDocs, collectedDynamicHeaders] =
+  await Promise.all([
+    Warehouse.find({}, '_id name')
+      .sort({ name: 1 })
+      .lean(),
+
     collectExportDynamicHeaders(productIds),
   ]);
+
+const dynamicHeaders = collectedDynamicHeaders.filter(
+  (key) =>
+    !USED_ATTRIBUTE_KEYS.has(
+      String(key).trim().toLowerCase(),
+    ),
+);
 
   const warehouseById = new Map(warehouseDocs.map((w) => [String(w._id), w.name || '']));
   const warehouseQtyHeaders = warehouseDocs
     .map((w) => String(w.name || '').trim())
     .filter(Boolean)
     .map((name) => `Warehouse Qty - ${name}`);
-  const headers = [...EXPORT_FIXED_HEADERS, ...warehouseQtyHeaders, ...dynamicHeaders];
+  const headers = [...EXPORT_FIXED_HEADERS, ...dynamicHeaders, ...warehouseQtyHeaders];
 
   const writeStream = fs.createWriteStream(absolutePath, { encoding: 'utf8' });
   writeStream.setMaxListeners(0);
