@@ -588,18 +588,104 @@ const adminListSuppliesOrders = async (req, res) => {
     }
 
     const status = String(req.query.status || '').trim().toUpperCase();
+    const search = String(req.query.search || '').trim();
+    const warehouseId = String(req.query.warehouse || req.query.warehouseId || '').trim();
+    const dateFrom = String(req.query.dateFrom || '').trim();
+    const dateTo = String(req.query.dateTo || '').trim();
+
     const filter = {};
     if (['PENDING_ADMIN', 'APPROVED', 'REJECTED', 'SHIPPED', 'RECEIVED'].includes(status)) {
       filter.status = status;
     }
+    if (warehouseId && isObjectId(warehouseId)) {
+      filter.warehouse = warehouseId;
+    }
 
-    const rows = await SuppliesOrder.find(filter)
-      .sort({ createdAt: -1 })
-      .populate('customer', 'username email phone_number')
-      .populate('warehouse', 'name isMain')
-      .lean();
+    if (dateFrom || dateTo) {
+      filter.createdAt = {};
+      if (dateFrom) {
+        const from = new Date(dateFrom);
+        from.setHours(0, 0, 0, 0);
+        filter.createdAt.$gte = from;
+      }
+      if (dateTo) {
+        const to = new Date(dateTo);
+        to.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = to;
+      }
+    }
 
-    return res.status(200).json({ success: true, data: rows });
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const rx = new RegExp(escaped, 'i');
+
+      const matchingCustomers = await Customer.find({
+        $or: [{ username: rx }, { email: rx }],
+      })
+        .select('_id')
+        .lean();
+
+      const matchingWarehouses = await Warehouse.find({ name: rx }).select('_id').lean();
+
+      filter.$or = [
+        { ticketNumber: rx },
+        { 'items.name': rx },
+        { 'items.sku': rx },
+        ...(matchingCustomers.length
+          ? [{ customer: { $in: matchingCustomers.map((c) => c._id) } }]
+          : []),
+        ...(matchingWarehouses.length
+          ? [{ warehouse: { $in: matchingWarehouses.map((w) => w._id) } }]
+          : []),
+      ];
+    }
+
+    const [rows, summaryRows] = await Promise.all([
+      SuppliesOrder.find(filter)
+        .sort({ createdAt: -1 })
+        .populate('customer', 'username email phone_number')
+        .populate('warehouse', 'name isMain')
+        .lean(),
+      SuppliesOrder.aggregate([
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    const summary = {
+      total: 0,
+      pending: 0,
+      approved: 0,
+      shipped: 0,
+      received: 0,
+      rejected: 0,
+    };
+    summaryRows.forEach((row) => {
+      const count = Number(row.count || 0);
+      summary.total += count;
+      if (row._id === 'PENDING_ADMIN') summary.pending = count;
+      else if (row._id === 'APPROVED') summary.approved = count;
+      else if (row._id === 'SHIPPED') summary.shipped = count;
+      else if (row._id === 'RECEIVED') summary.received = count;
+      else if (row._id === 'REJECTED') summary.rejected = count;
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: rows,
+      summary,
+      filters: {
+        status: status || null,
+        search: search || null,
+        warehouse: warehouseId || null,
+        dateFrom: dateFrom || null,
+        dateTo: dateTo || null,
+      },
+    });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
