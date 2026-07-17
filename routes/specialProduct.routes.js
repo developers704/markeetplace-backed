@@ -20,6 +20,8 @@ router.get('/search', authMiddleware,controller.searchSpecialProducts);
 router.get('/bulk-import/template', authMiddleware, controller.getCSVTemplate);
 router.post('/bulk-import', authMiddleware, uploadBulkSpecialProductCSV, controller.bulkImportSpecialProducts);
 
+router.get('/type/:type/categories', controller.specialProductController.getCategoriesByType);
+router.get('/type/:type/products', controller.specialProductController.getProductsByTypePaginated);
 router.get('/type/:type', controller.specialProductController.getProductsByType);
 router.get('/filters/:categoryId', controller.getCategoryFiltersAndProducts)
 router.get('/category/:categoryId', controller.specialProductController.getProductsByCategory);

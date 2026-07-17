@@ -103,7 +103,160 @@ const getProductsByVariantGroup = async (req, res) => {
 
 
 const specialProductController = {
-    // Get products by type
+    // Categories + product counts for a type (supplies listing — no full product payload)
+    getCategoriesByType: async (req, res) => {
+        try {
+            const { type } = req.params;
+            const baseMatch = {
+                type,
+                status: 'active',
+                isActive: { $ne: false },
+                specialCategory: { $ne: null },
+            };
+
+            const rows = await SpecialProduct.aggregate([
+                { $match: baseMatch },
+                { $group: { _id: '$specialCategory', productCount: { $sum: 1 } } },
+                {
+                    $lookup: {
+                        from: 'specialcategories',
+                        localField: '_id',
+                        foreignField: '_id',
+                        as: 'category',
+                    },
+                },
+                { $unwind: '$category' },
+                {
+                    $project: {
+                        _id: '$category._id',
+                        name: '$category.name',
+                        image: '$category.image',
+                        productCount: 1,
+                    },
+                },
+                { $sort: { name: 1 } },
+            ]);
+
+            const totalProducts = rows.reduce((sum, row) => sum + (row.productCount || 0), 0);
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    categories: rows,
+                    totalProducts,
+                },
+            });
+        } catch (error) {
+            return res.status(500).json({ success: false, message: error.message });
+        }
+    },
+
+    // Paginated slim product list for cards (search, sort, category, price filters)
+    getProductsByTypePaginated: async (req, res) => {
+        try {
+            const { type } = req.params;
+            const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+            const limit = Math.min(48, Math.max(1, parseInt(req.query.limit, 10) || 24));
+            const search = String(req.query.search || req.query.q || '').trim();
+            const sort = String(req.query.sort || 'featured');
+            const categoryId = String(req.query.categoryId || '').trim();
+
+            const minPriceRaw = req.query.minPrice;
+            const maxPriceRaw = req.query.maxPrice;
+            const minPrice =
+                minPriceRaw != null && minPriceRaw !== '' ? Number(minPriceRaw) : null;
+            const maxPrice =
+                maxPriceRaw != null && maxPriceRaw !== '' ? Number(maxPriceRaw) : null;
+
+            const query = {
+                type,
+                status: 'active',
+                isActive: { $ne: false },
+            };
+
+            if (categoryId && categoryId !== 'all' && mongoose.isValidObjectId(categoryId)) {
+                query.specialCategory = new mongoose.Types.ObjectId(categoryId);
+            }
+
+            if (search) {
+                const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const rx = new RegExp(escaped, 'i');
+                query.$or = [{ name: rx }, { sku: rx }];
+            }
+
+            if (minPrice != null && !Number.isNaN(minPrice)) {
+                query['prices.amount'] = { ...(query['prices.amount'] || {}), $gte: minPrice };
+            }
+            if (maxPrice != null && !Number.isNaN(maxPrice)) {
+                query['prices.amount'] = { ...(query['prices.amount'] || {}), $lte: maxPrice };
+            }
+
+            let sortSpec = { createdAt: -1 };
+            if (sort === 'name') sortSpec = { name: 1 };
+            else if (sort === 'price-asc') sortSpec = { 'prices.0.amount': 1, name: 1 };
+            else if (sort === 'price-desc') sortSpec = { 'prices.0.amount': -1, name: 1 };
+
+            const skip = (page - 1) * limit;
+
+            const [total, products] = await Promise.all([
+                SpecialProduct.countDocuments(query),
+                SpecialProduct.find(query)
+                    .select('name image sku stock prices specialCategory createdAt')
+                    .populate('specialCategory', 'name')
+                    .sort(sortSpec)
+                    .skip(skip)
+                    .limit(limit)
+                    .lean(),
+            ]);
+
+            const items = products.map((doc) => {
+                const cat = doc.specialCategory;
+                const firstPrice =
+                    Array.isArray(doc.prices) && doc.prices.length ? doc.prices[0] : null;
+                return {
+                    _id: doc._id,
+                    name: doc.name,
+                    image: doc.image || null,
+                    sku: doc.sku,
+                    stock: doc.stock ?? 0,
+                    prices: firstPrice
+                        ? [
+                              {
+                                  amount: firstPrice.amount,
+                                  salePrice: firstPrice.salePrice ?? null,
+                              },
+                          ]
+                        : [],
+                    specialCategory: cat
+                        ? {
+                              _id: cat._id || doc.specialCategory,
+                              name: cat.name || '',
+                          }
+                        : null,
+                };
+            });
+
+            const totalPages = Math.max(1, Math.ceil(total / limit));
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    items,
+                    pagination: {
+                        page,
+                        limit,
+                        total,
+                        totalPages,
+                        hasMore: page < totalPages,
+                    },
+                },
+            });
+        } catch (error) {
+            return res.status(500).json({ success: false, message: error.message });
+        }
+    },
+
+    // Get products by type (legacy — full documents; prefer /type/:type/products)
     getProductsByType: async (req, res) => {
         try {
             const { type } = req.params;

@@ -241,30 +241,100 @@ const removeFromWishlist = async (req, res) => {
     const { productId, productType } = req.params;
     const { skuId, sellerWarehouseId } = req.query;
     const customerId = req.user._id;
+    const canAddToCart = await resolveCanAddToCart(req.user);
 
-    const wishlist = await Wishlist.findOne({ customer: customerId });
-    if (!wishlist) {
+    if (!canAddToCart) {
+      return res.status(403).json({
+        message: 'You do not have permission to remove wishlist items.',
+      });
+    }
+
+    const warehouseId =
+      resolveWarehouseId(req.user) ||
+      (sellerWarehouseId ? String(sellerWarehouseId) : null);
+
+    const matchesItem = (item) => {
+      if (String(item.product) !== String(productId) || item.productType !== productType) {
+        return false;
+      }
+      if (skuId && String(item.skuId || '') !== String(skuId)) {
+        return false;
+      }
+      if (
+        sellerWarehouseId &&
+        String(item.sellerWarehouseId || '') !== String(sellerWarehouseId)
+      ) {
+        return false;
+      }
+      return true;
+    };
+
+    // Cart permission: can remove any matching item from this store's shared wishlist
+    let targetWishlists = [];
+    if (warehouseId) {
+      const warehouseCustomers = await Customer.find({ warehouse: warehouseId })
+        .select('_id')
+        .lean();
+      const warehouseCustomerIds = warehouseCustomers.map((c) => c._id);
+      if (!warehouseCustomerIds.some((id) => String(id) === String(customerId))) {
+        warehouseCustomerIds.push(customerId);
+      }
+      targetWishlists = await Wishlist.find({
+        customer: { $in: warehouseCustomerIds },
+      });
+    } else {
+      const own = await Wishlist.findOne({ customer: customerId });
+      if (own) targetWishlists = [own];
+    }
+
+    if (!targetWishlists.length) {
       return res.status(404).json({ message: 'Wishlist not found' });
     }
 
-    const beforeCount = wishlist.products.length;
-    // Own wishlist document only — remove by product + sku (ignore warehouse stamp mismatch)
-    wishlist.products = wishlist.products.filter((item) => {
-      if (String(item.product) !== String(productId) || item.productType !== productType) {
-        return true;
-      }
-      if (skuId && String(item.skuId || '') !== String(skuId)) {
-        return true;
-      }
-      return false;
-    });
+    let removed = false;
+    let updatedWishlist = null;
 
-    if (wishlist.products.length === beforeCount) {
+    for (const wishlist of targetWishlists) {
+      const beforeCount = wishlist.products.length;
+      wishlist.products = wishlist.products.filter((item) => !matchesItem(item));
+      if (wishlist.products.length < beforeCount) {
+        await wishlist.save();
+        removed = true;
+        updatedWishlist = wishlist;
+        break;
+      }
+    }
+
+    // Fallback: match product+sku without warehouse stamp (legacy entries)
+    if (!removed && sellerWarehouseId) {
+      for (const wishlist of targetWishlists) {
+        const beforeCount = wishlist.products.length;
+        wishlist.products = wishlist.products.filter((item) => {
+          if (String(item.product) !== String(productId) || item.productType !== productType) {
+            return true;
+          }
+          if (skuId && String(item.skuId || '') !== String(skuId)) {
+            return true;
+          }
+          return false;
+        });
+        if (wishlist.products.length < beforeCount) {
+          await wishlist.save();
+          removed = true;
+          updatedWishlist = wishlist;
+          break;
+        }
+      }
+    }
+
+    if (!removed) {
       return res.status(404).json({ message: 'Wishlist item not found' });
     }
 
-    await wishlist.save();
-    res.status(200).json({ message: 'Product removed from wishlist', wishlist });
+    res.status(200).json({
+      message: 'Product removed from wishlist',
+      wishlist: updatedWishlist,
+    });
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
@@ -431,22 +501,51 @@ const clearWishlist = async (req, res) => {
   try {
     const customerId = req.user._id;
     const warehouseId = resolveWarehouseId(req.user);
+    const canAddToCart = await resolveCanAddToCart(req.user);
 
-    const wishlist = await Wishlist.findOne({ customer: customerId });
-    if (!wishlist) {
-      return res.status(404).json({ message: 'Wishlist not found' });
+    if (!canAddToCart) {
+      return res.status(403).json({
+        message: 'You do not have permission to clear wishlist items.',
+      });
     }
 
-    if (warehouseId) {
-      wishlist.products = wishlist.products.filter(
-        (item) => String(item.sellerWarehouseId || '') !== String(warehouseId),
-      );
-    } else {
+    if (!warehouseId) {
+      const wishlist = await Wishlist.findOne({ customer: customerId });
+      if (!wishlist) {
+        return res.status(404).json({ message: 'Wishlist not found' });
+      }
       wishlist.products = [];
+      await wishlist.save();
+      return res.status(200).json({ message: 'All products removed from wishlist', wishlist });
     }
 
-    await wishlist.save();
-    res.status(200).json({ message: 'All products removed from wishlist', wishlist });
+    const warehouseCustomers = await Customer.find({ warehouse: warehouseId })
+      .select('_id')
+      .lean();
+    const warehouseCustomerIds = warehouseCustomers.map((c) => c._id);
+    if (!warehouseCustomerIds.some((id) => String(id) === String(customerId))) {
+      warehouseCustomerIds.push(customerId);
+    }
+
+    const wishlists = await Wishlist.find({
+      customer: { $in: warehouseCustomerIds },
+    });
+
+    for (const wishlist of wishlists) {
+      const before = wishlist.products.length;
+      wishlist.products = wishlist.products.filter((item) => {
+        const stamped = item.sellerWarehouseId ? String(item.sellerWarehouseId) : '';
+        // Remove items for this login store (stamped) or legacy unstamped entries
+        if (stamped && stamped === String(warehouseId)) return false;
+        if (!stamped) return false;
+        return true;
+      });
+      if (wishlist.products.length !== before) {
+        await wishlist.save();
+      }
+    }
+
+    res.status(200).json({ message: 'All products removed from wishlist' });
   } catch (error) {
     res.status(400).json({ message: error.message });
   }

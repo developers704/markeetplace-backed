@@ -10,10 +10,13 @@ const {
   clearSuppliesCart,
   placeSuppliesOrder,
   listMySuppliesOrders,
+  getMySuppliesOrder,
   adminListSuppliesOrders,
   adminGetSuppliesOrder,
   adminApproveSuppliesOrder,
   adminRejectSuppliesOrder,
+  adminShipSuppliesOrder,
+  markSuppliesOrderReceived,
 } = require('../controllers/suppliesCommerce.controller');
 
 router.get('/cart', authMiddleware, attachRoleContext, getSuppliesCart);
@@ -24,10 +27,13 @@ router.delete('/cart/clear', authMiddleware, attachRoleContext, clearSuppliesCar
 
 router.post('/orders/place', authMiddleware, attachRoleContext, placeSuppliesOrder);
 router.get('/orders/mine', authMiddleware, attachRoleContext, listMySuppliesOrders);
+router.get('/orders/mine/:id', authMiddleware, attachRoleContext, getMySuppliesOrder);
 
 router.get('/orders/admin', authMiddleware, attachRoleContext, adminListSuppliesOrders);
 router.get('/orders/admin/:id', authMiddleware, attachRoleContext, adminGetSuppliesOrder);
 router.patch('/orders/admin/:id/approve', authMiddleware, attachRoleContext, adminApproveSuppliesOrder);
 router.patch('/orders/admin/:id/reject', authMiddleware, attachRoleContext, adminRejectSuppliesOrder);
+router.patch('/orders/admin/:id/ship', authMiddleware, attachRoleContext, adminShipSuppliesOrder);
+router.patch('/orders/:id/received', authMiddleware, attachRoleContext, markSuppliesOrderReceived);
 
 module.exports = router;

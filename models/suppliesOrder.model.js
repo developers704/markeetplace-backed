@@ -38,7 +38,7 @@ const suppliesOrderSchema = new mongoose.Schema(
     currency: { type: String, default: 'USD' },
     status: {
       type: String,
-      enum: ['PENDING_ADMIN', 'APPROVED', 'REJECTED'],
+      enum: ['PENDING_ADMIN', 'APPROVED', 'REJECTED', 'SHIPPED', 'RECEIVED'],
       default: 'PENDING_ADMIN',
       index: true,
     },
@@ -47,6 +47,8 @@ const suppliesOrderSchema = new mongoose.Schema(
       rejectedAt: { type: Date, default: null },
     },
     approvedAt: { type: Date, default: null },
+    shippedAt: { type: Date, default: null },
+    receivedAt: { type: Date, default: null },
   },
   { timestamps: true },
 );

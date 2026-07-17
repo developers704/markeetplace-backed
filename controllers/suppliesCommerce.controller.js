@@ -6,7 +6,19 @@ const SuppliesWallet = require('../models/suppliesWallet.model');
 const WarehouseSuppliesInventory = require('../models/warehouseSuppliesInventory.model');
 const Warehouse = require('../models/warehouse.model');
 const Customer = require('../models/customer.model');
+const { sendSuppliesOrderEmails } = require('../utils/suppliesOrderEmail');
 const isObjectId = (value) => mongoose.isValidObjectId(String(value || '').trim());
+
+function isSuppliesAdmin(actor, user) {
+  const role = String(actor?.roleName || '').toLowerCase().trim();
+  return (
+    !!actor?.isSuperUser ||
+    !!user?.is_superuser ||
+    role === 'admin' ||
+    role === 'super admin' ||
+    role === 'superuser'
+  );
+}
 
 function ticketSupply() {
   const pad = () => Math.random().toString(36).slice(2, 7).toUpperCase();
@@ -413,6 +425,16 @@ const placeSuppliesOrder = async (req, res) => {
       .lean();
 
     const n = populated.length;
+
+    const requester = await Customer.findById(customerId).select('username email phone_number').lean();
+    populated.forEach((orderRow) => {
+      sendSuppliesOrderEmails({
+        event: 'PLACED',
+        order: orderRow,
+        requester: requester || orderRow.customer,
+      });
+    });
+
     return res.status(201).json({
       success: true,
       message:
@@ -436,12 +458,124 @@ const listMySuppliesOrders = async (req, res) => {
     const customerId = await ensureCustomer(actor, res);
     if (!customerId) return;
 
-    const rows = await SuppliesOrder.find({ customer: customerId })
-      .sort({ createdAt: -1 })
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || '10'), 10) || 10));
+    const search = String(req.query.search || '').trim();
+    const status = String(req.query.status || '').trim().toUpperCase();
+    const dateFrom = String(req.query.dateFrom || '').trim();
+    const dateTo = String(req.query.dateTo || '').trim();
+
+    const filter = { customer: customerId };
+    if (['PENDING_ADMIN', 'APPROVED', 'REJECTED', 'SHIPPED', 'RECEIVED'].includes(status)) {
+      filter.status = status;
+    }
+
+    if (dateFrom || dateTo) {
+      filter.createdAt = {};
+      if (dateFrom) {
+        const from = new Date(dateFrom);
+        from.setHours(0, 0, 0, 0);
+        filter.createdAt.$gte = from;
+      }
+      if (dateTo) {
+        const to = new Date(dateTo);
+        to.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = to;
+      }
+    }
+
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const rx = new RegExp(escaped, 'i');
+      filter.$or = [
+        { ticketNumber: rx },
+        { 'items.name': rx },
+        { 'items.sku': rx },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+
+    const [total, rows, summaryRows] = await Promise.all([
+      SuppliesOrder.countDocuments(filter),
+      SuppliesOrder.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('warehouse', 'name isMain')
+        .lean(),
+      SuppliesOrder.aggregate([
+        { $match: { customer: new mongoose.Types.ObjectId(String(customerId)) } },
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+            spent: {
+              $sum: {
+                $cond: [{ $ne: ['$status', 'REJECTED'] }, '$totalAmount', 0],
+              },
+            },
+          },
+        },
+      ]),
+    ]);
+
+    const summary = {
+      total: 0,
+      spent: 0,
+      pending: 0,
+      approved: 0,
+      shipped: 0,
+      received: 0,
+      rejected: 0,
+    };
+    summaryRows.forEach((row) => {
+      const count = Number(row.count || 0);
+      summary.total += count;
+      summary.spent += Number(row.spent || 0);
+      if (row._id === 'PENDING_ADMIN') summary.pending = count;
+      else if (row._id === 'APPROVED') summary.approved = count;
+      else if (row._id === 'SHIPPED') summary.shipped = count;
+      else if (row._id === 'RECEIVED') summary.received = count;
+      else if (row._id === 'REJECTED') summary.rejected = count;
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+      summary,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const getMySuppliesOrder = async (req, res) => {
+  try {
+    const actor = req.b2bActor;
+    const customerId = await ensureCustomer(actor, res);
+    if (!customerId) return;
+
+    const { id } = req.params;
+    if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
+
+    const order = await SuppliesOrder.findById(id)
       .populate('warehouse', 'name isMain')
+      .populate('customer', 'username email phone_number')
       .lean();
 
-    return res.status(200).json({ success: true, data: rows });
+    if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+    if (String(order.customer?._id || order.customer) !== String(customerId)) {
+      return res.status(403).json({ success: false, message: 'Not your order' });
+    }
+
+    return res.status(200).json({ success: true, data: order });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
@@ -449,18 +583,15 @@ const listMySuppliesOrders = async (req, res) => {
 
 const adminListSuppliesOrders = async (req, res) => {
   try {
-    const role = String(req.b2bActor?.roleName || '').toLowerCase().trim();
-    const isAdmin =
-      !!req.b2bActor?.isSuperUser ||
-      !!req.user?.is_superuser ||
-      role === 'admin' ||
-      role === 'super admin' ||
-      role === 'superuser';
-    if (!isAdmin) return res.status(403).json({ success: false, message: 'Admin only' });
+    if (!isSuppliesAdmin(req.b2bActor, req.user)) {
+      return res.status(403).json({ success: false, message: 'Admin only' });
+    }
 
     const status = String(req.query.status || '').trim().toUpperCase();
     const filter = {};
-    if (['PENDING_ADMIN', 'APPROVED', 'REJECTED'].includes(status)) filter.status = status;
+    if (['PENDING_ADMIN', 'APPROVED', 'REJECTED', 'SHIPPED', 'RECEIVED'].includes(status)) {
+      filter.status = status;
+    }
 
     const rows = await SuppliesOrder.find(filter)
       .sort({ createdAt: -1 })
@@ -476,14 +607,9 @@ const adminListSuppliesOrders = async (req, res) => {
 
 const adminGetSuppliesOrder = async (req, res) => {
   try {
-    const role = String(req.b2bActor?.roleName || '').toLowerCase().trim();
-    const isAdmin =
-      !!req.b2bActor?.isSuperUser ||
-      !!req.user?.is_superuser ||
-      role === 'admin' ||
-      role === 'super admin' ||
-      role === 'superuser';
-    if (!isAdmin) return res.status(403).json({ success: false, message: 'Admin only' });
+    if (!isSuppliesAdmin(req.b2bActor, req.user)) {
+      return res.status(403).json({ success: false, message: 'Admin only' });
+    }
 
     const { id } = req.params;
     if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
@@ -507,12 +633,7 @@ const adminApproveSuppliesOrder = async (req, res) => {
 
   try {
     const role = String(req.b2bActor?.roleName || '').toLowerCase().trim();
-    const isAdmin =
-      !!req.b2bActor?.isSuperUser ||
-      !!req.user?.is_superuser ||
-      role === 'admin' ||
-      role === 'super admin' ||
-      role === 'superuser';
+    const isAdmin = isSuppliesAdmin(req.b2bActor, req.user);
     if (!isAdmin) {
       await session.abortTransaction();
       return res.status(403).json({ success: false, message: 'Admin only' });
@@ -631,6 +752,12 @@ const adminApproveSuppliesOrder = async (req, res) => {
       .populate('warehouse', 'name isMain')
       .lean();
 
+    sendSuppliesOrderEmails({
+      event: 'APPROVED',
+      order: populated,
+      requester: populated?.customer,
+    });
+
     return res.status(200).json({
       success: true,
       message: 'Supplies order approved. Wallet transferred, catalog stock deducted, warehouse supplies inventory updated.',
@@ -646,14 +773,9 @@ const adminApproveSuppliesOrder = async (req, res) => {
 
 const adminRejectSuppliesOrder = async (req, res) => {
   try {
-    const role = String(req.b2bActor?.roleName || '').toLowerCase().trim();
-    const isAdmin =
-      !!req.b2bActor?.isSuperUser ||
-      !!req.user?.is_superuser ||
-      role === 'admin' ||
-      role === 'super admin' ||
-      role === 'superuser';
-    if (!isAdmin) return res.status(403).json({ success: false, message: 'Admin only' });
+    if (!isSuppliesAdmin(req.b2bActor, req.user)) {
+      return res.status(403).json({ success: false, message: 'Admin only' });
+    }
 
     const { id } = req.params;
     const reason = String(req.body?.reason || '').trim();
@@ -673,7 +795,97 @@ const adminRejectSuppliesOrder = async (req, res) => {
       .populate('customer', 'username email phone_number')
       .populate('warehouse', 'name isMain')
       .lean();
+
+    sendSuppliesOrderEmails({
+      event: 'REJECTED',
+      order: populated,
+      requester: populated?.customer,
+      rejectionReason: reason,
+    });
+
     return res.status(200).json({ success: true, data: populated });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const adminShipSuppliesOrder = async (req, res) => {
+  try {
+    if (!isSuppliesAdmin(req.b2bActor, req.user)) {
+      return res.status(403).json({ success: false, message: 'Admin only' });
+    }
+
+    const { id } = req.params;
+    if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
+
+    const order = await SuppliesOrder.findById(id);
+    if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+    if (order.status !== 'APPROVED') {
+      return res.status(400).json({ success: false, message: 'Only approved orders can be marked as shipped' });
+    }
+
+    order.status = 'SHIPPED';
+    order.shippedAt = new Date();
+    await order.save();
+
+    const populated = await SuppliesOrder.findById(order._id)
+      .populate('customer', 'username email phone_number')
+      .populate('warehouse', 'name isMain')
+      .lean();
+
+    sendSuppliesOrderEmails({
+      event: 'SHIPPED',
+      order: populated,
+      requester: populated?.customer,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Order marked as shipped',
+      data: populated,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const markSuppliesOrderReceived = async (req, res) => {
+  try {
+    const customerId = await ensureCustomer(req.b2bActor, res);
+    if (!customerId) return;
+
+    const { id } = req.params;
+    if (!isObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
+
+    const order = await SuppliesOrder.findById(id);
+    if (!order) return res.status(404).json({ success: false, message: 'Not found' });
+    if (String(order.customer) !== String(customerId)) {
+      return res.status(403).json({ success: false, message: 'Not your order' });
+    }
+    if (order.status !== 'SHIPPED') {
+      return res.status(400).json({ success: false, message: 'Order must be shipped before marking received' });
+    }
+
+    order.status = 'RECEIVED';
+    order.receivedAt = new Date();
+    await order.save();
+
+    const populated = await SuppliesOrder.findById(order._id)
+      .populate('customer', 'username email phone_number')
+      .populate('warehouse', 'name isMain')
+      .lean();
+
+    sendSuppliesOrderEmails({
+      event: 'RECEIVED',
+      order: populated,
+      requester: populated?.customer,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Order marked as received',
+      data: populated,
+    });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
@@ -687,8 +899,11 @@ module.exports = {
   clearSuppliesCart,
   placeSuppliesOrder,
   listMySuppliesOrders,
+  getMySuppliesOrder,
   adminListSuppliesOrders,
   adminGetSuppliesOrder,
   adminApproveSuppliesOrder,
   adminRejectSuppliesOrder,
+  adminShipSuppliesOrder,
+  markSuppliesOrderReceived,
 };
