@@ -440,7 +440,8 @@ function enrichSearchParams(params, rawQuery) {
       useExplicitTaxonomy ||
       mergedTypes.length > 0 ||
       filters.categoryIds.length > 0 ||
-      filters.subcategoryIds.length > 0,
+      filters.subcategoryIds.length > 0 ||
+      filters.brandHints.length > 0,
   };
 }
 

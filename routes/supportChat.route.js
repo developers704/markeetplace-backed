@@ -11,6 +11,8 @@ const {
   uploadImage,
   adminListSessions,
   adminGetSession,
+  adminGetSummary,
+  adminResendSupportEmails,
   adminAcceptSession,
   adminSendMessage,
   adminCloseSession,
@@ -39,8 +41,10 @@ router.post('/return-to-ai', returnToAi);
 router.post('/image', upload.single('file'), uploadImage);
 
 router.get('/admin/sessions', adminListSessions);
+router.get('/admin/summary', adminGetSummary);
 router.get('/admin/sessions/:sessionId', adminGetSession);
 router.post('/admin/sessions/:sessionId/accept', adminAcceptSession);
+router.post('/admin/sessions/:sessionId/resend-emails', adminResendSupportEmails);
 router.post('/admin/sessions/:sessionId/message', adminSendMessage);
 router.post('/admin/sessions/:sessionId/close', adminCloseSession);
 

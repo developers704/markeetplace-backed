@@ -3,6 +3,8 @@ const ProductListing = require('../models/productListing.model');
 const Sku = require('../models/sku.model');
 const SkuInventory = require('../models/skuInventory.model');
 const VendorProduct = require('../models/vendorProduct.model');
+const Policy = require('../models/policy.model');
+const PolicyAcceptance = require('../models/policyAcceptance.model');
 const aiImageSearch = require('./aiImageSearch.service');
 const supportChatLlm = require('./supportChatLlm.service');
 const supportChatCatalogCache = require('./supportChatCatalogCache.service');
@@ -149,6 +151,9 @@ const SEARCH_STOP_TOKENS = new Set([
 const PRODUCT_SIGNAL_WORDS =
   /\b(gold|silver|platinum|diamond|diamonds|ring|rings|chain|chains|necklace|necklaces|bracelet|bracelets|earring|earrings|watch|watches|pendant|pendants|bangle|bangles|band|bands|18kt|14kt|10kt|22kt|yellow|white|rose|ruby|sapphire|emerald|pearl|labgrown|lab\s*grown|carat|karat)\b/i;
 
+const NON_PRODUCT_QUESTION_PATTERN =
+  /\b(who|what|when|where|why|how|can|could|would|should|know|name|owner|founder|about|tell|first|my|your)\b/i;
+
 const NON_SKU_WORDS = new Set([
   'gold', 'ring', 'rings', 'chain', 'chains', 'watch', 'watches', 'diamond', 'diamonds',
   'silver', 'platinum', 'necklace', 'necklaces', 'bracelet', 'bracelets', 'earring', 'earrings',
@@ -205,7 +210,9 @@ function hasProductQuerySignals(text) {
   const q = normalizeBrowseQuery(text) || String(text || '').toLowerCase();
   if (!q || q.length < 3) return false;
   const tokens = tokenizeSearchQuery(q).filter((t) => !STOP_SEARCH_TERMS.has(t));
-  return PRODUCT_SIGNAL_WORDS.test(q) || tokens.length >= 1;
+  if (PRODUCT_SIGNAL_WORDS.test(q)) return true;
+  if (NON_PRODUCT_QUESTION_PATTERN.test(q)) return false;
+  return tokens.length >= 1 && q.split(/\s+/).length <= 3;
 }
 
 function isMetaQuestion(text) {
@@ -223,6 +230,50 @@ function isWarehouseListWithoutSku(text) {
   );
 }
 
+const NON_PRODUCT_LOOKUP_PATTERN =
+  /\b(polic(?:y|ies)|(?:total|all|list|show)\s+(?:brand|brands|categor(?:y|ies)|subcategor(?:y|ies))|how\s+many\s+(?:brand|brands|categor(?:y|ies)|subcategor(?:y|ies)))\b/i;
+
+const NON_PRODUCT_SEARCH_TERMS = new Set([
+  'policy',
+  'policies',
+  'brand',
+  'brands',
+  'category',
+  'categories',
+  'subcategory',
+  'subcategories',
+  'warehouse',
+  'warehouses',
+  'store',
+  'stores',
+  'total',
+  'count',
+  'complete',
+  'full',
+  'content',
+  'assigned',
+  'my',
+  'your',
+]);
+
+function isNonProductLookupQuery(text) {
+  return NON_PRODUCT_LOOKUP_PATTERN.test(String(text || ''));
+}
+
+function hasMeaningfulSearchKeywords(params) {
+  if (!params) return false;
+  const keywords = (params.searchKeywords || [])
+    .map((k) => String(k).trim().toLowerCase())
+    .filter(
+      (k) =>
+        k.length >= 2 &&
+        !STOP_SEARCH_TERMS.has(k) &&
+        !SEARCH_STOP_TOKENS.has(k) &&
+        !NON_PRODUCT_SEARCH_TERMS.has(k),
+    );
+  return keywords.length >= 1;
+}
+
 function hasValidProductSearchParams(params) {
   if (!params) return false;
   if (params.taxonomyResolved) return true;
@@ -230,6 +281,9 @@ function hasValidProductSearchParams(params) {
   if ((params.subcategoryIds?.length || 0) > 0 || (params.categoryIds?.length || 0) > 0) {
     return true;
   }
+  if ((params.brandHints?.length || 0) > 0) return true;
+  if (hasMeaningfulSearchKeywords(params)) return true;
+
   const keywords = (params.searchKeywords || []).filter((k) => !STOP_SEARCH_TERMS.has(String(k).toLowerCase()));
   const types = params.productTypes || [];
   const hints = [...(params.metalHints || []), ...(params.stoneHints || []), ...(params.brandHints || [])];
@@ -239,6 +293,38 @@ function hasValidProductSearchParams(params) {
       Boolean(resolveTypeMatcher(String(term).toLowerCase())),
   );
   return jewelryTerms.length >= 1;
+}
+
+function buildProductSearchIntentFromText(text) {
+  if (isNonProductLookupQuery(text)) return null;
+  if (!hasProductQuerySignals(text)) return null;
+  if (!wantsProductBrowse(text) && !isDirectProductKeywordQuery(text)) return null;
+
+  const browseQuery = extractProductBrowseQuery(text);
+  if (!browseQuery) return null;
+
+  const searchParams = normalizeSearchParams(
+    {
+      displayQuery: browseQuery,
+      searchKeywords: tokenizeSearchQuery(browseQuery),
+      productTypes: [categoryLabelToProductType(extractCategoryKeyword(text))].filter(Boolean),
+      sortBy: /\b(low\s+to\s+high|cheapest)\b/i.test(text) ? 'price_asc' : 'inventory_desc',
+      rawQuery: text,
+    },
+    text,
+  );
+
+  if (!hasValidProductSearchParams(searchParams)) return null;
+
+  return {
+    intent: 'product_search',
+    sku: null,
+    searchTerm: searchParams.displayQuery,
+    searchParams,
+    category: extractCategoryKeyword(text),
+    includeWarehouseBreakdown: false,
+    includeProducts: true,
+  };
 }
 
 function isKeywordInventoryQuestion(text) {
@@ -306,7 +392,8 @@ function isDirectProductKeywordQuery(text) {
   if (/\b(how many|how much|count|total|stock|inventory|quantity|qty)\b/i.test(String(text || ''))) {
     return false;
   }
-  return hasProductQuerySignals(text) && q.split(/\s+/).length <= 6;
+  if (NON_PRODUCT_QUESTION_PATTERN.test(q)) return false;
+  return hasProductQuerySignals(text) && q.split(/\s+/).length <= 4;
 }
 
 function resolveTypeMatcher(token) {
@@ -1009,6 +1096,220 @@ async function enrichAiMatches(matches = []) {
   );
 }
 
+async function getCatalogStatsFacts(statsType = 'brands') {
+  await supportChatCatalogCache.ensureCatalogCache();
+  if (!supportChatTaxonomy.isTaxonomyLoaded()) {
+    await supportChatTaxonomy.loadTaxonomyFromDb();
+  }
+  const taxonomy = supportChatTaxonomy.getTaxonomy();
+  const meta = supportChatCatalogCache.getCatalogCacheMeta();
+
+  if (statsType === 'categories') {
+    return {
+      type: 'catalog_stats',
+      statsType: 'categories',
+      count: taxonomy.categories.length,
+      samples: taxonomy.categories.slice(0, 20).map((c) => c.name),
+      totalInStockModels: meta.count || 0,
+    };
+  }
+
+  if (statsType === 'subcategories') {
+    return {
+      type: 'catalog_stats',
+      statsType: 'subcategories',
+      count: taxonomy.subcategories.length,
+      samples: taxonomy.subcategories.slice(0, 20).map((s) => s.name),
+      totalInStockModels: meta.count || 0,
+    };
+  }
+
+  return {
+    type: 'catalog_stats',
+    statsType: 'brands',
+    count: taxonomy.brands.length,
+    samples: taxonomy.brands.slice(0, 20),
+    totalInStockModels: meta.count || 0,
+  };
+}
+
+async function getCustomerPolicyFacts(customerId) {
+  if (!customerId) {
+    const activePolicies = await Policy.find({ isActive: true })
+      .select('title policyType version sequence')
+      .sort({ sequence: 1 })
+      .limit(20)
+      .lean();
+    return {
+      type: 'policy_info',
+      customerId: null,
+      activePolicies: activePolicies.map((p) => ({
+        title: p.title,
+        policyType: p.policyType,
+        version: p.version,
+      })),
+      acceptedPolicies: [],
+    };
+  }
+
+  const [acceptances, activePolicies] = await Promise.all([
+    PolicyAcceptance.find({ customer: customerId })
+      .populate('policy', 'title policyType version isActive content')
+      .sort({ acceptedAt: -1 })
+      .limit(15)
+      .lean(),
+    Policy.find({ isActive: true })
+      .select('title policyType version sequence content')
+      .sort({ sequence: 1 })
+      .limit(20)
+      .lean(),
+  ]);
+
+  const acceptedPolicies = acceptances
+    .filter((a) => a.policy)
+    .map((a) => ({
+      title: a.policy.title,
+      policyType: a.policy.policyType,
+      version: a.policy.version,
+      acceptedAt: a.acceptedAt,
+      policyVersion: a.policyVersion,
+      summary: String(a.policy.content || '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 400),
+    }));
+
+  return {
+    type: 'policy_info',
+    customerId: String(customerId),
+    activePolicies: activePolicies.map((p) => ({
+      title: p.title,
+      policyType: p.policyType,
+      version: p.version,
+      summary: String(p.content || '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 400),
+    })),
+    acceptedPolicies,
+  };
+}
+
+function detectCatalogStatsType(text) {
+  const raw = String(text || '').toLowerCase();
+  if (/\bsubcategor/.test(raw)) return 'subcategories';
+  if (/\bcategor/.test(raw)) return 'categories';
+  return 'brands';
+}
+
+function shouldAcceptLlmIntent(mapped, text) {
+  if (!mapped) return false;
+
+  if (
+    (mapped.intent === 'needs_clarification' ||
+      mapped.intent === 'conversational' ||
+      mapped.intent === 'greeting') &&
+    !isNonProductLookupQuery(text) &&
+    (wantsProductBrowse(text) || isDirectProductKeywordQuery(text) || isAvailabilityProductQuestion(text))
+  ) {
+    const browseQuery = extractProductBrowseQuery(text);
+    if (browseQuery) {
+      const params = normalizeSearchParams(
+        {
+          displayQuery: browseQuery,
+          searchKeywords: tokenizeSearchQuery(browseQuery),
+          rawQuery: text,
+        },
+        text,
+      );
+      if (hasValidProductSearchParams(params)) return false;
+    }
+  }
+
+  if (mapped.intent === 'product_search') {
+    if (isMetaQuestion(text) || isNonProductLookupQuery(text)) return false;
+    if (NON_PRODUCT_QUESTION_PATTERN.test(text) && !PRODUCT_SIGNAL_WORDS.test(text)) return false;
+    if (!hasValidProductSearchParams(mapped.searchParams)) return false;
+  }
+
+  if (
+    (mapped.intent === 'conversational' || mapped.intent === 'greeting') &&
+    hasProductQuerySignals(text) &&
+    wantsProductBrowse(text)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+async function buildCatalogStatsReply(text, context = {}, statsType = 'brands') {
+  const facts = await getCatalogStatsFacts(statsType);
+  const llmText = await supportChatLlm.ragReply(text, context, facts);
+  if (llmText) {
+    return { text: llmText, products: [], escalate: false };
+  }
+
+  const label =
+    statsType === 'categories' ? 'categories' : statsType === 'subcategories' ? 'subcategories' : 'brands';
+  const samples = facts.samples?.length ? facts.samples.slice(0, 8).join(', ') : 'N/A';
+  return {
+    text: [
+      `Our live catalog has **${facts.count.toLocaleString()}** ${label}.`,
+      facts.totalInStockModels
+        ? `There are **${Number(facts.totalInStockModels).toLocaleString()}** in-stock product models indexed.`
+        : '',
+      samples !== 'N/A' ? `Examples: ${samples}.` : '',
+      '',
+      'Ask me to **search products**, **check a SKU**, or **show stock** for a keyword.',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+    products: [],
+    escalate: false,
+  };
+}
+
+async function buildPolicyReply(text, context = {}) {
+  const facts = await getCustomerPolicyFacts(context.customerId);
+  const llmText = await supportChatLlm.ragReply(text, { ...context, retrievedFacts: facts }, facts);
+  if (llmText) {
+    return { text: llmText, products: [], escalate: false };
+  }
+
+  if (facts.acceptedPolicies?.length) {
+    const lines = facts.acceptedPolicies.slice(0, 5).map((p) => `• **${p.title}** (v${p.version})`);
+    return {
+      text: [
+        'Here are policies linked to your account:',
+        '',
+        ...lines,
+        '',
+        'Ask about a specific policy title for more detail, or say **connect to human** for help.',
+      ].join('\n'),
+      products: [],
+      escalate: false,
+    };
+  }
+
+  if (facts.activePolicies?.length) {
+    const lines = facts.activePolicies.slice(0, 5).map((p) => `• **${p.title}** (${p.policyType}, v${p.version})`);
+    return {
+      text: ['Active marketplace policies:', '', ...lines].join('\n'),
+      products: [],
+      escalate: false,
+    };
+  }
+
+  return {
+    text: 'No active policies are available right now. You can still ask about **SKU stock**, **product search**, or **connect to human**.',
+    products: [],
+    escalate: false,
+  };
+}
+
 async function maybePolish(userMessage, payload) {
   if (!supportChatLlm.isPolishEnabled() || !payload?.factual) return payload.text;
   const polished = await supportChatLlm.polishResponse(userMessage, {
@@ -1168,7 +1469,13 @@ async function buildConversationalReply(text, context = {}) {
     }
   }
 
-  const llmText = await supportChatLlm.conversationalReply(text, context);
+  const llmText = await supportChatLlm.conversationalReply(text, {
+    ...context,
+    retrievedFacts: {
+      customerName: context.customerName || null,
+      canAnswerName: Boolean(context.customerName && context.customerName !== 'Customer'),
+    },
+  });
   if (llmText) {
     return { text: llmText, products: [], escalate: false };
   }
@@ -1228,6 +1535,31 @@ function mapAnalysisToIntent(analysis, text) {
     };
   }
 
+  if (intentName === 'catalog_stats') {
+    return {
+      intent: 'catalog_stats',
+      statsType: analysis.statsType || detectCatalogStatsType(text),
+      sku: null,
+      searchTerm: null,
+      searchParams: null,
+      category: null,
+      includeWarehouseBreakdown: false,
+      includeProducts: false,
+    };
+  }
+
+  if (intentName === 'policy_info' || /\bpolic(?:y|ies)\b/i.test(text)) {
+    return {
+      intent: 'policy_info',
+      sku: null,
+      searchTerm: null,
+      searchParams: null,
+      category: null,
+      includeWarehouseBreakdown: false,
+      includeProducts: false,
+    };
+  }
+
   if (intentName === 'needs_clarification' || isWarehouseListWithoutSku(text)) {
     return {
       intent: 'needs_clarification',
@@ -1241,20 +1573,40 @@ function mapAnalysisToIntent(analysis, text) {
     };
   }
 
-  if (
-    (intentName === 'product_search' || intentName === 'product_browse') &&
-    hasValidProductSearchParams(searchParams) &&
-    !isMetaQuestion(text)
-  ) {
-    return {
-      intent: 'product_search',
-      sku: null,
-      searchTerm: searchParams.displayQuery,
-      searchParams,
-      category: analysis.category || extractCategoryKeyword(searchParams.displayQuery) || extractCategoryKeyword(text),
-      includeWarehouseBreakdown: false,
-      includeProducts: true,
-    };
+  if ((intentName === 'product_search' || intentName === 'product_browse') && !isMetaQuestion(text)) {
+    let finalParams = searchParams;
+    if (!hasValidProductSearchParams(finalParams)) {
+      const fallbackQuery = normalizeBrowseQuery(text);
+      if (fallbackQuery) {
+        const fallbackParams = normalizeSearchParams(
+          {
+            displayQuery: fallbackQuery,
+            searchKeywords: tokenizeSearchQuery(fallbackQuery),
+            productTypes: [categoryLabelToProductType(extractCategoryKeyword(text))].filter(Boolean),
+            rawQuery: text,
+          },
+          text,
+        );
+        if (hasValidProductSearchParams(fallbackParams)) {
+          finalParams = fallbackParams;
+        }
+      }
+    }
+
+    if (hasValidProductSearchParams(finalParams)) {
+      return {
+        intent: 'product_search',
+        sku: null,
+        searchTerm: finalParams.displayQuery,
+        searchParams: finalParams,
+        category:
+          analysis.category ||
+          extractCategoryKeyword(finalParams.displayQuery) ||
+          extractCategoryKeyword(text),
+        includeWarehouseBreakdown: false,
+        includeProducts: true,
+      };
+    }
   }
 
   if (intentName === 'inventory_summary' || isKeywordInventoryQuestion(text)) {
@@ -1314,6 +1666,14 @@ async function resolveIntent(text, context = {}) {
     };
   }
 
+  if (supportChatLlm.isAvailable()) {
+    const analysis = await supportChatLlm.analyzeUserRequest(text, context);
+    const mapped = mapAnalysisToIntent(analysis, text);
+    if (mapped && shouldAcceptLlmIntent(mapped, text)) {
+      return mapped;
+    }
+  }
+
   if (isMetaQuestion(text)) {
     return {
       intent: 'meta_question',
@@ -1349,6 +1709,30 @@ async function resolveIntent(text, context = {}) {
       category: extractCategoryKeyword(text),
       includeWarehouseBreakdown: false,
       includeProducts: /\b(show|some|sku|sample|list)\b/i.test(text),
+    };
+  }
+
+  if (isNonProductLookupQuery(text)) {
+    if (/\bpolic(?:y|ies)\b/i.test(text)) {
+      return {
+        intent: 'policy_info',
+        sku: null,
+        searchTerm: null,
+        searchParams: null,
+        category: null,
+        includeWarehouseBreakdown: false,
+        includeProducts: false,
+      };
+    }
+    return {
+      intent: 'catalog_stats',
+      statsType: detectCatalogStatsType(text),
+      sku: null,
+      searchTerm: null,
+      searchParams: null,
+      category: null,
+      includeWarehouseBreakdown: false,
+      includeProducts: false,
     };
   }
 
@@ -1407,6 +1791,7 @@ async function resolveIntent(text, context = {}) {
   if (
     browseParamsEarly &&
     hasValidProductSearchParams(browseParamsEarly) &&
+    !isNonProductLookupQuery(text) &&
     (wantsProductBrowse(text) ||
       isAvailabilityProductQuestion(text) ||
       isDirectProductKeywordQuery(text) ||
@@ -1422,18 +1807,6 @@ async function resolveIntent(text, context = {}) {
       includeWarehouseBreakdown: false,
       includeProducts: true,
     };
-  }
-
-  if (supportChatLlm.isAvailable()) {
-    const analysis = await supportChatLlm.analyzeUserRequest(text, context);
-    const mapped = mapAnalysisToIntent(analysis, text);
-    if (
-      mapped &&
-      !(mapped.intent === 'conversational' && hasProductQuerySignals(text)) &&
-      !(mapped.intent === 'greeting' && hasProductQuerySignals(text))
-    ) {
-      return mapped;
-    }
   }
 
   const sku = extractSkuFromQuery(text);
@@ -1510,7 +1883,12 @@ async function resolveIntent(text, context = {}) {
 
   const searchTerm = extractSearchTerm(text);
   const searchParams = searchTerm ? normalizeSearchParams(searchTerm) : null;
-  if (searchTerm && searchParams && hasValidProductSearchParams(searchParams)) {
+  if (
+    searchTerm &&
+    searchParams &&
+    hasValidProductSearchParams(searchParams) &&
+    !isNonProductLookupQuery(text)
+  ) {
     return {
       intent: 'product_search',
       sku: null,
@@ -1520,6 +1898,11 @@ async function resolveIntent(text, context = {}) {
       includeWarehouseBreakdown: wantsWarehouseBreakdown(text),
       includeProducts: true,
     };
+  }
+
+  const forcedProductSearch = buildProductSearchIntentFromText(text);
+  if (forcedProductSearch) {
+    return forcedProductSearch;
   }
 
   return {
@@ -1562,6 +1945,14 @@ async function processTextMessage(text, context = {}) {
       ...context,
       clarificationType: intent.clarificationType || 'general',
     });
+  }
+
+  if (intent.intent === 'catalog_stats') {
+    return buildCatalogStatsReply(trimmed, context, intent.statsType || detectCatalogStatsType(trimmed));
+  }
+
+  if (intent.intent === 'policy_info') {
+    return buildPolicyReply(trimmed, context);
   }
 
   if (intent.intent === 'conversational' || intent.intent === 'greeting') {
@@ -1650,4 +2041,11 @@ module.exports = {
   loadMoreCatalogProducts,
   SUPPORT_CHAT_INITIAL_PRODUCTS,
   SUPPORT_CHAT_MORE_PRODUCTS,
+  __test__: {
+    resolveIntent,
+    hasValidProductSearchParams,
+    hasMeaningfulSearchKeywords,
+    buildProductSearchIntentFromText,
+    normalizeSearchParams,
+  },
 };

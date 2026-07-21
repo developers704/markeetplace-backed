@@ -88,6 +88,7 @@ const laravoRoutes      = require('../routes/laravo.route');
 const adminChatUnreadRoutes = require('../routes/adminChatUnread.route');
 const aiImageSearchRoutes = require('../routes/aiImageSearch.route');
 const supportChatRoutes = require('../routes/supportChat.route');
+const supportChatEmailRecipientRoutes = require('../routes/supportChatEmailRecipient.route');
 
 const router = express.Router();
 
@@ -179,5 +180,6 @@ router.use('/rapnet',       rapnetRoutes);
 router.use('/laravo',       laravoRoutes);
 router.use('/ai-image-search', aiImageSearchRoutes);
 router.use('/support-chat', supportChatRoutes);
+router.use('/support-chat-email-recipients', supportChatEmailRecipientRoutes);
 
 module.exports = router;

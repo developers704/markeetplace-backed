@@ -9,11 +9,30 @@ const {
   emitSupportChatMessage,
   emitSupportChatSessionUpdated,
 } = require('../socket/supportChat.socket');
+const { notifySupportChatRecipientsForSession } = require('../services/supportChatEmailRecipient.service');
 
 function normId(ref) {
   if (ref == null) return '';
   if (typeof ref === 'object' && ref._id != null) return String(ref._id);
   return String(ref);
+}
+
+async function appendHumanSupportEmailNotifications(session, options = {}) {
+  const result = await notifySupportChatRecipientsForSession(session, options);
+  if (result.sent > 0) {
+    await appendMessage(session, {
+      role: 'system',
+      text: `Support request emailed to **${result.sent}** configured agent${result.sent === 1 ? '' : 's'}.`,
+      senderName: 'System',
+    });
+  } else if (result.skipped) {
+    await appendMessage(session, {
+      role: 'system',
+      text: 'Human support requested. Configure email recipients in **Settings → Support Chat Email Recipients**.',
+      senderName: 'System',
+    });
+  }
+  return result;
 }
 
 async function isPrivilegedAdminUser(user) {
@@ -52,9 +71,65 @@ function toMessagePayload(msg) {
   };
 }
 
-function toSessionPayload(session) {
+function toSessionPayload(session, options = {}) {
   const plain = session.toObject ? session.toObject() : session;
-  return {
+  const allMessages = plain.messages || [];
+  const limit =
+    options.limit !== undefined
+      ? Math.min(Math.max(Number(options.limit) || 0, 0), 100)
+      : null;
+  const before = options.before ? String(options.before) : null;
+
+  let selectedMessages = allMessages;
+  let messagePagination = null;
+
+  if (limit !== null) {
+    const total = allMessages.length;
+    if (limit === 0) {
+      selectedMessages = [];
+      messagePagination = {
+        total,
+        hasOlder: total > 0,
+        hasNewer: false,
+        oldestLoadedId: null,
+        newestLoadedId: total ? allMessages[total - 1]?._id : null,
+      };
+    } else if (before) {
+      const beforeIdx = allMessages.findIndex((m) => String(m._id) === before);
+      if (beforeIdx === -1) {
+        selectedMessages = allMessages.slice(-limit);
+      } else {
+        const start = Math.max(0, beforeIdx - limit);
+        selectedMessages = allMessages.slice(start, beforeIdx);
+      }
+      const startIdx =
+        selectedMessages.length > 0
+          ? allMessages.findIndex((m) => String(m._id) === String(selectedMessages[0]._id))
+          : -1;
+      messagePagination = {
+        total,
+        hasOlder: startIdx > 0,
+        hasNewer: beforeIdx !== -1 && beforeIdx < allMessages.length,
+        oldestLoadedId: selectedMessages[0]?._id || null,
+        newestLoadedId: selectedMessages[selectedMessages.length - 1]?._id || null,
+      };
+    } else {
+      selectedMessages = allMessages.slice(-limit);
+      const startIdx =
+        selectedMessages.length > 0
+          ? allMessages.findIndex((m) => String(m._id) === String(selectedMessages[0]._id))
+          : -1;
+      messagePagination = {
+        total,
+        hasOlder: startIdx > 0,
+        hasNewer: false,
+        oldestLoadedId: selectedMessages[0]?._id || null,
+        newestLoadedId: selectedMessages[selectedMessages.length - 1]?._id || null,
+      };
+    }
+  }
+
+  const payload = {
     _id: String(plain._id),
     customerId: String(plain.customerId),
     customerName: plain.customerName || '',
@@ -67,10 +142,16 @@ function toSessionPayload(session) {
     unreadByAdmin: plain.unreadByAdmin || 0,
     status: plain.status,
     lastMessageAt: plain.lastMessageAt,
-    messages: (plain.messages || []).map(toMessagePayload),
+    messages: selectedMessages.map(toMessagePayload),
     createdAt: plain.createdAt,
     updatedAt: plain.updatedAt,
   };
+
+  if (messagePagination) {
+    payload.messagePagination = messagePagination;
+  }
+
+  return payload;
 }
 
 function customerDisplayName(user) {
@@ -141,7 +222,18 @@ exports.getMySession = async (req, res) => {
       session.unreadByCustomer = 0;
       await session.save();
     }
-    return res.json({ success: true, data: toSessionPayload(session) });
+
+    const limitParam = req.query.limit;
+    const parsedLimit =
+      limitParam !== undefined && limitParam !== null && String(limitParam).trim() !== ''
+        ? Math.min(Math.max(parseInt(String(limitParam), 10) || 0, 0), 100)
+        : 40;
+    const before = req.query.before ? String(req.query.before) : null;
+
+    return res.json({
+      success: true,
+      data: toSessionPayload(session, { limit: parsedLimit, before }),
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message || 'Failed to load chat' });
   }
@@ -270,6 +362,8 @@ exports.sendMessage = async (req, res) => {
     const aiResult = await supportChatAgent.processTextMessage(text, {
       recentMessages,
       customerName: customerDisplayName(req.user),
+      customerId: req.user._id,
+      selectedWarehouseId: req.user.selectedWarehouse || session.warehouseId || null,
     });
     if (aiResult.escalate) {
       session.mode = 'human_pending';
@@ -290,6 +384,7 @@ exports.sendMessage = async (req, res) => {
         text: 'A support specialist has been notified and will join this conversation shortly.',
         senderName: 'System',
       });
+      await appendHumanSupportEmailNotifications(session);
       emitSupportChatSessionUpdated({
         sessionId: String(session._id),
         mode: session.mode,
@@ -342,6 +437,7 @@ exports.requestHuman = async (req, res) => {
       text: 'Human support requested.',
       senderName: 'System',
     });
+    await appendHumanSupportEmailNotifications(session);
     await session.save();
 
     emitSupportChatSessionUpdated({
@@ -513,10 +609,20 @@ exports.adminGetSession = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Session not found' });
     }
 
+    const limitParam = req.query.limit;
+    const parsedLimit =
+      limitParam !== undefined && limitParam !== null && String(limitParam).trim() !== ''
+        ? Math.min(Math.max(parseInt(String(limitParam), 10) || 0, 0), 100)
+        : 40;
+    const before = req.query.before ? String(req.query.before) : null;
+
     session.unreadByAdmin = 0;
     await session.save();
 
-    return res.json({ success: true, data: toSessionPayload(session) });
+    return res.json({
+      success: true,
+      data: toSessionPayload(session, { limit: parsedLimit, before }),
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -629,5 +735,82 @@ exports.adminCloseSession = async (req, res) => {
     return res.json({ success: true, data: toSessionPayload(session) });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+async function getSupportChatAdminSummary() {
+  const [humanPendingCount, openCount, agg] = await Promise.all([
+    SupportChat.countDocuments({ status: 'open', mode: 'human_pending' }),
+    SupportChat.countDocuments({ status: 'open' }),
+    SupportChat.aggregate([
+      { $match: { status: 'open', mode: { $in: ['human_pending', 'human_active'] } } },
+      { $group: { _id: null, unread: { $sum: '$unreadByAdmin' } } },
+    ]),
+  ]);
+
+  return {
+    humanPendingCount,
+    openSessionCount: openCount,
+    unreadHumanSessions: agg[0]?.unread || 0,
+    badgeCount: humanPendingCount,
+  };
+}
+
+exports.adminGetSummary = async (req, res) => {
+  try {
+    if (!(await isPrivilegedAdminUser(req.user))) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+    const data = await getSupportChatAdminSummary();
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.adminResendSupportEmails = async (req, res) => {
+  try {
+    if (!(await isPrivilegedAdminUser(req.user))) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const note = String(req.body?.note || '').trim();
+    const session = await SupportChat.findById(req.params.sessionId);
+    if (!session) {
+      return res.status(404).json({ success: false, message: 'Session not found' });
+    }
+
+    const result = await notifySupportChatRecipientsForSession(session, {
+      note,
+      requestedByName: req.user.username || req.user.email || 'Admin',
+    });
+
+    if (!result.sent) {
+      return res.status(400).json({
+        success: false,
+        message: 'No active support chat email recipients configured in settings.',
+      });
+    }
+
+    const systemMessage = await appendMessage(session, {
+      role: 'system',
+      text: `Support request re-emailed to **${result.sent}** configured agent${result.sent === 1 ? '' : 's'}.`,
+      senderName: 'System',
+    });
+
+    await session.save();
+    emitSupportChatMessage(String(session._id), toMessagePayload(systemMessage));
+
+    return res.json({
+      success: true,
+      message: `Notification sent to ${result.sent} recipient(s)`,
+      data: {
+        sent: result.sent,
+        recipients: result.recipients,
+        systemMessage: toMessagePayload(systemMessage),
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Failed to resend emails' });
   }
 };
