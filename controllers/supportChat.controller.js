@@ -363,6 +363,7 @@ exports.sendMessage = async (req, res) => {
       recentMessages,
       customerName: customerDisplayName(req.user),
       customerId: req.user._id,
+      roleId: req.user.role,
       selectedWarehouseId: req.user.selectedWarehouse || session.warehouseId || null,
     });
     if (aiResult.escalate) {

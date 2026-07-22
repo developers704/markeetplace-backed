@@ -3,8 +3,10 @@ const ProductListing = require('../models/productListing.model');
 const Sku = require('../models/sku.model');
 const SkuInventory = require('../models/skuInventory.model');
 const VendorProduct = require('../models/vendorProduct.model');
-const Policy = require('../models/policy.model');
-const PolicyAcceptance = require('../models/policyAcceptance.model');
+const {
+  getUserApplicablePolicies,
+  policyContentSummary,
+} = require('./userApplicablePolicies.service');
 const aiImageSearch = require('./aiImageSearch.service');
 const supportChatLlm = require('./supportChatLlm.service');
 const supportChatCatalogCache = require('./supportChatCatalogCache.service');
@@ -1133,67 +1135,38 @@ async function getCatalogStatsFacts(statsType = 'brands') {
   };
 }
 
-async function getCustomerPolicyFacts(customerId) {
-  if (!customerId) {
-    const activePolicies = await Policy.find({ isActive: true })
-      .select('title policyType version sequence')
-      .sort({ sequence: 1 })
-      .limit(20)
-      .lean();
-    return {
-      type: 'policy_info',
-      customerId: null,
-      activePolicies: activePolicies.map((p) => ({
-        title: p.title,
-        policyType: p.policyType,
-        version: p.version,
-      })),
-      acceptedPolicies: [],
-    };
-  }
+async function getCustomerPolicyFacts(customerId, context = {}) {
+  const roleId = context.roleId || null;
+  const warehouseId = context.selectedWarehouseId || context.warehouseId || null;
 
-  const [acceptances, activePolicies] = await Promise.all([
-    PolicyAcceptance.find({ customer: customerId })
-      .populate('policy', 'title policyType version isActive content')
-      .sort({ acceptedAt: -1 })
-      .limit(15)
-      .lean(),
-    Policy.find({ isActive: true })
-      .select('title policyType version sequence content')
-      .sort({ sequence: 1 })
-      .limit(20)
-      .lean(),
-  ]);
+  const applicable = await getUserApplicablePolicies({
+    customerId,
+    roleId,
+    warehouseId,
+  });
 
-  const acceptedPolicies = acceptances
-    .filter((a) => a.policy)
-    .map((a) => ({
-      title: a.policy.title,
-      policyType: a.policy.policyType,
-      version: a.policy.version,
-      acceptedAt: a.acceptedAt,
-      policyVersion: a.policyVersion,
-      summary: String(a.policy.content || '')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 400),
-    }));
+  const mapPolicyForRag = (p) => ({
+    id: String(p._id),
+    title: p.title,
+    policyType: p.policyType,
+    version: p.version,
+    isSigned: p.isSigned,
+    signedAt: p.signedAt,
+    policyVersion: p.policyVersion,
+    summary: policyContentSummary(p.content),
+  });
 
   return {
     type: 'policy_info',
-    customerId: String(customerId),
-    activePolicies: activePolicies.map((p) => ({
-      title: p.title,
-      policyType: p.policyType,
-      version: p.version,
-      summary: String(p.content || '')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 400),
-    })),
-    acceptedPolicies,
+    customerId: customerId ? String(customerId) : null,
+    roleId: applicable.roleId,
+    warehouseId: applicable.warehouseId,
+    statistics: applicable.statistics,
+    allPolicies: applicable.allPolicies.map(mapPolicyForRag),
+    signedPolicies: applicable.signedPolicies.map(mapPolicyForRag),
+    unsignedPolicies: applicable.unsignedPolicies.map(mapPolicyForRag),
+    activePolicies: applicable.allPolicies.map(mapPolicyForRag),
+    acceptedPolicies: applicable.signedPolicies.map(mapPolicyForRag),
   };
 }
 
@@ -1273,38 +1246,63 @@ async function buildCatalogStatsReply(text, context = {}, statsType = 'brands') 
 }
 
 async function buildPolicyReply(text, context = {}) {
-  const facts = await getCustomerPolicyFacts(context.customerId);
+  const facts = await getCustomerPolicyFacts(context.customerId, context);
   const llmText = await supportChatLlm.ragReply(text, { ...context, retrievedFacts: facts }, facts);
   if (llmText) {
     return { text: llmText, products: [], escalate: false };
   }
 
-  if (facts.acceptedPolicies?.length) {
-    const lines = facts.acceptedPolicies.slice(0, 5).map((p) => `• **${p.title}** (v${p.version})`);
+  const stats = facts.statistics || {};
+  const header = [
+    'Here are **your assigned policies** for your role and store:',
+    '',
+    `• Total: **${stats.totalPolicies || 0}**`,
+    `• Signed: **${stats.signedCount || 0}**`,
+    `• Pending signature: **${stats.unsignedCount || 0}**`,
+  ].join('\n');
+
+  if (facts.unsignedPolicies?.length) {
+    const pending = facts.unsignedPolicies.slice(0, 8).map(
+      (p) => `• **${p.title}** (${p.policyType}, v${p.version}) — *pending*`,
+    );
     return {
       text: [
-        'Here are policies linked to your account:',
+        header,
         '',
-        ...lines,
+        '**Pending your signature:**',
+        ...pending,
         '',
-        'Ask about a specific policy title for more detail, or say **connect to human** for help.',
+        'Ask about a policy by name for a short summary, or say **connect to human** for help.',
       ].join('\n'),
       products: [],
       escalate: false,
     };
   }
 
-  if (facts.activePolicies?.length) {
-    const lines = facts.activePolicies.slice(0, 5).map((p) => `• **${p.title}** (${p.policyType}, v${p.version})`);
+  if (facts.signedPolicies?.length) {
+    const signed = facts.signedPolicies.slice(0, 8).map(
+      (p) => `• **${p.title}** (v${p.policyVersion || p.version}) — signed`,
+    );
     return {
-      text: ['Active marketplace policies:', '', ...lines].join('\n'),
+      text: [
+        header,
+        '',
+        '**Signed policies:**',
+        ...signed,
+        '',
+        'Ask about a specific policy title for more detail.',
+      ].join('\n'),
       products: [],
       escalate: false,
     };
   }
 
   return {
-    text: 'No active policies are available right now. You can still ask about **SKU stock**, **product search**, or **connect to human**.',
+    text: [
+      'No policies are assigned to your **role and warehouse** right now.',
+      '',
+      'If you expected policies here, confirm your store selection in the marketplace, or say **connect to human**.',
+    ].join('\n'),
     products: [],
     escalate: false,
   };

@@ -90,7 +90,6 @@ const getUserPolicies = async (req, res) => {
         const roleId = req.query.roleId && req.query.roleId !== 'undefined'
             ? req.query.roleId
             : undefined;
-        // Prefer query warehouseId; fall back to JWT selected warehouse
         const warehouseId =
             (req.query.warehouseId && req.query.warehouseId !== 'undefined'
                 ? req.query.warehouseId
@@ -104,87 +103,16 @@ const getUserPolicies = async (req, res) => {
             });
         }
 
-        // Match policies for this user's role AND store (when both present)
-        const filter = { isActive: true };
-        if (roleId && warehouseId) {
-            filter.applicableRoles = roleId;
-            filter.applicableWarehouses = warehouseId;
-        } else if (roleId) {
-            filter.applicableRoles = roleId;
-        } else {
-            filter.applicableWarehouses = warehouseId;
-        }
-
-        const policies = await Policy.find(filter)
-            .select(
-                'title policyType content version picture sequence showFirst createdAt updatedAt',
-            )
-            .sort({ showFirst: -1, sequence: 1, createdAt: -1 })
-            .lean();
-
-        const acceptances = await PolicyAcceptance.find({
-            customer: customerId,
-            policy: { $ne: null },
-        })
-            .select('policy acceptedAt signedDocumentPath policyVersion')
-            .lean();
-
-        const acceptanceMap = new Map();
-        acceptances.forEach((acceptance) => {
-            const policyRef = acceptance.policy;
-            const policyKey =
-                policyRef && typeof policyRef === 'object'
-                    ? policyRef._id?.toString()
-                    : policyRef?.toString();
-            if (policyKey) acceptanceMap.set(policyKey, acceptance);
+        const { getUserApplicablePolicies } = require('../services/userApplicablePolicies.service');
+        const data = await getUserApplicablePolicies({
+            customerId,
+            roleId,
+            warehouseId,
         });
-
-        const policiesWithSignStatus = policies.map((policy) => {
-            const acceptance = acceptanceMap.get(policy._id.toString());
-            return {
-                _id: policy._id,
-                title: policy.title,
-                policyType: policy.policyType,
-                content: policy.content,
-                version: policy.version,
-                picture: policy.picture,
-                sequence: policy.sequence,
-                createdAt: policy.createdAt,
-                updatedAt: policy.updatedAt,
-                isSigned: !!acceptance,
-                signedAt: acceptance?.acceptedAt ?? null,
-                signedDocumentPath: acceptance?.signedDocumentPath
-                    ? `uploads/${acceptance.signedDocumentPath}`
-                    : null,
-                policyVersion:
-                    acceptance?.policyVersion ??
-                    (policy.version != null ? String(policy.version) : null),
-            };
-        });
-
-        const signedPolicies = policiesWithSignStatus.filter((p) => p.isSigned);
-        const unsignedPolicies = policiesWithSignStatus.filter((p) => !p.isSigned);
 
         res.status(200).json({
             success: true,
-            data: {
-                allPolicies: policiesWithSignStatus,
-                signedPolicies,
-                unsignedPolicies,
-                statistics: {
-                    totalPolicies: policiesWithSignStatus.length,
-                    signedCount: signedPolicies.length,
-                    unsignedCount: unsignedPolicies.length,
-                    completionPercentage:
-                        policiesWithSignStatus.length > 0
-                            ? Math.round(
-                                  (signedPolicies.length /
-                                      policiesWithSignStatus.length) *
-                                      100,
-                              )
-                            : 0,
-                },
-            },
+            data,
         });
     } catch (error) {
         res.status(500).json({
