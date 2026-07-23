@@ -6,6 +6,11 @@ const Product = require('../models/product.model.js');
 const csvParser = require('csv-parser');
 const fss = require('fs');
 const { Parser } = require('json2csv');
+const {
+    cascadeDeleteForCategoryTree,
+    cascadeDeleteBySubcategoryIds,
+    cascadeDeleteBySubSubCategoryIds,
+} = require('../services/catalogCascadeDelete.service');
 
 
 const notDeletedFilter = { isDeleted: { $ne: true } };
@@ -507,13 +512,26 @@ const deleteCategory = async (req, res) => {
         }
 
         const subcategoryIds = await SubCategory.find({ parentCategory: id, ...notDeletedFilter }).distinct('_id');
+        const subSubCategoryIds = subcategoryIds.length
+            ? await SubSubCategory.find({ parentSubCategory: { $in: subcategoryIds }, ...notDeletedFilter }).distinct('_id')
+            : [];
+
+        const cascade = await cascadeDeleteForCategoryTree({
+            categoryIds: [id],
+            subcategoryIds,
+            subSubCategoryIds,
+        });
+
         await Category.updateOne({ _id: id }, { $set: { isDeleted: true } });
         await SubCategory.updateMany({ parentCategory: id }, { $set: { isDeleted: true } });
         if (subcategoryIds.length) {
             await SubSubCategory.updateMany({ parentSubCategory: { $in: subcategoryIds } }, { $set: { isDeleted: true } });
         }
 
-        res.status(200).json({ message: 'Category and associated subcategories soft deleted successfully' });
+        res.status(200).json({
+            message: 'Category and associated catalog data deleted successfully',
+            cascade,
+        });
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
@@ -527,9 +545,20 @@ const deleteSubcategory = async (req, res) => {
             return res.status(404).json({ message: 'Subcategory not found' });
         }
 
+        const subSubCategoryIds = await SubSubCategory.find({
+            parentSubCategory: id,
+            ...notDeletedFilter,
+        }).distinct('_id');
+
+        const cascade = await cascadeDeleteBySubcategoryIds([id], subSubCategoryIds);
+
         await SubCategory.updateOne({ _id: id }, { $set: { isDeleted: true } });
         await SubSubCategory.updateMany({ parentSubCategory: id }, { $set: { isDeleted: true } });
-        res.status(200).json({ message: 'Subcategory soft deleted successfully' });
+
+        res.status(200).json({
+            message: 'Subcategory and associated catalog data deleted successfully',
+            cascade,
+        });
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
@@ -549,13 +578,26 @@ const deleteCategoriesBulk = async (req, res) => {
 
         const categoryIds = categories.map((category) => category._id);
         const subcategoryIds = await SubCategory.find({ parentCategory: { $in: categoryIds }, ...notDeletedFilter }).distinct('_id');
+        const subSubCategoryIds = subcategoryIds.length
+            ? await SubSubCategory.find({ parentSubCategory: { $in: subcategoryIds }, ...notDeletedFilter }).distinct('_id')
+            : [];
+
+        const cascade = await cascadeDeleteForCategoryTree({
+            categoryIds,
+            subcategoryIds,
+            subSubCategoryIds,
+        });
+
         await Category.updateMany({ _id: { $in: categoryIds } }, { $set: { isDeleted: true } });
         await SubCategory.updateMany({ parentCategory: { $in: categoryIds } }, { $set: { isDeleted: true } });
         if (subcategoryIds.length) {
             await SubSubCategory.updateMany({ parentSubCategory: { $in: subcategoryIds } }, { $set: { isDeleted: true } });
         }
 
-        res.status(200).json({ message: 'Categories and associated subcategories soft deleted successfully' });
+        res.status(200).json({
+            message: 'Categories and associated catalog data deleted successfully',
+            cascade,
+        });
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
@@ -574,10 +616,20 @@ const deleteSubcategoriesBulk = async (req, res) => {
         }
 
         const subcategoryIds = subcategories.map((subcategory) => subcategory._id);
+        const subSubCategoryIds = await SubSubCategory.find({
+            parentSubCategory: { $in: subcategoryIds },
+            ...notDeletedFilter,
+        }).distinct('_id');
+
+        const cascade = await cascadeDeleteBySubcategoryIds(subcategoryIds, subSubCategoryIds);
+
         await SubCategory.updateMany({ _id: { $in: subcategoryIds } }, { $set: { isDeleted: true } });
         await SubSubCategory.updateMany({ parentSubCategory: { $in: subcategoryIds } }, { $set: { isDeleted: true } });
 
-        res.status(200).json({ message: 'Subcategories soft deleted successfully' });
+        res.status(200).json({
+            message: 'Subcategories and associated catalog data deleted successfully',
+            cascade,
+        });
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
@@ -627,12 +679,18 @@ const deleteSubSubCategoriesBulk = async (req, res) => {
             return res.status(404).json({ message: 'No sub-sub-categories found' });
         }
 
+        const subSubIds = subSubCategories.map((subSubCategory) => subSubCategory._id);
+        const cascade = await cascadeDeleteBySubSubCategoryIds(subSubIds);
+
         await SubSubCategory.updateMany(
-            { _id: { $in: subSubCategories.map((subSubCategory) => subSubCategory._id) } },
+            { _id: { $in: subSubIds } },
             { $set: { isDeleted: true } }
         );
 
-        res.status(200).json({ message: 'Sub-sub-categories soft deleted successfully' });
+        res.status(200).json({
+            message: 'Sub-sub-categories and associated catalog data deleted successfully',
+            cascade,
+        });
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
