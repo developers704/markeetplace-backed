@@ -12,7 +12,7 @@ const {
     cascadeDeleteBySubSubCategoryIds,
 } = require('../services/catalogCascadeDelete.service');
 
-
+// new category filter to exclude deleted categories and subcategories
 const notDeletedFilter = { isDeleted: { $ne: true } };
 
 const parseAllowedRoles = (value) => {
