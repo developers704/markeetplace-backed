@@ -289,23 +289,24 @@ async function attachVendorStockToRequests(requests) {
   });
 }
 
+
 const B2B_PURCHASE_CSV_FIELDS = [
-  'Order ID',
-  'Created At',
-  'Vendor Model',
+  'DATE',
+  'TICKET NUMBER',
+  'STORE REQUESTING',
   'SKU',
-  'Product Title',
-  'Brand',
+  'DESCRIPTION',
+  'VENDOR MODEL',
+  'QTY IN MAIN',
+  'QTY REQUESTED',
+  'VENDOR',
+  'BRAND',
+  'Image LINK',
   'Metal Type',
   'Metal Color',
   'Size',
-  'Quantity',
-  'Store',
-  'Vendor Warehouse',
   'Requested By',
   'Requester Email',
-  'Vendor Stock',
-  // 'Shortage Quantity',
   'Status',
   'Return Request Status',
   'DM Approved At',
@@ -326,31 +327,69 @@ function b2bPurchaseCsvDate(value) {
     hour12: true,
   });
 }
+function getCsvImageLink(images) {
+  if (!Array.isArray(images) || !images.length) {
+    return '';
+  }
 
+  const image = images[0];
+
+  if (typeof image === 'string') {
+    return image;
+  }
+
+  return (
+    image?.url ||
+    image?.imageUrl ||
+    image?.secure_url ||
+    image?.src ||
+    ''
+  );
+}
 function b2bPurchaseRequestToCsvRow(request) {
   return {
-    'Order ID': request.orderNumber || '',
-    'Created At': b2bPurchaseCsvDate(request.createdAt),
-    'Vendor Model': request.vendorProductId?.vendorModel || '',
+    DATE: b2bPurchaseCsvDate(request.createdAt),
+
+    'TICKET NUMBER': request.orderNumber || '',
+
+    'STORE REQUESTING': request.storeWarehouseId?.name || '',
+
     SKU: request.skuId?.sku || '',
-    'Product Title': request.skuId?.attributes.descriptionname || '',
-    Brand: request.vendorProductId?.brand || '',
+
+    DESCRIPTION:
+      request.skuId?.attributes?.descriptionname ||
+      request.vendorProductId?.title ||
+      '',
+
+    'VENDOR MODEL':
+      request.vendorProductId?.vendorModel || '',
+
+    'QTY IN MAIN':
+      Number(request.vendorStock || 0),
+
+    'QTY REQUESTED':
+      Number(request.quantity || 0),
+
+    VENDOR:
+      request.skuId?.attributes?.vendor || '',
+
+    BRAND: request.vendorProductId?.brand || '',
+
+    'Image LINK':
+      getCsvImageLink(request.skuId?.images),
+  //  now commit key and values 
     'Metal Type': request.skuId?.metalType || '',
     'Metal Color': request.skuId?.metalColor || '',
     Size: request.skuId?.size || '',
-    Quantity: Number(request.quantity || 0),
-    Store: request.storeWarehouseId?.name || '',
-    'Vendor Warehouse': request.vendorWarehouseId?.name || '',
+  
     'Requested By': request.requestedByUser?.username || '',
     'Requester Email': request.requestedByUser?.email || '',
-    'Vendor Stock': Number(request.vendorStock || 0),
-    // 'Shortage Quantity': Number(request.shortageQuantity || 0),
     Status: request.status || '',
     'Return Request Status': request.returnRequest?.status || '',
     'DM Approved At': b2bPurchaseCsvDate(request.approvals?.dm?.approvedAt),
     'CM Approved At': b2bPurchaseCsvDate(request.approvals?.cm?.approvedAt),
     'Admin Approved At': b2bPurchaseCsvDate(request.approvals?.admin?.approvedAt),
-  };
+    };
 }
 
 /**
