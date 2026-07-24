@@ -19,6 +19,8 @@ function escapeRegex(value) {
 
 const SUPPORT_CHAT_INITIAL_PRODUCTS = 15;
 const SUPPORT_CHAT_MORE_PRODUCTS = 15;
+/** Visual image-search matches returned to the chat UI */
+const SUPPORT_CHAT_IMAGE_MATCHES = 30;
 
 /** Chat cards show tagPrice only (not cp/wholesale price). */
 function chatProductDisplayPrice(...sources) {
@@ -1051,7 +1053,7 @@ async function loadMoreCatalogProducts(searchParams, loadedCount, options = {}) 
   return searchCatalogProducts(searchParams, { limit, offset, includeMessage: false });
 }
 
-async function enrichAiMatches(matches = []) {
+async function enrichAiMatches(matches = [], limit = SUPPORT_CHAT_IMAGE_MATCHES) {
   if (!matches.length) return [];
   const skus = [...new Set(matches.map((m) => m.sku).filter(Boolean))];
   const skuDocs = await Sku.find({ sku: { $in: skus } })
@@ -1064,8 +1066,10 @@ async function enrichAiMatches(matches = []) {
     .lean();
   const listingMap = new Map(listings.map((l) => [String(l.productId), l]));
 
+  const max = Math.max(1, Number(limit) || SUPPORT_CHAT_IMAGE_MATCHES);
+
   return Promise.all(
-    matches.slice(0, SUPPORT_CHAT_INITIAL_PRODUCTS).map(async (match) => {
+    matches.slice(0, max).map(async (match) => {
       const skuDoc = skuMap.get(String(match.sku));
       const listing = skuDoc ? listingMap.get(String(skuDoc.productId)) : null;
       let warehouses = [];
@@ -1328,11 +1332,11 @@ async function processImageUpload(buffer, filename) {
 
   const [analysisRes, searchRes] = await Promise.all([
     aiImageSearch.analyzeByImage(buffer, filename).catch(() => null),
-    aiImageSearch.searchByImage(buffer, filename, SUPPORT_CHAT_INITIAL_PRODUCTS).catch(() => null),
+    aiImageSearch.searchByImage(buffer, filename, SUPPORT_CHAT_IMAGE_MATCHES).catch(() => null),
   ]);
 
   const imageAnalysis = analysisRes?.imageAnalysis || searchRes?.imageAnalysis || null;
-  const products = await enrichAiMatches(searchRes?.matches || []);
+  const products = await enrichAiMatches(searchRes?.matches || [], SUPPORT_CHAT_IMAGE_MATCHES);
 
   const parts = [];
   if (imageAnalysis?.summary) parts.push(imageAnalysis.summary);
@@ -1340,11 +1344,12 @@ async function processImageUpload(buffer, filename) {
   else parts.push('Image analyzed against live catalog index.');
 
   if (products.length) {
+    const onHand = products.filter((p) => Number(p.totalInventory || 0) > 0).length;
     parts.push(
-      `\n**${products.length}** visually similar in-stock SKU${products.length === 1 ? '' : 's'} found. Warehouse quantities are included where available.`,
+      `\n**${products.length}** visually similar SKU${products.length === 1 ? '' : 's'} found (${onHand} on hand). Warehouse quantities are included where available.`,
     );
   } else {
-    parts.push('\nNo close in-stock visual matches found. Try an exact SKU lookup.');
+    parts.push('\nNo close visual matches found. Try an exact SKU lookup.');
   }
 
   return {
@@ -2039,6 +2044,7 @@ module.exports = {
   loadMoreCatalogProducts,
   SUPPORT_CHAT_INITIAL_PRODUCTS,
   SUPPORT_CHAT_MORE_PRODUCTS,
+  SUPPORT_CHAT_IMAGE_MATCHES,
   __test__: {
     resolveIntent,
     hasValidProductSearchParams,

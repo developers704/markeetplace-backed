@@ -119,7 +119,7 @@ async function analyzeByImage(buffer, filename) {
   return mapSearchResponse(data);
 }
 
-async function searchByImage(buffer, filename, topK = 12) {
+async function searchByImage(buffer, filename, topK = 25) {
   const form = new FormData();
   form.append('file', buffer, {
     filename: filename || 'query.jpg',

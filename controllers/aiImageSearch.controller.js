@@ -1,28 +1,120 @@
-const Product = require('../models/product.model');
+const path = require('path');
+const Sku = require('../models/sku.model');
+const SkuInventory = require('../models/skuInventory.model');
+const ProductListing = require('../models/productListing.model');
 const aiImageSearch = require('../services/aiImageSearch.service');
+const { productUploadPublicUrl } = require('../config/uploadPaths');
 
-function productDisplayName(product, fallback) {
-  return (
-    product?.attributes?.descriptionname ||
-    product?.attributes?.descriptionName ||
-    product?.name ||
-    fallback
-  );
+function readAttr(attrs, key) {
+  if (!attrs) return null;
+  if (typeof attrs.get === 'function') {
+    return attrs.get(key) ?? attrs.get(key.toLowerCase()) ?? null;
+  }
+  return attrs[key] ?? attrs[key.toLowerCase()] ?? null;
 }
 
+function normalizeImageUrl(raw) {
+  if (!raw) return '';
+  const s = String(raw).trim();
+  if (!s) return '';
+  if (s.startsWith('http://') || s.startsWith('https://')) return s;
+  if (s.startsWith('/uploads/')) return s;
+  const base = path.basename(s);
+  return productUploadPublicUrl(base) || `/uploads/products/${base}`;
+}
+
+function displayPrice(...sources) {
+  for (const src of sources) {
+    if (!src) continue;
+    const tag = Number(src.tagPrice);
+    if (Number.isFinite(tag) && tag > 0) return tag;
+    const price = Number(src.price);
+    if (Number.isFinite(price) && price > 0) return price;
+  }
+  return 0;
+}
+
+function skuTitle(skuDoc, listing) {
+  const desc =
+    readAttr(skuDoc?.attributes, 'descriptionname') ||
+    listing?.title ||
+    skuDoc?.sku;
+  return String(desc || 'Product').trim();
+}
+
+function mapWarehouseRows(inventories) {
+  return inventories
+    .map((inv) => ({
+      name: inv?.warehouse?.name || 'Warehouse',
+      quantity: Number(inv?.quantity || 0),
+      isMain: inv?.warehouse?.isMain === true,
+    }))
+    .filter((row) => row.quantity > 0)
+    .sort((a, b) => {
+      if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+      return b.quantity - a.quantity;
+    });
+}
+
+/**
+ * Enrich AI visual matches with catalog product details + live inventory
+ * (same shape support-chat image search uses for cards).
+ */
 async function enrichSkuItems(items) {
   if (!items?.length) return items || [];
+
   const skus = [...new Set(items.map((m) => m.sku).filter(Boolean))];
-  const products = await Product.find({ sku: { $in: skus } })
-    .select('sku name attributes')
+  const skuDocs = await Sku.find({ sku: { $in: skus } })
+    .select('sku productId price tagPrice images gallery attributes')
     .lean();
-  const bySku = new Map(products.map((p) => [String(p.sku), p]));
+  const skuMap = new Map(skuDocs.map((s) => [String(s.sku), s]));
+  const productIds = [...new Set(skuDocs.map((s) => String(s.productId)).filter(Boolean))];
+  const listings = await ProductListing.find({ productId: { $in: productIds } })
+    .select('productId title totalInventory defaultSku')
+    .lean();
+  const listingMap = new Map(listings.map((l) => [String(l.productId), l]));
+
+  const skuObjectIds = skuDocs.map((s) => s._id).filter(Boolean);
+  const allInvRows = skuObjectIds.length
+    ? await SkuInventory.find({ skuId: { $in: skuObjectIds } })
+        .populate('warehouse', 'name isMain')
+        .lean()
+    : [];
+
+  const invBySkuId = new Map();
+  for (const row of allInvRows) {
+    const key = String(row.skuId);
+    if (!invBySkuId.has(key)) invBySkuId.set(key, []);
+    invBySkuId.get(key).push(row);
+  }
 
   return items.map((item) => {
-    const product = bySku.get(String(item.sku));
+    const skuDoc = skuMap.get(String(item.sku));
+    const listing = skuDoc ? listingMap.get(String(skuDoc.productId)) : null;
+    const invRows = skuDoc?._id ? invBySkuId.get(String(skuDoc._id)) || [] : [];
+    const warehouses = mapWarehouseRows(invRows);
+    const totalInventory = invRows.reduce((sum, inv) => sum + Number(inv.quantity || 0), 0);
+
+    const imageUrl =
+      normalizeImageUrl(item.imageUrl) ||
+      (skuDoc?.images?.[0] ? normalizeImageUrl(skuDoc.images[0]) : '') ||
+      item.imageUrl;
+
     return {
       ...item,
-      nameSuggestion: productDisplayName(product, item.nameSuggestion),
+      productId: listing
+        ? String(listing.productId)
+        : skuDoc
+          ? String(skuDoc.productId)
+          : '',
+      title: skuDoc ? skuTitle(skuDoc, listing) : item.nameSuggestion || item.sku,
+      nameSuggestion: skuDoc
+        ? skuTitle(skuDoc, listing)
+        : item.nameSuggestion || `Product ${item.sku}`,
+      imageUrl,
+      price: displayPrice(skuDoc, listing?.defaultSku),
+      totalInventory,
+      warehouses,
     };
   });
 }
@@ -66,7 +158,7 @@ exports.searchByImage = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No image file provided' });
     }
 
-    const topK = Math.min(50, Math.max(1, Number(req.query.top_k) || 12));
+    const topK = Math.min(50, Math.max(1, Number(req.query.top_k) || 25));
     const result = await aiImageSearch.searchByImage(
       req.file.buffer,
       req.file.originalname,
